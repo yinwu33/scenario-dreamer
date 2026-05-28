@@ -1,0 +1,52 @@
+# Smoke-test config for CLDM training on the Waymo validation split.
+#
+# Usage:
+#   uv run python train.py --config-name config_cldm_test
+
+scratch_root: ${oc.env:SCRATCH_ROOT}
+dataset_root: ${oc.env:DATASET_ROOT}
+project_root: ${oc.env:PROJECT_ROOT}
+waymo_data_folder: ${dataset_root}/waymo_open_dataset_motion_v_1_1_0
+waymo_train_folder: ${waymo_data_folder}/training
+waymo_val_folder: ${waymo_data_folder}/validation
+waymo_test_folder: ${waymo_data_folder}/testing
+
+hydra:
+  run:
+    dir: ${project_root}/slurm_logs/${now:%Y.%m.%d}/${now:%H.%M.%S}/${hydra.job.override_dirname}
+
+model_name: cldm
+
+defaults:
+  - dataset_name: waymo
+  - dataset@ae.dataset: waymo_autoencoder
+  - train@ae.train: waymo_autoencoder
+  - eval@ae.eval: waymo_autoencoder
+  - model@ae.model: waymo_autoencoder
+  - datamodule@ae.datamodule: waymo_autoencoder
+  - dataset@ldm.dataset: waymo_cldm
+  - train@ldm.train: waymo_cldm
+  - eval@ldm.eval: waymo_cldm
+  - model@ldm.model: waymo_cldm
+  - datamodule@ldm.datamodule: waymo_cldm
+  - sim: base
+  - _self_
+
+ldm:
+  dataset:
+    condition_metadata_dir: ${project_root}/metadata
+    condition_stats_split: val
+
+  datamodule:
+    train_split_name: val
+    val_split_name: val
+    train_batch_size: 8
+    val_batch_size: 8
+
+  train:
+    devices: 1
+    max_steps: 2
+    limit_train_batches: 2
+    limit_val_batches: 1
+    num_samples_to_visualize: 0
+    run_name: scenario_dreamer_cldm_val_smoke
