@@ -2,6 +2,7 @@ import os
 import hydra
 from models.scenario_dreamer_autoencoder import ScenarioDreamerAutoEncoder
 from models.scenario_dreamer_ldm import ScenarioDreamerLDM
+from models.scenario_dreamer_cldm import ScenarioDreamerCLDM
 from models.ctrl_sim import CtRLSim
 
 import torch
@@ -67,7 +68,7 @@ def train_ctrl_sim(cfg, save_dir=None):
     trainer.fit(model, datamodule, ckpt_path=ckpt_path)
 
 
-def train_ldm(cfg, cfg_ae, save_dir=None):
+def train_ldm(cfg, cfg_ae, save_dir=None, model_cls=ScenarioDreamerLDM):
     """ Train the Scenario Dreamer Latent Diffusion Model."""
     # check if latent stats are cached, if not, compute them
     if not os.path.exists(cfg.dataset.latent_stats_path):
@@ -125,9 +126,9 @@ def train_ldm(cfg, cfg_ae, save_dir=None):
     
     # hack to avoid gpu memory issues when loading from checkpoint
     if ckpt_path is not None:
-        model = ScenarioDreamerLDM.load_from_checkpoint(ckpt_path, cfg=cfg, cfg_ae=cfg_ae, map_location='cpu')
+        model = model_cls.load_from_checkpoint(ckpt_path, cfg=cfg, cfg_ae=cfg_ae, map_location='cpu')
     else:
-        model = ScenarioDreamerLDM(cfg=cfg, cfg_ae=cfg_ae)
+        model = model_cls(cfg=cfg, cfg_ae=cfg_ae)
     trainer.fit(model, datamodule, ckpt_path=ckpt_path)
 
 
@@ -194,7 +195,7 @@ def main(cfg):
         OmegaConf.set_struct(cfg, False)   # unlock to allow setting dataset name
         cfg.dataset_name = dataset_name
         OmegaConf.set_struct(cfg, True)    # relock
-    elif cfg.model_name == 'ldm':
+    elif cfg.model_name in ['ldm', 'cldm']:
         model_name = cfg.model_name
         cfg_ae = cfg.ae
         cfg = cfg.ldm
@@ -222,6 +223,8 @@ def main(cfg):
         train_autoencoder(cfg, save_dir)
     elif model_name == 'ldm':
         train_ldm(cfg, cfg_ae, save_dir) 
+    elif model_name == 'cldm':
+        train_ldm(cfg, cfg_ae, save_dir, model_cls=ScenarioDreamerCLDM)
     elif model_name == 'ctrl_sim':
         train_ctrl_sim(cfg, save_dir)
 

@@ -3,6 +3,7 @@ import hydra
 from omegaconf import OmegaConf
 from models.scenario_dreamer_autoencoder import ScenarioDreamerAutoEncoder
 from models.scenario_dreamer_ldm import ScenarioDreamerLDM
+from models.scenario_dreamer_cldm import ScenarioDreamerCLDM
 from metrics import Metrics
 
 import torch
@@ -15,7 +16,7 @@ from utils.train_helpers import set_latent_stats
 import utils.sim_env_helpers as _sim_env_helpers
 
 
-def generate_simulation_environments(cfg, cfg_ae, save_dir=None):
+def generate_simulation_environments(cfg, cfg_ae, save_dir=None, model_cls=ScenarioDreamerLDM):
     """ Generate simulation environments using the Scenario Dreamer Latent Diffusion Model.
     
     This involves 1 step of initial scene generation followed by multiple steps of
@@ -35,11 +36,11 @@ def generate_simulation_environments(cfg, cfg_ae, save_dir=None):
     
     assert ckpt_path is not None, "No checkpoint found in the save directory."
 
-    model = ScenarioDreamerLDM.load_from_checkpoint(ckpt_path, cfg=cfg, cfg_ae=cfg_ae).to('cuda')
+    model = model_cls.load_from_checkpoint(ckpt_path, cfg=cfg, cfg_ae=cfg_ae).to('cuda')
     _sim_env_helpers.generate_simulation_environments(model, cfg, save_dir)
 
 
-def eval_ldm(cfg, cfg_ae, save_dir=None):
+def eval_ldm(cfg, cfg_ae, save_dir=None, model_cls=ScenarioDreamerLDM):
     """ Evaluate the Scenario Dreamer Latent Diffusion Model."""
     if cfg.eval.mode == 'metrics':
         metric_evaluator = Metrics(cfg, cfg_ae)
@@ -60,7 +61,7 @@ def eval_ldm(cfg, cfg_ae, save_dir=None):
     assert ckpt_path is not None, "No checkpoint found in the save directory."
     
     # generate samples
-    model = ScenarioDreamerLDM.load_from_checkpoint(ckpt_path, cfg=cfg, cfg_ae=cfg_ae).to('cuda')
+    model = model_cls.load_from_checkpoint(ckpt_path, cfg=cfg, cfg_ae=cfg_ae).to('cuda')
     model.generate(
         mode = cfg.eval.mode, # Scenario Dreamer supports multiple generation modes: initial_scene, lane_conditioned, and inpainting
         num_samples = cfg.eval.num_samples,
@@ -135,11 +136,12 @@ def main(cfg):
 
     if model_name == 'autoencoder':
         eval_autoencoder(cfg, save_dir)
-    elif model_name == 'ldm':
+    elif model_name in ['ldm', 'cldm']:
+        model_cls = ScenarioDreamerCLDM if model_name == 'cldm' else ScenarioDreamerLDM
         if cfg.eval.mode == 'simulation_environments':
-            generate_simulation_environments(cfg, cfg_ae, save_dir)
+            generate_simulation_environments(cfg, cfg_ae, save_dir, model_cls=model_cls)
         else:
-            eval_ldm(cfg, cfg_ae, save_dir) 
+            eval_ldm(cfg, cfg_ae, save_dir, model_cls=model_cls)
 
 
 if __name__ == '__main__':

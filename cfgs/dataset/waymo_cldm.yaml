@@ -8,3 +8,16 @@ agent_latents_mean: null # mean of agent latents, to be computed from training d
 agent_latents_std: null # std of agent latents, to be computed from training data
 lane_latents_mean: null # mean of lane latents, to be computed from training data
 lane_latents_std: null # std of lane latents, to be computed from training data
+
+# map-level conditioning metadata for CLDM
+condition_metadata_dir: ${project_root}/metadata # contains waymo_train.txt, waymo_val.txt, and waymo_test.txt
+condition_metadata_filename_template: waymo_{split}.txt
+condition_dim: 2
+condition_names:
+- num_junctions
+- curvature_frac
+condition_num_junctions_clip: 5.0
+condition_stats_split: train
+condition_mean: null # computed from clipped train metadata if null
+condition_std: null # computed from clipped train metadata if null
+condition_normalization_eps: 1e-6

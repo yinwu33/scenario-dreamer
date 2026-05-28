@@ -19,10 +19,15 @@ np.set_printoptions(suppress=True, threshold=sys.maxsize)
 from utils.data_container import ScenarioDreamerData
 from utils.torch_helpers import from_numpy
 from utils.data_helpers import sample_latents, reorder_indices
+from utils.condition_helpers import (
+    get_condition_stats,
+    load_condition_metadata,
+    normalize_condition_values,
+)
 
-class WaymoDatasetLDM(Dataset):
+class WaymoDatasetCLDM(Dataset):
     def __init__(self, cfg: Any, split_name: str = "train") -> None:
-        """Instantiate a :class:`WaymoDatasetLDM`.
+        """Instantiate a :class:`WaymoDatasetCLDM`.
 
         Parameters
         ----------
@@ -32,7 +37,7 @@ class WaymoDatasetLDM(Dataset):
             One of ``{"train", "val", "test"}`` selecting which split
             to load from ``cfg.dataset.dataset_path``.
         """
-        super(WaymoDatasetLDM, self).__init__()
+        super(WaymoDatasetCLDM, self).__init__()
         self.cfg = cfg
         self.split_name = split_name 
         self.dataset_dir = os.path.join(self.cfg.dataset_path, f"{self.split_name}")
@@ -41,10 +46,13 @@ class WaymoDatasetLDM(Dataset):
 
         self.files = sorted(glob.glob(self.dataset_dir + "/*.pkl"))
         self.dset_len = len(self.files)
+        self.condition_metadata = load_condition_metadata(self.cfg, self.split_name)
+        self.condition_mean, self.condition_std = get_condition_stats(self.cfg)
 
     
     def get_data(self, data, idx):
         """Return a sample for ldm training"""
+        file_idx = idx
         idx = data['idx']
         agent_states = data['agent_states']
         road_points = data['road_points']
@@ -81,6 +89,18 @@ class WaymoDatasetLDM(Dataset):
         d['num_agents'] = num_agents
         d['lg_type'] = scene_type
         d['map_id'] = map_id
+        raw_file_name = os.path.splitext(os.path.basename(self.files[file_idx]))[0]
+        if raw_file_name not in self.condition_metadata:
+            raise KeyError(f"Missing condition metadata for {raw_file_name} in split {self.split_name}")
+        condition_raw, condition_clipped, condition = normalize_condition_values(
+            self.condition_metadata[raw_file_name],
+            self.condition_mean,
+            self.condition_std,
+            self.cfg.condition_num_junctions_clip,
+        )
+        d['condition_raw'] = condition_raw.unsqueeze(0)
+        d['condition_clipped'] = condition_clipped.unsqueeze(0)
+        d['condition'] = condition.unsqueeze(0)
         d['agent'].x = from_numpy(agent_mu)
         d['lane'].x = from_numpy(lane_mu)
         d['agent'].partition_mask = from_numpy(agent_partition_mask)
@@ -119,7 +139,7 @@ class WaymoDatasetLDM(Dataset):
 @hydra.main(version_base=None, config_path=CONFIG_PATH, config_name="config")
 def main(cfg):
     cfg = cfg.ldm
-    dset = WaymoDatasetLDM(cfg.dataset, split_name='train')
+    dset = WaymoDatasetCLDM(cfg.dataset, split_name='train')
 
     print(cfg.dataset.dataset_path)
     

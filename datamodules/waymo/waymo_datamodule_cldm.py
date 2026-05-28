@@ -1,6 +1,5 @@
 import pytorch_lightning as pl 
-import pytorch_lightning as pl 
-from datasets.waymo.dataset_ldm_waymo import WaymoDatasetLDM
+from datasets.waymo.dataset_cldm_waymo import WaymoDatasetCLDM
 from torch_geometric.loader import DataLoader
 import os
 
@@ -8,7 +7,7 @@ import os
 def worker_init_fn(worker_id):
     os.sched_setaffinity(0, range(os.cpu_count())) 
 
-class WaymoDataModuleLDM(pl.LightningDataModule):
+class WaymoDataModuleCLDM(pl.LightningDataModule):
 
     def __init__(self,
                  train_batch_size,
@@ -16,19 +15,23 @@ class WaymoDataModuleLDM(pl.LightningDataModule):
                  num_workers,
                  pin_memory,
                  persistent_workers,
-                 dataset_cfg):
-        super(WaymoDataModuleLDM, self).__init__()
+                 dataset_cfg,
+                 train_split_name='train',
+                 val_split_name='val'):
+        super(WaymoDataModuleCLDM, self).__init__()
         self.train_batch_size = train_batch_size
         self.val_batch_size = val_batch_size 
         self.num_workers = num_workers
         self.pin_memory = pin_memory 
         self.persistent_workers = persistent_workers
         self.cfg_dataset = dataset_cfg
+        self.train_split_name = train_split_name
+        self.val_split_name = val_split_name
         
 
     def setup(self, stage):
-        self.train_dataset = WaymoDatasetLDM(self.cfg_dataset, split_name='train')
-        self.val_dataset = WaymoDatasetLDM(self.cfg_dataset, split_name='val') 
+        self.train_dataset = WaymoDatasetCLDM(self.cfg_dataset, split_name=self.train_split_name)
+        self.val_dataset = WaymoDatasetCLDM(self.cfg_dataset, split_name=self.val_split_name)
 
 
     def train_dataloader(self):

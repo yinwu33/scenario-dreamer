@@ -1,7 +1,7 @@
 defaults:
 - base
 
-run_name: scenario_dreamer_ldm_base_waymo # default run name for evaluation
+run_name: scenario_dreamer_cldm_base_waymo # default run name for evaluation
 
 mode: initial_scene # or lane_conditioned or inpainting or metrics or simulation_environments
 num_samples: 100 # number of samples to generate during evaluation

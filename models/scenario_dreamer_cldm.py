@@ -3,7 +3,7 @@ import pickle
 import glob
 from tqdm import tqdm
 from utils.train_helpers import create_lambda_lr_cosine, create_lambda_lr_linear, create_lambda_lr_constant
-from nn_modules.ldm import LDM
+from nn_modules.cldm import CLDM
 from models.scenario_dreamer_autoencoder import ScenarioDreamerAutoEncoder
 from utils.data_container import ScenarioDreamerData
 from torch_geometric.loader import DataLoader
@@ -16,6 +16,11 @@ from utils.sim_env_helpers import sample_route, get_default_route_center_yaw
 from utils.lane_graph_helpers import estimate_heading
 from utils.torch_helpers import from_numpy
 from utils.viz import visualize_batch
+from utils.condition_helpers import (
+    get_condition_stats,
+    load_condition_metadata,
+    normalize_condition_values,
+)
 
 import torch 
 from torch import nn
@@ -24,19 +29,76 @@ from pytorch_lightning.utilities import grad_norm
 from torch_ema import ExponentialMovingAverage
 torch.set_printoptions(sci_mode=False)
 
-class ScenarioDreamerLDM(pl.LightningModule):
+class ScenarioDreamerCLDM(pl.LightningModule):
     def __init__(self, cfg, cfg_ae):
-        super(ScenarioDreamerLDM, self).__init__()
+        super(ScenarioDreamerCLDM, self).__init__()
 
         self.save_hyperparameters()
         self.cfg = cfg 
         self.cfg_model = cfg.model
         self.cfg_dataset = self.cfg.dataset
-        self.diff_model = LDM(self.cfg)
+        self.diff_model = CLDM(self.cfg)
         self.autoencoder = ScenarioDreamerAutoEncoder.load_from_checkpoint(self.cfg_model.autoencoder_path, cfg=cfg_ae, map_location='cpu')
         
         self.init_prob_matrix = torch.load(self.cfg.eval.init_prob_matrix_path)
         self.ema = ExponentialMovingAverage(self.diff_model.parameters(), decay=self.cfg.train.ema_decay)
+        self._condition_bank = None
+
+
+    def _get_condition_bank(self):
+        if self._condition_bank is not None:
+            return self._condition_bank
+
+        metadata = load_condition_metadata(
+            self.cfg_dataset,
+            self.cfg_dataset.get('condition_stats_split', 'train'),
+        )
+        condition_mean, condition_std = get_condition_stats(self.cfg_dataset)
+        raw_conditions = []
+        clipped_conditions = []
+        normalized_conditions = []
+        for values in metadata.values():
+            raw, clipped, normalized = normalize_condition_values(
+                values,
+                condition_mean,
+                condition_std,
+                self.cfg_dataset.condition_num_junctions_clip,
+            )
+            raw_conditions.append(raw)
+            clipped_conditions.append(clipped)
+            normalized_conditions.append(normalized)
+
+        self._condition_bank = {
+            'raw': torch.stack(raw_conditions, dim=0),
+            'clipped': torch.stack(clipped_conditions, dim=0),
+            'normalized': torch.stack(normalized_conditions, dim=0),
+        }
+        return self._condition_bank
+
+
+    def _sample_random_conditions(self, num_samples):
+        condition_bank = self._get_condition_bank()
+        indices = torch.randint(condition_bank['normalized'].shape[0], (num_samples,))
+        return {
+            key: value[indices].clone()
+            for key, value in condition_bank.items()
+        }
+
+
+    def _attach_random_condition(self, d):
+        condition = self._sample_random_conditions(1)
+        d['condition_raw'] = condition['raw']
+        d['condition_clipped'] = condition['clipped']
+        d['condition'] = condition['normalized']
+
+
+    def _copy_or_attach_condition(self, d, data, idx):
+        if 'condition' in data.keys():
+            d['condition'] = data['condition'][idx].detach().cpu().reshape(1, -1)
+            d['condition_raw'] = data['condition_raw'][idx].detach().cpu().reshape(1, -1)
+            d['condition_clipped'] = data['condition_clipped'][idx].detach().cpu().reshape(1, -1)
+        else:
+            self._attach_random_condition(d)
 
     
     def on_train_start(self):
@@ -285,6 +347,7 @@ class ScenarioDreamerLDM(pl.LightningModule):
                 d['lane', 'to', 'lane'].edge_index = get_edge_index_complete_graph(num_lanes)
                 d['agent', 'to', 'agent'].edge_index = get_edge_index_complete_graph(num_agents)
                 d['lane', 'to', 'agent'].edge_index = get_edge_index_bipartite(num_lanes, num_agents)
+                self._copy_or_attach_condition(d, data, i)
 
                 data_list.append(d)
         
@@ -344,6 +407,7 @@ class ScenarioDreamerLDM(pl.LightningModule):
                 d['lane', 'to', 'lane'].edge_index = get_edge_index_complete_graph(num_lanes)
                 d['agent', 'to', 'agent'].edge_index = get_edge_index_complete_graph(num_agents)
                 d['lane', 'to', 'agent'].edge_index = get_edge_index_bipartite(num_lanes, num_agents)
+                self._attach_random_condition(d)
 
                 data_list.append(d)
 
@@ -371,6 +435,7 @@ class ScenarioDreamerLDM(pl.LightningModule):
                 }
 
                 d = normalize_and_crop_scene(cond_d, d, normalize_dict, self.cfg_dataset, self.cfg.dataset_name)
+                self._attach_random_condition(d)
                 data_list.append(d)
 
             elif mode == 'lane_conditioned':
@@ -432,6 +497,7 @@ class ScenarioDreamerLDM(pl.LightningModule):
                 d['lane', 'to', 'lane'].edge_index = from_numpy(edge_index_lane_to_lane)
                 d['agent', 'to', 'agent'].edge_index = from_numpy(edge_index_agent_to_agent)
                 d['lane', 'to', 'agent'].edge_index = from_numpy(edge_index_lane_to_agent)
+                self._attach_random_condition(d)
                 data_list.append(d)
             
         # in inpainting mode, we still need to feed through the autoencoder to get latents

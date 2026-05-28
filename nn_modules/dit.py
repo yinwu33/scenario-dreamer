@@ -14,7 +14,7 @@ class DiT(nn.Module):
         self.cfg_model = self.cfg.model
         self.cfg_dataset = self.cfg.dataset
 
-        
+
         self.emb_drop = nn.Dropout(self.cfg_model.dropout)
         # Condition on scene type
         self.scene_type_embedder = LabelEmbedder(self.cfg_dataset.num_map_ids * 2, self.cfg_model.hidden_dim, self.cfg_model.label_dropout)
@@ -22,6 +22,11 @@ class DiT(nn.Module):
         # Condition on number of agents and lanes
         self.num_agents_embedder = LabelEmbedder(self.cfg_dataset.max_num_agents + 1, self.cfg_model.hidden_dim, 0)
         self.num_lanes_embedder = LabelEmbedder(self.cfg_dataset.max_num_lanes + 1, self.cfg_model.hidden_dim, 0)
+        self.use_map_conditioning = self.cfg_model.get('use_map_conditioning', False)
+        if self.use_map_conditioning:
+            self.condition_embedder = TwoLayerResMLP(self.cfg_model.condition_dim, self.cfg_model.hidden_dim)
+            self.null_condition = nn.Parameter(torch.zeros(self.cfg_model.hidden_dim))
+            self.condition_dropout = self.cfg_model.get('condition_dropout', 0.0)
         
         # Diffusion timestep embedding
         self.t_embedder = TimestepEmbedder(self.cfg_model.hidden_dim)
@@ -77,6 +82,8 @@ class DiT(nn.Module):
         # Initialize num lane and num agent embedding tables:
         nn.init.normal_(self.num_agents_embedder.embedding_table.weight, std=0.02)
         nn.init.normal_(self.num_lanes_embedder.embedding_table.weight, std=0.02)
+        if self.use_map_conditioning:
+            nn.init.normal_(self.null_condition, std=0.02)
 
         # Initialize timestep embedding MLP:
         nn.init.normal_(self.t_embedder.mlp[0].weight, std=0.02)
@@ -104,6 +111,25 @@ class DiT(nn.Module):
         nn.init.constant_(self.pred_lane_noise.adaLN_modulation[-1].bias, 0)
         nn.init.constant_(self.pred_lane_noise.linear.weight, 0)
         nn.init.constant_(self.pred_lane_noise.linear.bias, 0)
+
+
+    def _embed_map_condition(self, data, unconditional=False):
+        condition = data['condition'].float()
+        if condition.dim() == 1:
+            condition = condition.reshape(data.batch_size, -1)
+        assert condition.shape[-1] == self.cfg_model.condition_dim
+
+        condition_emb = self.condition_embedder(condition)
+        if unconditional:
+            drop_mask = torch.ones(condition_emb.shape[0], device=condition_emb.device, dtype=torch.bool)
+        elif self.training and self.condition_dropout > 0:
+            drop_mask = torch.rand(condition_emb.shape[0], device=condition_emb.device) < self.condition_dropout
+        else:
+            drop_mask = torch.zeros(condition_emb.shape[0], device=condition_emb.device, dtype=torch.bool)
+
+        null_condition = self.null_condition.unsqueeze(0).expand_as(condition_emb)
+        condition_emb = torch.where(drop_mask.unsqueeze(-1), null_condition, condition_emb)
+        return condition_emb
 
 
     def forward(self, 
@@ -143,6 +169,11 @@ class DiT(nn.Module):
         n = torch.cat([num_lanes_emb, num_agents_emb], dim=0)
         # embedding of scene type
         y = torch.cat([lane_scene_type, agent_scene_type], dim=0)
+        if self.use_map_conditioning:
+            map_condition = self._embed_map_condition(data, unconditional=unconditional)
+            map_condition = torch.cat([map_condition[lane_batch], map_condition[agent_batch]], dim=0)
+        else:
+            map_condition = 0
 
         l2l_edge_index = data['lane', 'to', 'lane'].edge_index
         a2a_edge_index = data['agent', 'to', 'agent'].edge_index
@@ -150,7 +181,7 @@ class DiT(nn.Module):
         l2a_edge_index[1] = l2a_edge_index[1] + x_lane.shape[0]
         
         # conditioning vector for DiT block
-        c = t + y + n
+        c = t + y + n + map_condition
         # necessary for A2A and L2A attention
         c_small = self.downsample_c(c)
         
@@ -172,8 +203,7 @@ class DiT(nn.Module):
         # decode the noise as in the original DiT paper
         c_lane = c[:x_lane.shape[0]]
         c_agent = c_small[x_lane.shape[0]:]
-        x_lane = self.pred_lane_noise(x_lane, c_lane).unsqueeze(1)    
+        x_lane = self.pred_lane_noise(x_lane, c_lane).unsqueeze(1)
         x_agent = self.pred_agent_noise(x_agent, c_agent).unsqueeze(1)
-        
+
         return x_agent, x_lane
-        

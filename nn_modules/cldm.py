@@ -9,9 +9,9 @@ from utils.losses import GeometricLosses
 from nn_modules.dit import DiT
 from cfgs.config import BEFORE_PARTITION
 
-class LDM(nn.Module):
+class CLDM(nn.Module):
     def __init__(self, cfg):
-        super(LDM, self).__init__()
+        super(CLDM, self).__init__()
 
         self.cfg = cfg
         self.cfg_model = self.cfg.model

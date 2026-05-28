@@ -19,7 +19,8 @@ def plot_scene(
         return_fig=False,
         tile_occupancy=None,
         adaptive_limits=False,
-        route=None):
+        route=None,
+        condition_text=None):
     """Plots a scene with lanes and agents."""
 
     # Create a figure and axes
@@ -93,6 +94,19 @@ def plot_scene(
     ax.set_ylim(y_min, y_max)
     ax.set_aspect('equal', adjustable='box')
     ax.axis('off')
+    if condition_text is not None:
+        ax.text(
+            0.01,
+            0.99,
+            condition_text,
+            transform=ax.transAxes,
+            ha='left',
+            va='top',
+            fontsize=8,
+            color='black',
+            bbox=dict(facecolor='white', edgecolor='none', alpha=0.75, pad=2),
+            zorder=20,
+        )
 
     # Plot route
     if route is not None:
@@ -291,6 +305,19 @@ def visualize_batch(num_samples,
     lane_conn_batch = lane_conn_batch.cpu().numpy()
     agent_batch = data['agent'].batch.cpu().numpy()
     lane_batch = data['lane'].batch.cpu().numpy()
+    condition_texts = None
+    if 'condition_raw' in data.keys():
+        condition_raw = data['condition_raw'].detach().cpu().numpy()
+        condition_clipped = data['condition_clipped'].detach().cpu().numpy()
+        condition_texts = []
+        for condition_idx in range(condition_raw.shape[0]):
+            raw = condition_raw[condition_idx]
+            clipped = condition_clipped[condition_idx]
+            if not np.isclose(raw[0], clipped[0]):
+                junction_text = f"junctions={raw[0]:.1f} (clip {clipped[0]:.1f})"
+            else:
+                junction_text = f"junctions={raw[0]:.1f}"
+            condition_texts.append(f"{junction_text}\ncurvature={raw[1]:.3f}")
 
     images_to_log = {}
     for i in range(num_samples):
@@ -309,7 +336,8 @@ def visualize_batch(num_samples,
             scene_i_lane_types,
             name=f'epoch_{epoch}_batch_{batch_idx}_sample_{i}.png', 
             save_dir=save_dir,
-            return_fig=save_wandb)
+            return_fig=save_wandb,
+            condition_text=condition_texts[i] if condition_texts is not None else None)
         if save_wandb:
             images_to_log[f'scene_plot/epoch_{epoch}_batch_{batch_idx}_sample_{i}'] = wandb.Image(fig)
             plt.close(fig)

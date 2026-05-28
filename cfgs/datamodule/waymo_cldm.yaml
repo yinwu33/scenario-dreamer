@@ -1,8 +1,10 @@
 defaults:
 - base
 
-_target_: datamodules.waymo.waymo_datamodule_ldm.WaymoDataModuleLDM
+_target_: datamodules.waymo.waymo_datamodule_cldm.WaymoDataModuleCLDM
 
 train_batch_size: 256
 val_batch_size: 256
+train_split_name: train
+val_split_name: val
 dataset_cfg: null
