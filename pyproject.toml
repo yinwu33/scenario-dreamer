@@ -1,0 +1,40 @@
+[project]
+name = "scenario-dreamer"
+version = "0.1.0"
+description = "Vectorized latent diffusion for generating driving simulation environments"
+readme = "README.md"
+requires-python = ">=3.10,<3.11"
+dependencies = [
+    "einops==0.8.0",
+    "gdown==5.2.0",
+    "hydra-core==1.3.2",
+    "matplotlib==3.6.1",
+    "moviepy==1.0.3",
+    "networkx==3.4.2",
+    "numpy==1.21.5",
+    "opencv-python==4.10.0.84",
+    "pillow==9.2.0",
+    "pytorch-lightning==2.4.0",
+    "scipy==1.10.1",
+    "shapely==2.0.6",
+    "tensorflow==2.11.0",
+    "torch==2.2.0",
+    "torch-ema==0.3",
+    "torch-geometric==2.6.1",
+    "torchaudio==2.2.0",
+    "tqdm==4.66.5",
+    "wandb==0.18.5",
+    "waymo-open-dataset-tf-2-11-0==1.6.1",
+]
+
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cu121" }]
+torchaudio = [{ index = "pytorch-cu121" }]
+
+[[tool.uv.index]]
+name = "pytorch-cu121"
+url = "https://download.pytorch.org/whl/cu121"
+explicit = true
