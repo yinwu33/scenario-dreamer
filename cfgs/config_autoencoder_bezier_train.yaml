@@ -1,0 +1,37 @@
+# Bezier lane-graph AutoEncoder training config for Waymo.
+#
+# Usage:
+#   source .venv/bin/activate
+#   source scripts/define_env_variables.sh
+#   python train.py --config-name config_autoencoder_bezier_train
+
+scratch_root: ${oc.env:SCRATCH_ROOT}
+dataset_root: ${oc.env:DATASET_ROOT}
+project_root: ${oc.env:PROJECT_ROOT}
+waymo_data_folder: ${dataset_root}/waymo_open_dataset_motion_v_1_1_0
+waymo_train_folder: ${waymo_data_folder}/training
+waymo_val_folder: ${waymo_data_folder}/validation
+waymo_test_folder: ${waymo_data_folder}/testing
+
+hydra:
+  run:
+    dir: ${project_root}/slurm_logs/${now:%Y.%m.%d}/${now:%H.%M.%S}/${hydra.job.override_dirname}
+
+model_name: autoencoder_bezier
+
+# The dataset / dataloader / encoder are identical to the standard autoencoder;
+# only the model (decoder) config differs (waymo_autoencoder_bezier).
+defaults:
+  - dataset_name: waymo
+  - dataset@ae.dataset: waymo_autoencoder
+  - train@ae.train: waymo_autoencoder
+  - eval@ae.eval: waymo_autoencoder
+  - model@ae.model: waymo_autoencoder_bezier
+  - datamodule@ae.datamodule: waymo_autoencoder
+  - _self_
+
+ae:
+  train:
+    run_name: scenario_dreamer_autoencoder_bezier_waymo
+    devices: 1
+    num_samples_to_visualize: 10   # each GT lane shown as its matched predicted bezier edge

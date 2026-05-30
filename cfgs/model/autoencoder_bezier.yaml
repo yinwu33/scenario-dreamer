@@ -1,0 +1,29 @@
+# Bezier lane-graph autoencoder. Inherits the base autoencoder architecture and
+# adds the query-based node-edge graph decoder configuration.
+defaults:
+- autoencoder
+
+# ── node-edge graph decoder ── #
+num_graph_nodes: 100          # number of learnable node query slots (>= max lanes recommended)
+num_node_decoder_layers: 3    # transformer-decoder layers for node queries cross-attending to lane latents
+edge_hidden_dim: 64           # downsampled hidden dim for the O(N^2) pairwise edge head
+bezier_ctrl_scale: 1.0        # max magnitude (normalized coords) of inner control-point offsets relative to endpoints; smaller -> endpoints carry more geometry (anti node-collapse)
+
+# ── supervision mode ── #
+# True  -> method B: match node slots to GT junctions (connected lane endpoints)
+#          so connected lanes SHARE a node index (structural sharing).
+# False -> per-lane edge Hungarian (coordinate continuity only).
+use_gt_node_matching: true
+junction_merge_eps: 0.02      # distance fallback (normalized [-1,1] coords; ~0.64m at fov=64) for merging endpoints into one junction, on top of succ/pred connectivity
+
+# ── Hungarian matching (used when use_gt_node_matching=false) ── #
+matching_topk: 256            # cap on candidate edges fed to Hungarian assignment (per scene); >= 4 * max GT lanes
+cost_reg_weight: 1.0          # weight of polyline L1 in the matching cost
+cost_cls_weight: 1.0          # weight of (-edge prob) in the matching cost
+
+# ── loss weights (graph) ── #
+# lane_weight / kl_weight / cond_dis_weight are inherited from autoencoder.yaml
+endpoint_weight: 5.0          # weight of explicit node<->GT-endpoint L1 (strong, undiluted gradient to node positions; anti node-collapse)
+edge_exist_weight: 1.0        # weight of edge-existence BCE
+node_exist_weight: 1.0        # weight of node-existence BCE
+continuity_weight: 1.0        # weight of succ/pred endpoint-continuity (node sharing); set 0 to disable

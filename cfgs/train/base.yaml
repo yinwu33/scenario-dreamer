@@ -4,7 +4,7 @@ save_dir: ${scratch_root}/checkpoints/ # directory to save checkpoints/log files
 run_name: null # name of saved directory for run
 wandb_project: scenario-dreamer # wandb project
 wandb_entity: null # wandb entity
-track: False # track to wandb
+track: True # track to wandb
 accelerator: auto # pytorch lightning accelerator
 devices: null # number of gpus - set to 4 when multi-gpu training
 precision: 32-true # bf16-mixed for bfloat16 mixed precision or 32-true for regular

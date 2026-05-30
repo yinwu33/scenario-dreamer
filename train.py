@@ -1,6 +1,7 @@
 import os 
 import hydra
 from models.scenario_dreamer_autoencoder import ScenarioDreamerAutoEncoder
+from models.scenario_dreamer_autoencoder_bezier import ScenarioDreamerAutoEncoderBezier
 from models.scenario_dreamer_ldm import ScenarioDreamerLDM
 from models.scenario_dreamer_cldm import ScenarioDreamerCLDM
 from models.ctrl_sim import CtRLSim
@@ -132,11 +133,11 @@ def train_ldm(cfg, cfg_ae, save_dir=None, model_cls=ScenarioDreamerLDM):
     trainer.fit(model, datamodule, ckpt_path=ckpt_path)
 
 
-def train_autoencoder(cfg, save_dir=None):
+def train_autoencoder(cfg, save_dir=None, model_cls=ScenarioDreamerAutoEncoder):
     """ Train the Scenario Dreamer AutoEncoder model."""
     datamodule = instantiate(cfg.datamodule, dataset_cfg=cfg.dataset)
 
-    model = ScenarioDreamerAutoEncoder(cfg)
+    model = model_cls(cfg)
     # we always track the last epoch checkpoint for evaluation or resume training.   
     model_checkpoint = ModelCheckpoint(filename='model', save_last=True, save_top_k=0, dirpath=save_dir)
     
@@ -188,7 +189,7 @@ def main(cfg):
     # need to track whether we are training a nuplan or waymo model as 
     # nuplan predicts lane types (lane/green light/red light) and waymo does not
     dataset_name = cfg.dataset_name.name
-    if cfg.model_name == 'autoencoder':
+    if cfg.model_name in ('autoencoder', 'autoencoder_bezier'):
         model_name = cfg.model_name
         cfg = cfg.ae
         # not the cleanest solution, but need to track dataset name
@@ -221,6 +222,8 @@ def main(cfg):
     
     if model_name == 'autoencoder':
         train_autoencoder(cfg, save_dir)
+    elif model_name == 'autoencoder_bezier':
+        train_autoencoder(cfg, save_dir, model_cls=ScenarioDreamerAutoEncoderBezier)
     elif model_name == 'ldm':
         train_ldm(cfg, cfg_ae, save_dir) 
     elif model_name == 'cldm':

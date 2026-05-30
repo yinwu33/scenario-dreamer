@@ -157,8 +157,11 @@ class ScenarioDreamerCLDM(pl.LightningModule):
             # is_global_zero ensures that only one process logs the visualization
             visualize = self.cfg.train.num_samples_to_visualize > 0 and self.trainer.is_global_zero and batch_idx == 0
             viz_dir = self.cfg.train.viz_dir
+            if not visualize:
+                return
             
             num_samples = self.cfg.train.num_samples_to_visualize
+            assert num_samples <= data.batch_size, f"num_samples ({num_samples}) must be less than or equal to batch size ({data.batch_size})"
             indices = torch.arange(num_samples)
             subset_data_list = data.index_select(indices)
             subset_data = Batch.from_data_list(subset_data_list)  
