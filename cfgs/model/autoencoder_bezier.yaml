@@ -7,14 +7,30 @@ defaults:
 num_graph_nodes: 100          # number of learnable node query slots (>= max lanes recommended)
 num_node_decoder_layers: 3    # transformer-decoder layers for node queries cross-attending to lane latents
 edge_hidden_dim: 64           # downsampled hidden dim for the O(N^2) pairwise edge head
-bezier_ctrl_scale: 1.0        # max magnitude (normalized coords) of inner control-point offsets relative to endpoints; smaller -> endpoints carry more geometry (anti node-collapse)
+
+# ── edge geometry parameterization ── #
+# True  -> cubic-Bezier edges: edge head predicts 2 inner control-point offsets;
+#          the curve is t-sampled + arc-length-resampled. Expressive but
+#          SENSITIVE (control-point leverage + resampling non-linearity).
+# False -> direct polyline edges: edge head predicts the P-2 *interior* points as
+#          bounded residuals on the straight node-to-node chord. Endpoints are the
+#          shared nodes (so endpoint continuity is preserved), and every point gets
+#          a direct local L1 gradient -> much less sensitive than Bezier.
+use_bezier: false
+bezier_ctrl_scale: 1.0        # max magnitude (normalized coords) of the bounded edge offsets: inner control-point offsets (bezier) or interior-point residuals on the chord (polyline). Smaller -> endpoints/chord carry more geometry (anti node-collapse)
+
+# ── threshold-based graph visualization (diagnostic; no GT matching) ── #
+viz_threshold_graph: true     # also log a 'scene_plot_pred' panel built purely from predicted node/edge existence (reveals true junction quality, unlike the GT-matched scene_plot)
+viz_node_exist_thresh: 0.5    # keep a node slot iff sigmoid(node_exist_logit) > this
+viz_edge_exist_thresh: 0.5    # keep an edge iff sigmoid(edge_exist_logit) > this (and both endpoint nodes kept)
 
 # ── supervision mode ── #
 # True  -> method B: match node slots to GT junctions (connected lane endpoints)
 #          so connected lanes SHARE a node index (structural sharing).
 # False -> per-lane edge Hungarian (coordinate continuity only).
 use_gt_node_matching: true
-junction_merge_eps: 0.02      # distance fallback (normalized [-1,1] coords; ~0.64m at fov=64) for merging endpoints into one junction, on top of succ/pred connectivity
+junction_merge_eps: 0.02      # distance threshold (normalized [-1,1] coords; ~0.64m at fov=64): endpoints within this L1 distance form one junction. Distance-only (succ/pred connectivity is NOT used -- combining the two over-merges dense scenes).
+node_match_cls_weight: 0.1    # weight of the existence prior (sigmoid(node_exist_logit)) subtracted from the slot<->junction assignment cost. Acts as a TIEBREAKER that anchors slot identity so node/edge existence heads can converge (0 = pure position matching, the old non-stationary behavior). Keep small relative to the steady-state position L1 gap between slots (~0.01-0.1) so existence does not override geometry; likely needs tuning.
 
 # ── Hungarian matching (used when use_gt_node_matching=false) ── #
 matching_topk: 256            # cap on candidate edges fed to Hungarian assignment (per scene); >= 4 * max GT lanes

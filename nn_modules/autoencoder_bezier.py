@@ -124,6 +124,85 @@ def resolve_bezier_edges(
     return poly
 
 
+def resolve_polyline_edges(
+    p0: torch.Tensor,
+    p3: torch.Tensor,
+    residual: torch.Tensor,
+    num_points: int,
+) -> torch.Tensor:
+    """Resolve directed-edge polylines from node endpoints + interior residuals.
+
+    This is the (non-Bezier) ``use_bezier=False`` parameterization. The polyline
+    endpoints are *structurally* the node positions (``poly[..., 0] == p0``,
+    ``poly[..., -1] == p3``); only the ``num_points - 2`` interior points are
+    predicted, as bounded residuals on top of the straight node-to-node chord.
+
+    Compared to the cubic Bezier variant this keeps the shared-node endpoint
+    continuity but removes the two sources of sensitivity: the non-linear
+    control-point leverage and the arc-length resampling. Each interior point
+    instead gets a direct, local L1 gradient against the corresponding GT point
+    (the GT lanes are equal-arc-length sampled, and the chord init is equal-arc
+    along the chord, so the point-to-point correspondence is well posed).
+
+    Args:
+        p0: ``(..., 2)`` source node positions (first polyline point).
+        p3: ``(..., 2)`` dest node positions (last polyline point).
+        residual: ``(..., 2 * (num_points - 2))`` interior-point residuals,
+            already bounded (e.g. ``tanh * scale``).
+        num_points: points per polyline ``P``.
+
+    Returns:
+        ``(..., P, 2)`` polylines.
+    """
+    lead = p0.shape[:-1]
+    t = torch.linspace(0.0, 1.0, num_points, device=p0.device, dtype=p0.dtype)
+    t = t.view(*([1] * len(lead)), num_points, 1)            # (..., P, 1)
+    chord = p0.unsqueeze(-2) + (p3 - p0).unsqueeze(-2) * t   # (..., P, 2)
+    interior = residual.reshape(*lead, num_points - 2, 2)    # (..., P-2, 2)
+    poly = torch.cat([
+        chord[..., :1, :],
+        chord[..., 1:-1, :] + interior,
+        chord[..., -1:, :],
+    ], dim=-2)                                               # (..., P, 2)
+    return poly
+
+
+def arc_length_resample(poly: torch.Tensor, num_points: int, eps: float = 1e-8) -> torch.Tensor:
+    """Resample polylines to ``num_points`` *equal arc-length* points (differentiable).
+
+    The GT lanes are resampled with equal arc-length spacing
+    (``utils.lane_graph_helpers.resample_polyline``), whereas a Bezier sampled at
+    uniform parameter ``t`` is NOT arc-length uniform -- points bunch up where the
+    curve is slow, which is worst at bends. Comparing the two point-by-point
+    therefore injects a systematic regression error at curves. This op converts a
+    densely ``t``-sampled Bezier polyline into the equal arc-length convention so
+    it is directly comparable to the GT, with gradients flowing to the dense
+    points (hence to the control points / node positions).
+
+    Args:
+        poly: ``(T, S, 2)`` densely sampled polylines (``S >= num_points``).
+        num_points: number of equal arc-length output points.
+
+    Returns:
+        ``(T, num_points, 2)`` arc-length-resampled polylines.
+    """
+    T, S, _ = poly.shape
+    seglen = (poly[:, 1:, :] - poly[:, :-1, :]).norm(dim=-1)         # (T, S-1)
+    cum = torch.cumsum(seglen, dim=1)
+    cum = torch.cat([cum.new_zeros(T, 1), cum], dim=1)              # (T, S) arc-length
+    total = cum[:, -1:]                                            # (T, 1)
+    frac = torch.linspace(0.0, 1.0, num_points, device=poly.device, dtype=poly.dtype)
+    target = frac.unsqueeze(0) * total                            # (T, num_points)
+    idx = torch.searchsorted(cum, target).clamp(1, S - 1)         # (T, num_points)
+    lo = idx - 1
+    cum_lo = torch.gather(cum, 1, lo)
+    cum_hi = torch.gather(cum, 1, idx)
+    w = (target - cum_lo) / (cum_hi - cum_lo).clamp_min(eps)       # (T, num_points)
+    p_lo = torch.gather(poly, 1, lo.unsqueeze(-1).expand(-1, -1, 2))
+    p_hi = torch.gather(poly, 1, idx.unsqueeze(-1).expand(-1, -1, 2))
+    return p_lo + w.unsqueeze(-1) * (p_hi - p_lo)
+
+
 class BezierLaneGraphDecoder(nn.Module):
     """Query-based node-edge graph decoder with cubic-Bezier lane edges."""
 
@@ -184,14 +263,26 @@ class BezierLaneGraphDecoder(nn.Module):
                                      output_dim=3)
         # edge head operates on a downsampled pairwise representation to bound
         # the O(N^2) memory of the dense adjacency tensor.
+        #
+        # use_bezier=True  -> output [existence, P1.delta(2), P2.delta(2)] = 5
+        # use_bezier=False -> output [existence, interior_residuals(2*(P-2))]
+        #                     the P-2 interior polyline points (endpoints are the
+        #                     shared nodes); see resolve_polyline_edges.
+        self.use_bezier = bool(getattr(self.cfg, 'use_bezier', True))
+        self.num_points_per_lane = self.cfg.num_points_per_lane
         self.edge_hidden_dim = self.cfg.edge_hidden_dim
         self.edge_node_proj = nn.Linear(self.cfg.hidden_dim, self.edge_hidden_dim)
+        if self.use_bezier:
+            edge_out_dim = 5
+        else:
+            edge_out_dim = 1 + 2 * (self.num_points_per_lane - 2)
         self.pred_edge = ResidualMLP(input_dim=self.edge_hidden_dim * 2,
                                      hidden_dim=self.edge_hidden_dim,
                                      n_hidden=3,
-                                     output_dim=5)
-        # max magnitude of the (relative) inner control-point offsets, in the
-        # normalized [-1, 1] coordinate space.
+                                     output_dim=edge_out_dim)
+        # max magnitude (normalized [-1, 1] coords) of the bounded edge offsets:
+        # inner control-point offsets (bezier) or interior-point residuals on the
+        # node-to-node chord (polyline).
         self.ctrl_scale = self.cfg.bezier_ctrl_scale
 
         self.apply(weight_init)
@@ -216,7 +307,8 @@ class BezierLaneGraphDecoder(nn.Module):
             node_mask:          (B, N) bool, valid query slots (always all True;
                                 kept for symmetry with lane_mask handling)
             edge_exist_logits:  (B, N, N)
-            edge_ctrl:          (B, N, N, 4)
+            edge_ctrl:          (B, N, N, 4)      [use_bezier=True]
+            edge_poly_residual: (B, N, N, 2*(P-2))[use_bezier=False]
             lane_mask:          (B, L) bool, valid (non-padded) lane tokens
         """
         # ----------- latent -> hidden-dim projections -------------------- #
@@ -265,13 +357,10 @@ class BezierLaneGraphDecoder(nn.Module):
         n = ne.shape[1]
         ni = ne.unsqueeze(2).expand(-1, -1, n, -1)  # source i
         nj = ne.unsqueeze(1).expand(-1, n, -1, -1)  # dest j
-        edge_out = self.pred_edge(torch.cat([ni, nj], dim=-1))  # (B, N, N, 5)
+        edge_out = self.pred_edge(torch.cat([ni, nj], dim=-1))  # (B, N, N, edge_out_dim)
         edge_exist_logits = edge_out[..., 0]
-        # inner control points as bounded offsets relative to the node endpoints
-        # (P1 = P0 + edge_ctrl[:2], P2 = P3 + edge_ctrl[2:]); see resolve_bezier_edges.
-        edge_ctrl = torch.tanh(edge_out[..., 1:5]) * self.ctrl_scale
 
-        return {
+        out = {
             'agent_states_pred': agent_states_pred,
             'agent_types_logits': agent_types_logits,
             'agent_types_pred': agent_types_pred,
@@ -279,9 +368,18 @@ class BezierLaneGraphDecoder(nn.Module):
             'node_xy': node_xy,
             'node_mask': lane_mask.new_ones((batch_size, n), dtype=torch.bool),
             'edge_exist_logits': edge_exist_logits,
-            'edge_ctrl': edge_ctrl,
             'lane_mask': lane_mask,
         }
+        if self.use_bezier:
+            # inner control points as bounded offsets relative to the node
+            # endpoints (P1 = P0 + edge_ctrl[:2], P2 = P3 + edge_ctrl[2:]);
+            # see resolve_bezier_edges.
+            out['edge_ctrl'] = torch.tanh(edge_out[..., 1:5]) * self.ctrl_scale
+        else:
+            # interior polyline-point residuals on the node-to-node chord
+            # (endpoints are the shared nodes); see resolve_polyline_edges.
+            out['edge_poly_residual'] = torch.tanh(edge_out[..., 1:]) * self.ctrl_scale
+        return out
 
 
 class AutoEncoderBezier(nn.Module):
@@ -290,6 +388,7 @@ class AutoEncoderBezier(nn.Module):
     def __init__(self, cfg):
         super(AutoEncoderBezier, self).__init__()
         self.cfg = cfg
+        self.use_bezier = bool(getattr(self.cfg, 'use_bezier', True))
         self.encoder = ScenarioDreamerEncoder(self.cfg)
         self.decoder = BezierLaneGraphDecoder(self.cfg)
 
@@ -301,6 +400,34 @@ class AutoEncoderBezier(nn.Module):
         self.apply(weight_init)
 
     # ------------------------------------------------------------------ #
+    # edge -> polyline resolution (shared by losses / reconstruction)    #
+    # ------------------------------------------------------------------ #
+    def _resolve_edge_polyline(self, dec, b_idx, src, dst, num_points):
+        """Resolve directed edges ``(b_idx, src->dst)`` into ``(T, P, 2)`` polylines.
+
+        Single source of truth for both decoder modes. ``b_idx``/``src``/``dst``
+        are flat index tensors of shape ``(T,)``.
+        """
+        node_xy = dec['node_xy']
+        p0 = node_xy[b_idx, src]   # (T, 2)  source node == P0 / first point
+        p3 = node_xy[b_idx, dst]   # (T, 2)  dest node   == P3 / last point
+        if self.use_bezier:
+            # dense t-sample then arc-length resample to the GT convention.
+            dense_basis = cubic_bezier_basis(
+                max(num_points * 4, 64), node_xy.device, node_xy.dtype)
+            ctrl = dec['edge_ctrl'][b_idx, src, dst]      # (T, 4) offsets
+            p1 = p0 + ctrl[:, 0:2]
+            p2 = p3 + ctrl[:, 2:4]
+            ctrl4 = torch.stack([p0, p1, p2, p3], dim=1)  # (T, 4, 2)
+            poly_dense = torch.einsum('pc,tcd->tpd', dense_basis, ctrl4)
+            return arc_length_resample(poly_dense, num_points)
+        assert num_points == self.cfg.num_points_per_lane, (
+            f"polyline mode requires num_points ({num_points}) == "
+            f"num_points_per_lane ({self.cfg.num_points_per_lane})")
+        res = dec['edge_poly_residual'][b_idx, src, dst]  # (T, 2*(P-2))
+        return resolve_polyline_edges(p0, p3, res, num_points)
+
+    # ------------------------------------------------------------------ #
     # GT junction construction + node matching (method B)                #
     # ------------------------------------------------------------------ #
     def _match_nodes(self, dec, x_lane_states, lane_batch, l2l_edge_index, x_lane_conn):
@@ -308,13 +435,19 @@ class AutoEncoderBezier(nn.Module):
 
         For each scene:
           1. Each GT lane contributes a *start* and *end* endpoint slot.
-          2. Slots are merged into junctions by (a) succ/pred connectivity
-             (``a`` succ ``b`` -> a.end and b.start are the same junction) and
-             (b) a distance fallback (slots within ``junction_merge_eps``,
-             excluding a lane's own two endpoints).
+          2. Slots are merged into junctions by spatial proximity ONLY: any two
+             endpoints (from different lanes) within ``junction_merge_eps`` (L1)
+             are the same junction. succ/pred connectivity is intentionally NOT
+             used -- for true successors the endpoints already coincide (so the
+             distance rule merges them anyway), whereas combining succ links
+             with distance links forms bridging chains that catastrophically
+             over-merge spatially-dense scenes into a couple of super-nodes.
           3. If #junctions > N, keep the top-N by degree (#incident endpoints).
           4. Hungarian-match the N predicted node slots to the kept junctions
-             on position (L1).
+             on position (L1), with an existence-prior tiebreak
+             (``node_match_cls_weight * sigmoid(node_exist_logit)``) so a slot's
+             identity stays stable across steps and the existence heads can
+             learn (pure position matching permutes the assignment every step).
 
         Each GT lane's target edge is then ``(node(start_junction),
         node(end_junction))`` -- so lanes meeting at a junction *share the same
@@ -333,19 +466,18 @@ class AutoEncoderBezier(nn.Module):
         ends = x_lane_states[:, -1, :].detach().cpu().numpy()
         lb = lane_batch.detach().cpu().numpy()
         node_xy_cpu = node_xy.detach().cpu().numpy()             # (B, N, 2)
+        # existence prior for the slot<->junction assignment. Pure position
+        # matching makes the matched slot identity non-stationary (it permutes
+        # every step), so node/edge existence heads chase a moving target and
+        # never converge. Biasing the assignment toward slots the model already
+        # wants to activate (DETR / method-A style cls cost) anchors slot
+        # identity over training so the existence heads can specialize.
+        cls_w = float(getattr(self.cfg, 'node_match_cls_weight', 0.1))
+        node_prob_cpu = torch.sigmoid(dec['node_exist_logits']).detach().cpu().numpy()  # (B, N)
 
         counts = np.bincount(lb, minlength=batch_size)
         offsets = np.zeros(batch_size, dtype=np.int64)
         offsets[1:] = np.cumsum(counts)[:-1]
-
-        if x_lane_conn.shape[1] > SUCC_CONN_INDEX:
-            succ_mask = (x_lane_conn[:, SUCC_CONN_INDEX] > 0.5).detach().cpu().numpy()
-        else:
-            succ_mask = np.zeros(l2l_edge_index.shape[1], dtype=bool)
-        l2l_cpu = l2l_edge_index.detach().cpu().numpy()
-        succ_src = l2l_cpu[0][succ_mask]
-        succ_dst = l2l_cpu[1][succ_mask]
-        succ_src_scene = lb[succ_src] if succ_src.shape[0] > 0 else succ_src
 
         lane_b, lane_global, lane_s, lane_d = [], [], [], []
         nm_b, nm_node, nm_jpos = [], [], []
@@ -360,15 +492,9 @@ class AutoEncoderBezier(nn.Module):
             coords[1::2] = ends[g0:g0 + m]     # slot 2l+1 = end of lane l
 
             rows, cols = [], []
-            # (a) succ connectivity unions: end(a) <-> start(b)
-            sc = succ_src_scene == b
-            a_loc = succ_src[sc] - g0
-            d_loc = succ_dst[sc] - g0
-            for ai, di in zip(a_loc.tolist(), d_loc.tolist()):
-                if 0 <= ai < m and 0 <= di < m:
-                    rows.append(2 * ai + 1)
-                    cols.append(2 * di)
-            # (b) distance fallback unions (exclude a lane's own two endpoints)
+            # distance-based junction merging: union endpoints that coincide
+            # spatially (within eps), excluding a lane's own two endpoints.
+            # (succ/pred connectivity is intentionally not used -- see docstring)
             if eps > 0 and m > 1:
                 d = np.abs(coords[:, None, :] - coords[None, :, :]).sum(-1)  # (2m, 2m) L1
                 lane_of = np.arange(2 * m) // 2
@@ -399,9 +525,12 @@ class AutoEncoderBezier(nn.Module):
             else:
                 num_kept = num_j
 
-            # node slot <-> junction Hungarian on position (L1)
+            # node slot <-> junction Hungarian on position (L1), anchored by an
+            # existence prior so high-probability slots are preferentially
+            # matched (stabilizes slot identity -> existence heads can learn).
             nx = node_xy_cpu[b]                                 # (N, 2)
             cost = np.abs(nx[:, None, :] - jpos[None, :, :]).sum(-1)  # (N, num_kept)
+            cost = cost - cls_w * node_prob_cpu[b][:, None]     # cheaper for active slots
             r_node, c_jct = linear_sum_assignment(cost)
             node_for_jct = -np.ones(num_kept, dtype=np.int64)
             node_for_jct[c_jct] = r_node
@@ -444,10 +573,8 @@ class AutoEncoderBezier(nn.Module):
         device = x_lane_states.device
         dtype = x_lane_states.dtype
         num_points = x_lane_states.shape[1]
-        basis = cubic_bezier_basis(num_points, device, dtype)
 
         node_xy = dec['node_xy']
-        edge_ctrl = dec['edge_ctrl']
         edge_logits = dec['edge_exist_logits']
         node_logits = dec['node_exist_logits']
         batch_size, n = node_logits.shape
@@ -474,13 +601,7 @@ class AutoEncoderBezier(nn.Module):
         if mt['lane_b'] is not None:
             lb_, ls_, ld_ = mt['lane_b'], mt['lane_snode'], mt['lane_dnode']
             edge_target[lb_, ls_, ld_] = 1.0
-            p0 = node_xy[lb_, ls_]
-            p3 = node_xy[lb_, ld_]
-            ctrl = edge_ctrl[lb_, ls_, ld_]            # (T, 4) offsets
-            p1 = p0 + ctrl[:, 0:2]
-            p2 = p3 + ctrl[:, 2:4]
-            ctrl4 = torch.stack([p0, p1, p2, p3], dim=1)  # (T, 4, 2)
-            poly = torch.einsum('pc,tcd->tpd', basis, ctrl4)  # (T, P, 2)
+            poly = self._resolve_edge_polyline(dec, lb_, ls_, ld_, num_points)  # (T, P, 2)
             reg_loss = (poly - x_lane_states[mt['lane_global']]).abs().mean()
             num_match = lb_.shape[0]
         else:
@@ -507,7 +628,11 @@ class AutoEncoderBezier(nn.Module):
     # Hungarian matching (shared by the graph loss and reconstruction)   #
     # ------------------------------------------------------------------ #
     def _match(self, dec, x_lane_states, lane_batch):
-        """Match predicted directed-edge bezier polylines to GT lane polylines.
+        """Match predicted directed-edge polylines to GT lane polylines.
+
+        The predicted edge polylines are resolved from either the cubic-Bezier
+        control points (``use_bezier=True``) or the chord-relative interior
+        residuals (``use_bezier=False``).
 
         Returns a dict of intermediate tensors shared by :meth:`_graph_loss` and
         :meth:`reconstruct_lanes`. The match indices (``mb_idx``/``msel``/``mgt``)
@@ -520,10 +645,10 @@ class AutoEncoderBezier(nn.Module):
         """
         device = x_lane_states.device
         num_points = x_lane_states.shape[1]
-        basis = cubic_bezier_basis(num_points, device, x_lane_states.dtype)
+        if self.use_bezier:
+            basis = cubic_bezier_basis(num_points, device, x_lane_states.dtype)
 
         node_xy = dec['node_xy']                  # (B, N, 2)
-        edge_ctrl = dec['edge_ctrl']              # (B, N, N, 4)
         edge_exist_logits = dec['edge_exist_logits']  # (B, N, N)
         batch_size, n = dec['node_exist_logits'].shape
 
@@ -538,8 +663,12 @@ class AutoEncoderBezier(nn.Module):
         b_ar = torch.arange(batch_size, device=device).unsqueeze(1)  # (B, 1)
         start_xy = node_xy[:, row_idx, :]   # (B, E, 2) == P0
         end_xy = node_xy[:, col_idx, :]     # (B, E, 2) == P3
-        ctrl_flat = edge_ctrl.reshape(batch_size, n * n, 4)[:, cand_idx, :]  # (B, E, 4)
         logits_flat = edge_exist_logits.reshape(batch_size, n * n)[:, cand_idx]  # (B, E)
+        if self.use_bezier:
+            edge_geo_flat = dec['edge_ctrl'].reshape(batch_size, n * n, 4)[:, cand_idx, :]  # (B, E, 4)
+        else:
+            edge_geo_flat = dec['edge_poly_residual'].reshape(
+                batch_size, n * n, -1)[:, cand_idx, :]  # (B, E, 2*(P-2))
 
         # ---- pad GT lanes to a dense (B, M, P, 2) tensor ---------------- #
         gt_dense, gt_mask = to_dense_batch(x_lane_states, lane_batch, batch_size=batch_size)  # (B,M,P,2),(B,M)
@@ -557,15 +686,20 @@ class AutoEncoderBezier(nn.Module):
         topk = min(E, max(self.cfg.matching_topk, 4 * int(m_max)))
         sel = torch.topk(proxy.amin(dim=2), k=topk, largest=False, dim=1).indices  # (B, k)
 
-        # ---- resolve bezier polylines for selected edges (batched) ------ #
+        # ---- resolve polylines for selected edges (batched) ------------- #
         sel_start = start_xy[b_ar, sel]            # (B, k, 2)  P0
         sel_end = end_xy[b_ar, sel]                # (B, k, 2)  P3
-        sel_ctrl = ctrl_flat[b_ar, sel]            # (B, k, 4)  offsets (delta1, delta2)
-        # inner control points are offsets relative to the endpoints
-        p1 = sel_start + sel_ctrl[..., 0:2]
-        p2 = sel_end + sel_ctrl[..., 2:4]
-        ctrl4 = torch.stack([sel_start, p1, p2, sel_end], dim=2)  # (B, k, 4, 2)
-        poly_sel = torch.einsum('pc,bkcd->bkpd', basis, ctrl4)  # (B, k, P, 2)
+        sel_geo = edge_geo_flat[b_ar, sel]         # (B, k, 4) or (B, k, 2*(P-2))
+        if self.use_bezier:
+            # inner control points are offsets relative to the endpoints
+            p1 = sel_start + sel_geo[..., 0:2]
+            p2 = sel_end + sel_geo[..., 2:4]
+            ctrl4 = torch.stack([sel_start, p1, p2, sel_end], dim=2)  # (B, k, 4, 2)
+            poly_sel = torch.einsum('pc,bkcd->bkpd', basis, ctrl4)  # (B, k, P, 2)
+        else:
+            # interior-point residuals on the node-to-node chord; endpoints are
+            # exactly the (shared) node positions.
+            poly_sel = resolve_polyline_edges(sel_start, sel_end, sel_geo, num_points)  # (B,k,P,2)
 
         # ---- matching cost on the reduced candidate set (batched) ------- #
         poly_flat2 = poly_sel.reshape(batch_size, topk, num_points * 2)
@@ -724,15 +858,9 @@ class AutoEncoderBezier(nn.Module):
         if getattr(self.cfg, 'use_gt_node_matching', False) and l2l_edge_index is not None:
             mt = self._match_nodes(dec, x_lane_states, lane_batch, l2l_edge_index, x_lane_conn)
             if mt['lane_b'] is not None:
-                basis = cubic_bezier_basis(x_lane_states.shape[1], device, x_lane_states.dtype)
+                num_points = x_lane_states.shape[1]
                 lb_, ls_, ld_ = mt['lane_b'], mt['lane_snode'], mt['lane_dnode']
-                p0 = dec['node_xy'][lb_, ls_]
-                p3 = dec['node_xy'][lb_, ld_]
-                ctrl = dec['edge_ctrl'][lb_, ls_, ld_]
-                p1 = p0 + ctrl[:, 0:2]
-                p2 = p3 + ctrl[:, 2:4]
-                ctrl4 = torch.stack([p0, p1, p2, p3], dim=1)
-                poly = torch.einsum('pc,tcd->tpd', basis, ctrl4)
+                poly = self._resolve_edge_polyline(dec, lb_, ls_, ld_, num_points)
                 lane_samples = lane_samples.index_copy(0, mt['lane_global'], poly)
             return lane_samples
 
@@ -756,6 +884,59 @@ class AutoEncoderBezier(nn.Module):
         dec = self.forward(data)
         lane_samples = self.reconstruct_lanes(dec, x_lane_states, lane_batch, l2l_edge_index, x_lane_conn)
         return dec['agent_states_pred'], lane_samples, dec['agent_types_pred'], dec['lane_cond_dis_prob']
+
+    @torch.no_grad()
+    def reconstruct_graph(self, data, node_thresh=0.5, edge_thresh=0.5):
+        """Threshold-based graph reconstruction (NO GT matching).
+
+        Builds the lane graph purely from the model's own predicted node/edge
+        *existence* -- exactly what generation must do when no GT is available.
+        Unlike :meth:`reconstruct_lanes` (which borrows the GT junction matching
+        to pick edges and only tests geometry), this exposes whether the discrete
+        node/edge-existence heads actually learned a clean junction structure.
+
+        An edge ``i -> j`` is kept iff both endpoint nodes are active
+        (``sigmoid(node_exist) > node_thresh``) and the edge is active
+        (``sigmoid(edge_exist) > edge_thresh``); each kept edge is drawn as its
+        resolved polyline (arc-length-resampled cubic Bezier, or the
+        chord-relative polyline when ``use_bezier=False``).
+
+        Returns:
+            agent_states_pred: ``(N_agents, state_dim)`` (aligned to GT tokens)
+            agent_types_pred:  ``(N_agents,)`` argmax class index
+            pred_lanes:        ``(M, P, 2)`` kept-edge polylines (M varies)
+            pred_lane_batch:   ``(M,)`` scene index per predicted lane
+        """
+        device = data['lane'].x.device
+        dec = self.forward(data)
+        node_xy = dec['node_xy']
+        node_prob = torch.sigmoid(dec['node_exist_logits'])   # (B, N)
+        edge_prob = torch.sigmoid(dec['edge_exist_logits'])   # (B, N, N)
+        batch_size, n = node_prob.shape
+        offdiag = ~torch.eye(n, dtype=torch.bool, device=device)
+
+        dtype = node_xy.dtype
+        num_points = data['lane'].x.shape[1]
+
+        polys, batches = [], []
+        for b in range(batch_size):
+            active = node_prob[b] > node_thresh                       # (N,)
+            keep = (edge_prob[b] > edge_thresh) & offdiag & active.unsqueeze(1) & active.unsqueeze(0)
+            ij = keep.nonzero(as_tuple=False)                         # (M, 2) -> (src, dst)
+            if ij.shape[0] == 0:
+                continue
+            si, di = ij[:, 0], ij[:, 1]
+            b_idx = torch.full_like(si, b)
+            polys.append(self._resolve_edge_polyline(dec, b_idx, si, di, num_points))
+            batches.append(torch.full((ij.shape[0],), b, device=device, dtype=torch.long))
+
+        if polys:
+            pred_lanes = torch.cat(polys, dim=0)
+            pred_lane_batch = torch.cat(batches, dim=0)
+        else:
+            pred_lanes = torch.zeros(0, num_points, 2, device=device, dtype=dtype)
+            pred_lane_batch = torch.zeros(0, dtype=torch.long, device=device)
+        return dec['agent_states_pred'], dec['agent_types_pred'], pred_lanes, pred_lane_batch
 
     def loss(self, data):
         """Compute the autoencoder loss for a batch of data."""
@@ -895,24 +1076,23 @@ class AutoEncoderBezier(nn.Module):
         Intended for visualization / downstream use.
         """
         node_xy = dec['node_xy']
-        edge_ctrl = dec['edge_ctrl']
         edge_exist_logits = dec['edge_exist_logits']
         node_exist_logits = dec['node_exist_logits']
         batch_size, n = node_exist_logits.shape
         device = node_xy.device
         num_points = self.cfg.num_points_per_lane
-        basis = cubic_bezier_basis(num_points, device, node_xy.dtype)
         offdiag = ~torch.eye(n, dtype=torch.bool, device=device)
 
         out = []
         for b in range(batch_size):
-            poly_b = resolve_bezier_edges(node_xy[b], edge_ctrl[b], basis)  # (N, N, P, 2)
             keep = (torch.sigmoid(edge_exist_logits[b]) > edge_exist_threshold) & offdiag
             src, dst = keep.nonzero(as_tuple=True)
+            b_idx = torch.full_like(src, b)
+            polylines = self._resolve_edge_polyline(dec, b_idx, src, dst, num_points)  # (K, P, 2)
             out.append({
                 'node_xy': node_xy[b],
                 'node_exist_prob': torch.sigmoid(node_exist_logits[b]),
-                'polylines': poly_b[src, dst],
+                'polylines': polylines,
                 'edge_src': src,
                 'edge_dst': dst,
             })

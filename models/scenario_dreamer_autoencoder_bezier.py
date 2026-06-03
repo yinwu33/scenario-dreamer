@@ -15,7 +15,7 @@ torch.set_printoptions(sci_mode=False)
 
 from utils.pyg_helpers import get_edge_index_bipartite, get_edge_index_complete_graph
 from utils.data_helpers import unnormalize_scene
-from utils.viz import visualize_batch
+from utils.viz import visualize_batch, visualize_predicted_graph
 
 
 # this ensures CPUs are not suboptimally utilized
@@ -223,6 +223,30 @@ class ScenarioDreamerAutoEncoderBezier(pl.LightningModule):
                             self.current_epoch,
                             batch_idx,
                             self.cfg.train.track)
+
+            # diagnostic: graph built purely from predicted node/edge existence
+            # (no GT matching) -- reveals the true junction quality the model
+            # would produce at generation time.
+            if getattr(self.model.cfg, 'viz_threshold_graph', False):
+                pred_agents, pred_agent_types, pred_lanes, pred_lane_batch = self.model.reconstruct_graph(
+                    subset_data,
+                    node_thresh=getattr(self.model.cfg, 'viz_node_exist_thresh', 0.5),
+                    edge_thresh=getattr(self.model.cfg, 'viz_edge_exist_thresh', 0.5))
+                pred_agents, pred_lanes = unnormalize_scene(
+                    pred_agents, pred_lanes,
+                    fov=self.cfg_dataset.fov,
+                    min_speed=self.cfg_dataset.min_speed, max_speed=self.cfg_dataset.max_speed,
+                    min_length=self.cfg_dataset.min_length, max_length=self.cfg_dataset.max_length,
+                    min_width=self.cfg_dataset.min_width, max_width=self.cfg_dataset.max_width,
+                    min_lane_x=self.cfg_dataset.min_lane_x, min_lane_y=self.cfg_dataset.min_lane_y,
+                    max_lane_x=self.cfg_dataset.max_lane_x, max_lane_y=self.cfg_dataset.max_lane_y)
+                pred_images = visualize_predicted_graph(
+                    num_samples, pred_agents, subset_data['agent'].batch, pred_agent_types,
+                    pred_lanes, pred_lane_batch, save_dir, self.current_epoch, batch_idx,
+                    self.cfg.train.track)
+                if self.cfg.train.track and pred_images is not None:
+                    images_to_log.update(pred_images)
+
             if self.cfg.train.track:
                 self.logger.experiment.log(images_to_log)
 

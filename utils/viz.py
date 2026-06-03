@@ -374,6 +374,55 @@ def visualize_batch(num_samples,
         return None
 
 
+def visualize_predicted_graph(num_samples,
+                              agent_samples,
+                              agent_batch,
+                              agent_types,
+                              pred_lanes,
+                              pred_lane_batch,
+                              save_dir,
+                              epoch,
+                              batch_idx,
+                              save_wandb=False,
+                              tag='scene_plot_pred'):
+    """Visualize the *threshold-built* predicted lane graph (no GT matching).
+
+    ``pred_lanes`` / ``pred_lane_batch`` come from
+    ``AutoEncoderBezier.reconstruct_graph`` -- a variable number of lanes per
+    scene built purely from predicted node/edge existence. Agents are reused
+    from the GT-aligned reconstruction for context. Logged under ``tag`` so it
+    sits next to the GT-matched ``scene_plot`` panels in W&B.
+    """
+    agent_samples = agent_samples.detach().cpu().numpy()
+    agent_types = agent_types.detach().cpu().numpy()
+    agent_batch = agent_batch.detach().cpu().numpy()
+    pred_lanes = pred_lanes.detach().cpu().numpy()
+    pred_lane_batch = pred_lane_batch.detach().cpu().numpy()
+
+    images_to_log = {}
+    for i in range(num_samples):
+        scene_i_agents = agent_samples[agent_batch == i]
+        scene_i_agent_types = agent_types[agent_batch == i]
+        scene_i_lanes = pred_lanes[pred_lane_batch == i]
+        if scene_i_lanes.shape[0] == 0:  # no edge passed the threshold for this scene
+            scene_i_lanes = np.zeros((0, pred_lanes.shape[1] if pred_lanes.ndim == 3 else 20, 2))
+        fig = plot_scene(
+            scene_i_agents,
+            scene_i_lanes,
+            scene_i_agent_types,
+            None,
+            name=f'{tag}_epoch_{epoch}_batch_{batch_idx}_sample_{i}.png',
+            save_dir=save_dir,
+            return_fig=save_wandb)
+        if save_wandb:
+            images_to_log[f'{tag}/epoch_{epoch}_batch_{batch_idx}_sample_{i}'] = wandb.Image(fig)
+            plt.close(fig)
+
+    if save_wandb:
+        return images_to_log
+    return None
+
+
 def plot_k_disks_vocabulary(V, png_path, dpi=1000):
     plt.figure(figsize=(18, 3))
     plt.ylim(-0.25, 0.25)
