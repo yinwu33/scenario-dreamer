@@ -1,0 +1,9 @@
+defaults:
+- dm
+
+state_dim: 7
+lane_attr: 2
+num_points_per_lane: ${dm.dataset.num_points_per_lane}
+agent_latent_dim: 10
+lane_latent_dim: 40
+lane_conn_hidden_dim: 64

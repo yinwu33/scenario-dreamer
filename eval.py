@@ -3,6 +3,7 @@ import hydra
 from omegaconf import OmegaConf
 from models.scenario_dreamer_autoencoder import ScenarioDreamerAutoEncoder
 from models.scenario_dreamer_ldm import ScenarioDreamerLDM
+from models.scenario_dreamer_dm import ScenarioDreamerDM
 from models.scenario_dreamer_cldm import ScenarioDreamerCLDM
 from metrics import Metrics
 
@@ -76,6 +77,33 @@ def eval_ldm(cfg, cfg_ae, save_dir=None, model_cls=ScenarioDreamerLDM):
     )
 
 
+def eval_dm(cfg, save_dir=None):
+    """Evaluate the direct vectorized diffusion model."""
+    files_in_save_dir = os.listdir(save_dir)
+    ckpt_path = None
+    for file in files_in_save_dir:
+        if file.endswith('.ckpt') and 'last' in file:
+            ckpt_path = os.path.join(save_dir, file)
+            print("Loading checkpoint: ", ckpt_path)
+            break
+
+    assert ckpt_path is not None, "No checkpoint found in the save directory."
+
+    model = ScenarioDreamerDM.load_from_checkpoint(ckpt_path, cfg=cfg).to('cuda')
+    model.generate(
+        mode=cfg.eval.mode,
+        num_samples=cfg.eval.num_samples,
+        batch_size=cfg.eval.batch_size,
+        cache_samples=cfg.eval.cache_samples,
+        visualize=cfg.eval.visualize,
+        conditioning_path=cfg.eval.conditioning_path,
+        cache_dir=os.path.join(save_dir, f'{cfg.eval.mode}_samples'),
+        viz_dir=cfg.eval.viz_dir,
+        save_wandb=False,
+        return_samples=False,
+    )
+
+
 
 def eval_autoencoder(cfg, save_dir=None):
     """ Evaluate the Scenario Dreamer AutoEncoder model."""
@@ -114,7 +142,7 @@ def main(cfg):
         OmegaConf.set_struct(cfg, False)   # unlock to allow setting dataset name
         cfg.dataset_name = dataset_name
         OmegaConf.set_struct(cfg, True)    # relock
-    else:
+    elif cfg.model_name in ['ldm', 'cldm']:
         model_name = cfg.model_name
         cfg_ae = cfg.ae
         cfg = cfg.ldm
@@ -124,6 +152,14 @@ def main(cfg):
         cfg_ae.dataset_name = dataset_name
         OmegaConf.set_struct(cfg, True)    # relock
         OmegaConf.set_struct(cfg_ae, True)
+    elif cfg.model_name == 'dm':
+        model_name = cfg.model_name
+        cfg = cfg.dm
+        OmegaConf.set_struct(cfg, False)
+        cfg.dataset_name = dataset_name
+        OmegaConf.set_struct(cfg, True)
+    else:
+        raise ValueError(f"Unsupported evaluation model_name: {cfg.model_name}")
     
     pl.seed_everything(cfg.eval.seed, workers=True)
 
@@ -142,6 +178,8 @@ def main(cfg):
             generate_simulation_environments(cfg, cfg_ae, save_dir, model_cls=model_cls)
         else:
             eval_ldm(cfg, cfg_ae, save_dir, model_cls=model_cls)
+    elif model_name == 'dm':
+        eval_dm(cfg, save_dir)
 
 
 if __name__ == '__main__':

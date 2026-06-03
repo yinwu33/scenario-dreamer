@@ -339,7 +339,7 @@ def visualize_batch(num_samples,
             return_fig=save_wandb,
             condition_text=condition_texts[i] if condition_texts is not None else None)
         if save_wandb:
-            images_to_log[f'scene_plot/epoch_{epoch}_batch_{batch_idx}_sample_{i}'] = wandb.Image(fig)
+            images_to_log[f'scene_plot/batch_{batch_idx}_sample_{i}'] = wandb.Image(fig)
             plt.close(fig)
 
         # plot the lane graph for each edge type
@@ -364,7 +364,7 @@ def visualize_batch(num_samples,
                     save_dir=save_dir,
                     return_fig=save_wandb)
                 if save_wandb:
-                    images_to_log[f'lane_graph/epoch_{epoch}_batch_{batch_idx}_sample_{i}_type_{typ}'] = wandb.Image(fig)
+                    images_to_log[f'lane_graph/batch_{batch_idx}_sample_{i}_type_{typ}'] = wandb.Image(fig)
                     plt.close(fig)
     
     # Log all images at once
@@ -415,7 +415,7 @@ def visualize_predicted_graph(num_samples,
             save_dir=save_dir,
             return_fig=save_wandb)
         if save_wandb:
-            images_to_log[f'{tag}/epoch_{epoch}_batch_{batch_idx}_sample_{i}'] = wandb.Image(fig)
+            images_to_log[f'{tag}/batch_{batch_idx}_sample_{i}'] = wandb.Image(fig)
             plt.close(fig)
 
     if save_wandb:

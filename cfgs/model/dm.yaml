@@ -1,0 +1,22 @@
+# Direct diffusion model architecture.
+hidden_dim: 2048
+num_heads: 16
+agent_hidden_dim: 512
+agent_num_heads: 8
+num_factorized_dit_blocks: 2
+dropout: 0
+label_dropout: 0.1
+num_l2l_blocks: 1
+
+# DM keeps these names for DiT compatibility. They are direct vector feature
+# dimensions, not autoencoder latent dimensions.
+agent_latent_dim: null
+lane_latent_dim: null
+state_dim: null
+lane_attr: null
+num_points_per_lane: null
+lane_conn_hidden_dim: 64
+
+n_diffusion_timesteps: 100
+lane_sampling_temperature: 0.75
+diffusion_clip: 5

@@ -45,7 +45,7 @@ convert_pickles_to_jsons:
   path_to_jsons: ${scratch_root}/simulation_environment_datasets/${convert_pickles_to_jsons.directory}_jsons # path to the json files
   dataset_size: 250 # number of simulation environments to convert
 
-model_name: autoencoder # or ldm, cldm, or ctrl_sim
+model_name: autoencoder # or ldm, cldm, dm, or ctrl_sim
 
 # hacky way to not have to manually change the dataset name in all config groups from command line
 # only dataset_name has to be configured from command line 
@@ -63,6 +63,11 @@ defaults:
   - eval@ldm.eval:       ${dataset_name}_ldm
   - model@ldm.model:      ${dataset_name}_ldm
   - datamodule@ldm.datamodule: ${dataset_name}_ldm
+  - optional dataset@dm.dataset:    ${dataset_name}_dm
+  - optional train@dm.train:      ${dataset_name}_dm
+  - optional eval@dm.eval:       ${dataset_name}_dm
+  - optional model@dm.model:      ${dataset_name}_dm
+  - optional datamodule@dm.datamodule: ${dataset_name}_dm
   - dataset@ctrl_sim.dataset:   ${dataset_name}_ctrl_sim
   - train@ctrl_sim.train:      ${dataset_name}_ctrl_sim
   - model@ctrl_sim.model:      ${dataset_name}_ctrl_sim
