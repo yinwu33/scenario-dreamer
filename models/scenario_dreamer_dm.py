@@ -58,11 +58,11 @@ class ScenarioDreamerDM(pl.LightningModule):
         for k, v in loss_dict.items():
             if k == "loss":
                 v = v.item()
-            self.log(key_lambda(k), v, prog_bar=True, on_step=on_step, on_epoch=on_epoch, sync_dist=True, batch_size=batch_size)
+            self.log(key_lambda(k), v, prog_bar=True, on_step=on_step, on_epoch=on_epoch, sync_dist=False, batch_size=batch_size)
 
         if split == "train":
             cur_lr = self.trainer.optimizers[0].param_groups[0]["lr"]
-            self.log("lr", cur_lr, prog_bar=True, on_step=True, on_epoch=False, sync_dist=True)
+            self.log("lr", cur_lr, prog_bar=True, on_step=True, on_epoch=False, sync_dist=False)
 
     def training_step(self, data, batch_idx):
         loss_dict = self.diff_model.loss(data)

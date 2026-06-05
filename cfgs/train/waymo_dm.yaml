@@ -2,6 +2,7 @@ defaults:
 - base
 
 run_name: scenario_dreamer_dm_base_waymo
+precision: bf16-mixed
 lr_schedule: constant
 save_top_k: 0
 max_steps: 500000
