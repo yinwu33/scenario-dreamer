@@ -1,103 +1,11 @@
 import numpy as np
 import torch
-import torch.nn.functional as F
 from torch import nn
 
 from cfgs.config import BEFORE_PARTITION
 from nn_modules.dit import DiT
-from utils.data_container import get_batches
 from utils.diffusion_helpers import cosine_beta_schedule, extract
-from utils.dit_layers import TwoLayerResMLP
 from utils.losses import GeometricLosses
-from utils.pyg_helpers import get_indices_within_scene
-
-
-class DMTransformer(DiT):
-    """DiT backbone with an explicit lane-connection classification head."""
-
-    def __init__(self, cfg):
-        super(DMTransformer, self).__init__(cfg)
-        self.downsample_lane_for_conn = nn.Linear(self.cfg_model.hidden_dim, self.cfg_model.lane_conn_hidden_dim)
-        self.lane_conn_mlp = TwoLayerResMLP(self.cfg_model.lane_conn_hidden_dim * 2, self.cfg_model.lane_conn_hidden_dim)
-        self.pred_lane_conn = nn.Linear(self.cfg_model.lane_conn_hidden_dim, self.cfg_dataset.num_lane_connection_types)
-
-    def forward(
-        self,
-        x_agent,
-        x_lane,
-        data,
-        agent_timestep,
-        lane_timestep,
-        unconditional=False,
-        return_lane_conn_logits=False,
-    ):
-        lane_idx_batch = get_indices_within_scene(data["lane"].batch)
-        agent_idx_batch = get_indices_within_scene(data["agent"].batch)
-
-        pos_emb_lane = self.pos_emb_lane[lane_idx_batch]
-        pos_emb_agent = self.pos_emb_agent[agent_idx_batch]
-        x_lane = self.lane_embedder(x_lane[:, 0]) + pos_emb_lane
-        x_agent = self.agent_embedder(x_agent[:, 0]) + pos_emb_agent
-
-        scene_idx = self.cfg_dataset.num_map_ids * data["lg_type"].long() + data["map_id"].long()
-        force_drop = torch.ones_like(scene_idx) if unconditional else None
-        scene_type = self.scene_type_embedder(scene_idx.long(), train=self.training, force_drop_ids=force_drop)
-
-        agent_batch = data["agent"].batch
-        lane_batch = data["lane"].batch
-        agent_scene_type = scene_type[agent_batch]
-        lane_scene_type = scene_type[lane_batch]
-
-        num_agents_emb = self.num_agents_embedder(data["num_agents"].long(), train=self.training)[agent_batch]
-        num_lanes_emb = self.num_lanes_embedder(data["num_lanes"].long(), train=self.training)[lane_batch]
-
-        t = self.t_embedder(torch.cat([lane_timestep, agent_timestep], dim=-1))
-        n = torch.cat([num_lanes_emb, num_agents_emb], dim=0)
-        y = torch.cat([lane_scene_type, agent_scene_type], dim=0)
-        if self.use_map_conditioning:
-            map_condition = self._embed_map_condition(data, unconditional=unconditional)
-            map_condition = torch.cat([map_condition[lane_batch], map_condition[agent_batch]], dim=0)
-        else:
-            map_condition = 0
-
-        l2l_edge_index = data["lane", "to", "lane"].edge_index
-        a2a_edge_index = data["agent", "to", "agent"].edge_index
-        l2a_edge_index = data["lane", "to", "agent"].edge_index.clone()
-        l2a_edge_index[1] = l2a_edge_index[1] + x_lane.shape[0]
-
-        c = t + y + n + map_condition
-        c_small = self.downsample_c(c)
-
-        x_lane = self.emb_drop(x_lane)
-        x_agent = self.emb_drop(x_agent)
-
-        for block in self.blocks:
-            x_lane, x_agent = block(
-                x_lane,
-                x_agent,
-                c,
-                c_small,
-                l2l_edge_index,
-                a2a_edge_index,
-                l2a_edge_index,
-            )
-
-        lane_conn_logits = None
-        if return_lane_conn_logits:
-            lane_conn_node_emb = self.downsample_lane_for_conn(x_lane)
-            src = lane_conn_node_emb[l2l_edge_index[0]]
-            dst = lane_conn_node_emb[l2l_edge_index[1]]
-            lane_conn_emb = self.lane_conn_mlp(torch.cat([src, dst], dim=-1))
-            lane_conn_logits = self.pred_lane_conn(lane_conn_emb)
-
-        c_lane = c[: x_lane.shape[0]]
-        c_agent = c_small[x_lane.shape[0] :]
-        x_lane = self.pred_lane_noise(x_lane, c_lane).unsqueeze(1)
-        x_agent = self.pred_agent_noise(x_agent, c_agent).unsqueeze(1)
-
-        if return_lane_conn_logits:
-            return x_agent, x_lane, lane_conn_logits
-        return x_agent, x_lane
 
 
 class DM(nn.Module):
@@ -106,7 +14,7 @@ class DM(nn.Module):
         self.cfg = cfg
         self.cfg_model = self.cfg.model
         self.cfg_dataset = self.cfg.dataset
-        self.model = DMTransformer(cfg)
+        self.model = DiT(cfg)
 
         n_timesteps = self.cfg_model.n_diffusion_timesteps
         betas = cosine_beta_schedule(n_timesteps)
@@ -136,7 +44,6 @@ class DM(nn.Module):
         self.agent_loss_fn = GeometricLosses[loss_type]((1, 2))
         self.lane_loss_fn = GeometricLosses[loss_type]((1, 2))
         self.agent_type_loss_fn = GeometricLosses["cross_entropy"](apply_mean=False)
-        self.lane_conn_loss_fn = GeometricLosses["cross_entropy"](apply_mean=False)
 
     def _agent_target(self, data):
         return torch.cat([data["agent"].x.float(), data["agent"].type.float()], dim=-1).unsqueeze(1)
@@ -274,13 +181,12 @@ class DM(nn.Module):
         x_agent_noisy[agent_mask] = x_agent[agent_mask]
         x_lane_noisy[lane_mask] = x_lane[lane_mask]
 
-        agent_noise_pred, lane_noise_pred, lane_conn_logits = self.model(
+        agent_noise_pred, lane_noise_pred = self.model(
             x_agent_noisy,
             x_lane_noisy,
             data,
             t_agent,
             t_lane,
-            return_lane_conn_logits=True,
         )
 
         agent_noise[agent_mask] = 0.0
@@ -292,20 +198,12 @@ class DM(nn.Module):
         _, agent_type_logits = self._split_agent(x_agent_recon)
         agent_type_loss = self.agent_type_loss_fn(agent_type_logits, data["agent"].type.float(), data["agent"].batch)
 
-        _, _, lane_conn_batch = get_batches(data)
-        lane_conn_loss = self.lane_conn_loss_fn(
-            lane_conn_logits,
-            data["lane", "to", "lane"].type.float(),
-            lane_conn_batch,
-        )
-
         loss = (
             agent_loss
             + self.cfg.train.lane_weight * lane_loss
             + self.cfg.train.agent_type_weight * agent_type_loss
-            + self.cfg.train.lane_conn_weight * lane_conn_loss
         )
-        return loss, agent_loss, lane_loss, agent_type_loss, lane_conn_loss
+        return loss, agent_loss, lane_loss, agent_type_loss
 
     def loss(self, data):
         x_agent = self._agent_target(data)
@@ -318,7 +216,7 @@ class DM(nn.Module):
         t_agent = t[agent_batch]
         t_lane = t[lane_batch]
 
-        loss, agent_loss, lane_loss, agent_type_loss, lane_conn_loss = self.p_losses(
+        loss, agent_loss, lane_loss, agent_type_loss = self.p_losses(
             x_agent, x_lane, data, t_agent, t_lane
         )
         return {
@@ -326,7 +224,6 @@ class DM(nn.Module):
             "agent_loss": agent_loss.mean().detach(),
             "lane_loss": lane_loss.mean().detach(),
             "agent_type_loss": agent_type_loss.mean().detach(),
-            "lane_conn_loss": lane_conn_loss.mean().detach(),
         }
 
     @torch.no_grad()
@@ -335,19 +232,11 @@ class DM(nn.Module):
         agent_types = torch.argmax(agent_type_logits, dim=1)
         lane_states = self._reshape_lane(x_lane)
 
-        timesteps = torch.zeros(data.batch_size, device=x_agent.device, dtype=torch.long)
-        t_agent = timesteps[data["agent"].batch]
-        t_lane = timesteps[data["lane"].batch]
-        _, _, lane_conn_logits = self.model(
-            x_agent.unsqueeze(1),
-            x_lane.unsqueeze(1),
-            data,
-            t_agent,
-            t_lane,
-            return_lane_conn_logits=True,
+        lane_conn_pred = torch.zeros(
+            data["lane", "to", "lane"].edge_index.shape[1],
+            self.cfg_dataset.num_lane_connection_types,
+            device=x_agent.device,
+            dtype=torch.float32,
         )
-        lane_conn_pred = F.one_hot(
-            torch.argmax(lane_conn_logits, dim=1),
-            num_classes=self.cfg_dataset.num_lane_connection_types,
-        )
+        lane_conn_pred[:, 0] = 1.0
         return agent_states, lane_states, agent_types, None, lane_conn_pred

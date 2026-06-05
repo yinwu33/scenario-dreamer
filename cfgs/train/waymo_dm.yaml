@@ -4,7 +4,7 @@ defaults:
 run_name: scenario_dreamer_dm_base_waymo
 lr_schedule: constant
 save_top_k: 0
-max_steps: 165000
+max_steps: 500000
 warmup_steps: 500
 weight_decay: 1e-5
 check_val_every_n_epoch: 2

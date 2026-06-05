@@ -1,7 +1,7 @@
 scratch_root: ${oc.env:SCRATCH_ROOT}
 dataset_root: ${oc.env:DATASET_ROOT}
 project_root: ${oc.env:PROJECT_ROOT}
-waymo_data_folder: ${dataset_root}/waymo_open_dataset_motion_v_1_1_0
+waymo_data_folder: ${dataset_root}/waymo_open_dataset_motion_v_1_3_0
 waymo_train_folder: ${waymo_data_folder}/training
 waymo_val_folder: ${waymo_data_folder}/validation
 waymo_test_folder: ${waymo_data_folder}/testing
