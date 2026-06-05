@@ -4,6 +4,7 @@ from models.scenario_dreamer_autoencoder import ScenarioDreamerAutoEncoder
 from models.scenario_dreamer_autoencoder_bezier import ScenarioDreamerAutoEncoderBezier
 from models.scenario_dreamer_ldm import ScenarioDreamerLDM
 from models.scenario_dreamer_dm import ScenarioDreamerDM
+from models.scenario_dreamer_dm_goal import ScenarioDreamerDMGoal
 from models.scenario_dreamer_cldm import ScenarioDreamerCLDM
 from models.ctrl_sim import CtRLSim
 
@@ -134,7 +135,7 @@ def train_ldm(cfg, cfg_ae, save_dir=None, model_cls=ScenarioDreamerLDM):
     trainer.fit(model, datamodule, ckpt_path=ckpt_path)
 
 
-def train_dm(cfg, save_dir=None):
+def train_dm(cfg, save_dir=None, model_cls=ScenarioDreamerDM):
     """Train the direct vectorized diffusion model."""
     datamodule = instantiate(cfg.datamodule, dataset_cfg=cfg.dataset)
 
@@ -181,9 +182,9 @@ def train_dm(cfg, save_dir=None):
                         )
 
     if ckpt_path is not None:
-        model = ScenarioDreamerDM.load_from_checkpoint(ckpt_path, cfg=cfg, map_location='cpu')
+        model = model_cls.load_from_checkpoint(ckpt_path, cfg=cfg, map_location='cpu')
     else:
-        model = ScenarioDreamerDM(cfg=cfg)
+        model = model_cls(cfg=cfg)
     trainer.fit(model, datamodule, ckpt_path=ckpt_path)
 
 
@@ -266,6 +267,12 @@ def main(cfg):
         OmegaConf.set_struct(cfg, False)
         cfg.dataset_name = dataset_name
         OmegaConf.set_struct(cfg, True)
+    elif cfg.model_name == 'dm_goal':
+        model_name = cfg.model_name
+        cfg = cfg.dm_goal
+        OmegaConf.set_struct(cfg, False)
+        cfg.dataset_name = dataset_name
+        OmegaConf.set_struct(cfg, True)
     else:
         model_name = cfg.model_name
         cfg = cfg.ctrl_sim
@@ -290,6 +297,8 @@ def main(cfg):
         train_ldm(cfg, cfg_ae, save_dir, model_cls=ScenarioDreamerCLDM)
     elif model_name == 'dm':
         train_dm(cfg, save_dir)
+    elif model_name == 'dm_goal':
+        train_dm(cfg, save_dir, model_cls=ScenarioDreamerDMGoal)
     elif model_name == 'ctrl_sim':
         train_ctrl_sim(cfg, save_dir)
 

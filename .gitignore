@@ -16,3 +16,5 @@ run.sh
 data
 .vscode/
 diag_gt_to_bezier_out/
+
+data_selfplay/

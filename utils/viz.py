@@ -48,6 +48,8 @@ def plot_scene(
     bbox_linewidth = 0.35 / scale_factor
     heading_linewidth = 0.3 / scale_factor
     route_linewidth = 1.5 / scale_factor
+    goal_marker_size = 28 / (scale_factor ** 2)
+    goal_linewidth = 0.6 / scale_factor
 
     ct = 0
     for i in range(len(road_points)):
@@ -170,6 +172,28 @@ def plot_scene(
                 linewidth=heading_linewidth,
                 zorder=5
             )
+
+        if agent_states.shape[1] >= 9:
+            goal = agent_states[a, 7:9]
+            if np.all(np.isfinite(goal)):
+                ax.plot(
+                    [agent_states[a, 0], goal[0]],
+                    [agent_states[a, 1], goal[1]],
+                    color=color,
+                    linestyle=':',
+                    alpha=0.8,
+                    linewidth=goal_linewidth,
+                    zorder=6,
+                )
+                ax.scatter(
+                    goal[0],
+                    goal[1],
+                    marker='x',
+                    color=color,
+                    s=goal_marker_size,
+                    linewidths=max(goal_linewidth, 0.5),
+                    zorder=7,
+                )
 
     # Create the save directory if it doesn't exist
     if not os.path.exists(save_dir):

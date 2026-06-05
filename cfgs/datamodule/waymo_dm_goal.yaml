@@ -1,0 +1,8 @@
+defaults:
+- base
+
+_target_: datamodules.waymo.waymo_datamodule_dm_goal.WaymoDataModuleDMGoal
+
+train_batch_size: 256
+val_batch_size: 256
+dataset_cfg: null

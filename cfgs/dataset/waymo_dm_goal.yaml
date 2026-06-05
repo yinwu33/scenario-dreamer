@@ -1,0 +1,7 @@
+defaults:
+- waymo_base
+
+dataset_path: ${dataset_root}/scenario_dreamer_waymo
+preprocess_dir: ${dataset_root}/scenario_dreamer_selfplay_waymo
+generate_only_vehicles: False
+remove_left_right_connections: False

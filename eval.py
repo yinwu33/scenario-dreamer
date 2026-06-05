@@ -4,6 +4,7 @@ from omegaconf import OmegaConf
 from models.scenario_dreamer_autoencoder import ScenarioDreamerAutoEncoder
 from models.scenario_dreamer_ldm import ScenarioDreamerLDM
 from models.scenario_dreamer_dm import ScenarioDreamerDM
+from models.scenario_dreamer_dm_goal import ScenarioDreamerDMGoal
 from models.scenario_dreamer_cldm import ScenarioDreamerCLDM
 from metrics import Metrics
 
@@ -77,7 +78,7 @@ def eval_ldm(cfg, cfg_ae, save_dir=None, model_cls=ScenarioDreamerLDM):
     )
 
 
-def eval_dm(cfg, save_dir=None):
+def eval_dm(cfg, save_dir=None, model_cls=ScenarioDreamerDM):
     """Evaluate the direct vectorized diffusion model."""
     files_in_save_dir = os.listdir(save_dir)
     ckpt_path = None
@@ -89,7 +90,7 @@ def eval_dm(cfg, save_dir=None):
 
     assert ckpt_path is not None, "No checkpoint found in the save directory."
 
-    model = ScenarioDreamerDM.load_from_checkpoint(ckpt_path, cfg=cfg).to('cuda')
+    model = model_cls.load_from_checkpoint(ckpt_path, cfg=cfg).to('cuda')
     model.generate(
         mode=cfg.eval.mode,
         num_samples=cfg.eval.num_samples,
@@ -158,6 +159,12 @@ def main(cfg):
         OmegaConf.set_struct(cfg, False)
         cfg.dataset_name = dataset_name
         OmegaConf.set_struct(cfg, True)
+    elif cfg.model_name == 'dm_goal':
+        model_name = cfg.model_name
+        cfg = cfg.dm_goal
+        OmegaConf.set_struct(cfg, False)
+        cfg.dataset_name = dataset_name
+        OmegaConf.set_struct(cfg, True)
     else:
         raise ValueError(f"Unsupported evaluation model_name: {cfg.model_name}")
     
@@ -180,6 +187,8 @@ def main(cfg):
             eval_ldm(cfg, cfg_ae, save_dir, model_cls=model_cls)
     elif model_name == 'dm':
         eval_dm(cfg, save_dir)
+    elif model_name == 'dm_goal':
+        eval_dm(cfg, save_dir, model_cls=ScenarioDreamerDMGoal)
 
 
 if __name__ == '__main__':
