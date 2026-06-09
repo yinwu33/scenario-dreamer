@@ -22,6 +22,22 @@ from omegaconf import OmegaConf
 from utils.train_helpers import cache_latent_stats, set_latent_stats
 
 
+def get_trainer_strategy(devices):
+    """Use DDP only for multi-device training."""
+    if isinstance(devices, int):
+        use_ddp = devices > 1
+    elif isinstance(devices, (list, tuple)):
+        use_ddp = len(devices) > 1
+    elif isinstance(devices, str):
+        use_ddp = devices not in {"1", "[0]"}
+    else:
+        use_ddp = False
+
+    if use_ddp:
+        return DDPStrategy(find_unused_parameters=True, gradient_as_bucket_view=True)
+    return "auto"
+
+
 def train_ctrl_sim(cfg, save_dir=None):
     datamodule = instantiate(cfg.datamodule, dataset_cfg=cfg.dataset)
 
@@ -57,7 +73,7 @@ def train_ctrl_sim(cfg, save_dir=None):
     
     trainer = pl.Trainer(accelerator=cfg.train.accelerator,
                          devices=cfg.train.devices,
-                         strategy=DDPStrategy(find_unused_parameters=True, gradient_as_bucket_view=True),
+                         strategy=get_trainer_strategy(cfg.train.devices),
                          callbacks=[model_summary, model_checkpoint, lr_monitor],
                          max_steps=cfg.train.max_steps,
                          check_val_every_n_epoch=cfg.train.check_val_every_n_epoch,
@@ -116,7 +132,7 @@ def train_ldm(cfg, cfg_ae, save_dir=None, model_cls=ScenarioDreamerLDM):
     
     trainer = pl.Trainer(accelerator=cfg.train.accelerator,
                          devices=cfg.train.devices,
-                         strategy=DDPStrategy(find_unused_parameters=True, gradient_as_bucket_view=True),
+                         strategy=get_trainer_strategy(cfg.train.devices),
                          callbacks=[model_summary, model_checkpoint, lr_monitor],
                          max_steps=cfg.train.max_steps,
                          check_val_every_n_epoch=cfg.train.check_val_every_n_epoch,
@@ -170,7 +186,7 @@ def train_dm(cfg, save_dir=None, model_cls=ScenarioDreamerDM):
 
     trainer = pl.Trainer(accelerator=cfg.train.accelerator,
                          devices=cfg.train.devices,
-                         strategy=DDPStrategy(find_unused_parameters=True, gradient_as_bucket_view=True),
+                         strategy=get_trainer_strategy(cfg.train.devices),
                          callbacks=[model_summary, model_checkpoint, lr_monitor],
                          max_steps=cfg.train.max_steps,
                          check_val_every_n_epoch=cfg.train.check_val_every_n_epoch,
@@ -225,7 +241,7 @@ def train_autoencoder(cfg, save_dir=None, model_cls=ScenarioDreamerAutoEncoder):
     
     trainer = pl.Trainer(accelerator=cfg.train.accelerator,
                          devices=cfg.train.devices,
-                         strategy=DDPStrategy(find_unused_parameters=True, gradient_as_bucket_view=True),
+                         strategy=get_trainer_strategy(cfg.train.devices),
                          callbacks=[model_summary, model_checkpoint, lr_monitor],
                          max_steps=cfg.train.max_steps,
                          check_val_every_n_epoch=cfg.train.check_val_every_n_epoch,

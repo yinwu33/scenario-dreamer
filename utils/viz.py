@@ -295,19 +295,24 @@ def plot_lane_graph(
         return None
     
 
-def visualize_batch(num_samples, 
-                    agent_samples, 
-                    lane_samples, 
-                    agent_types, 
+def visualize_batch(num_samples,
+                    agent_samples,
+                    lane_samples,
+                    agent_types,
                     lane_types,
-                    lane_conn_samples, 
-                    data, 
+                    lane_conn_samples,
+                    data,
                     save_dir,
                     epoch,
                     batch_idx,
                     save_wandb=False,
-                    visualize_lane_graph=False):
-    """ Visualize samples from the batch."""
+                    visualize_lane_graph=False,
+                    tag='scene_plot'):
+    """ Visualize samples from the batch.
+
+    ``tag`` namespaces the saved filenames and W&B panel keys so multiple calls
+    (e.g. generated samples vs. ground truth) don't overwrite each other.
+    """
 
     if lane_conn_samples.shape[-1] == 4:
         LANE_CONNECTION_TYPES = LANE_CONNECTION_TYPES_NUPLAN
@@ -358,12 +363,12 @@ def visualize_batch(num_samples,
             scene_i_lanes, 
             scene_i_agent_types, 
             scene_i_lane_types,
-            name=f'epoch_{epoch}_batch_{batch_idx}_sample_{i}.png', 
+            name=f'{tag}_epoch_{epoch}_batch_{batch_idx}_sample_{i}.png',
             save_dir=save_dir,
             return_fig=save_wandb,
             condition_text=condition_texts[i] if condition_texts is not None else None)
         if save_wandb:
-            images_to_log[f'scene_plot/batch_{batch_idx}_sample_{i}'] = wandb.Image(fig)
+            images_to_log[f'{tag}/batch_{batch_idx}_sample_{i}'] = wandb.Image(fig)
             plt.close(fig)
 
         # plot the lane graph for each edge type

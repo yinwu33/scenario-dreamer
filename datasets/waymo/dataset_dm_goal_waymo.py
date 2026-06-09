@@ -9,7 +9,7 @@ from torch_geometric.data import Dataset
 
 from cfgs.config import CONFIG_PATH, NON_PARTITIONED, PARTITIONED
 from utils.data_container import ScenarioDreamerData
-from utils.data_helpers import randomize_indices, reorder_indices
+from utils.data_helpers import modify_agent_states, randomize_indices, reorder_indices
 from utils.pyg_helpers import get_edge_index_bipartite, get_edge_index_complete_graph
 from utils.torch_helpers import from_numpy
 
@@ -52,10 +52,20 @@ class WaymoDatasetDMGoal(Dataset):
         if valid_goal_mask.sum() == 0:
             return None
 
-        agent_states = data["agent_states"][valid_goal_mask]
+        # Preprocessed states are raw [x, y, vx, vy, yaw, length, width]; convert
+        # to the [x, y, speed, cosθ, sinθ, length, width] convention the model and
+        # normalization assume (the selfplay preprocessing skips modify_agent_states).
+        agent_states = modify_agent_states(data["agent_states"][valid_goal_mask])
         agent_goal_xy = data["clipped_final_states"][valid_goal_mask, :2]
         agent_states = np.concatenate([agent_states, agent_goal_xy], axis=-1)
         agent_types = data["agent_types"][valid_goal_mask]
+
+        if len(agent_states) > self.cfg.max_num_agents:
+            dist_to_origin = np.linalg.norm(agent_states[:, :2], axis=-1)
+            closest_agent_ids = np.argsort(dist_to_origin)[: self.cfg.max_num_agents]
+            agent_states = agent_states[closest_agent_ids]
+            agent_types = agent_types[closest_agent_ids]
+
         num_agents = int(len(agent_states))
 
         road_points = data["road_points"]

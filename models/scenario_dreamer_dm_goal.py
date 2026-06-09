@@ -46,6 +46,12 @@ class ScenarioDreamerDMGoal(ScenarioDreamerDM):
         num_samples_to_visualize=None,
     ):
         data = data.to(self.device)
+        # Snapshot the (normalized) ground-truth scene before diffusion overwrites it,
+        # so we can render it alongside the generated samples for comparison.
+        gt_agent = data["agent"].x.clone().float()
+        gt_lane = data["lane"].x.clone().float()
+        gt_agent_types = torch.argmax(data["agent"].type, dim=-1)
+
         agent_samples, lane_samples, agent_types, lane_types, lane_conn_samples = self.diff_model.forward(data, mode=mode)
         agent_samples, lane_samples = unnormalize_scene_with_goal(agent_samples, lane_samples, self.cfg_dataset)
 
@@ -64,7 +70,26 @@ class ScenarioDreamerDMGoal(ScenarioDreamerDM):
                 epoch=self.current_epoch,
                 batch_idx=batch_idx,
                 save_wandb=save_wandb,
+                tag="scene_plot",
             )
+
+            gt_agent, gt_lane = unnormalize_scene_with_goal(gt_agent, gt_lane, self.cfg_dataset)
+            gt_images = visualize_batch(
+                num_samples_to_visualize,
+                gt_agent,
+                gt_lane,
+                gt_agent_types,
+                lane_types,
+                lane_conn_samples,
+                data,
+                viz_dir,
+                epoch=self.current_epoch,
+                batch_idx=batch_idx,
+                save_wandb=save_wandb,
+                tag="scene_plot_gt",
+            )
+            if save_wandb and images_to_log_batch is not None and gt_images is not None:
+                images_to_log_batch.update(gt_images)
         else:
             images_to_log_batch = None
 
