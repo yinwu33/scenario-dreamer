@@ -289,6 +289,22 @@ def main(cfg):
         OmegaConf.set_struct(cfg, False)
         cfg.dataset_name = dataset_name
         OmegaConf.set_struct(cfg, True)
+    elif cfg.model_name == 'autoencoder_goal':
+        model_name = cfg.model_name
+        cfg = cfg.ae_goal
+        OmegaConf.set_struct(cfg, False)
+        cfg.dataset_name = dataset_name
+        OmegaConf.set_struct(cfg, True)
+    elif cfg.model_name == 'ldm_goal':
+        model_name = cfg.model_name
+        cfg_ae = cfg.ae_goal
+        cfg = cfg.ldm_goal
+        OmegaConf.set_struct(cfg, False)
+        OmegaConf.set_struct(cfg_ae, False)
+        cfg.dataset_name = dataset_name
+        cfg_ae.dataset_name = dataset_name
+        OmegaConf.set_struct(cfg, True)
+        OmegaConf.set_struct(cfg_ae, True)
     else:
         model_name = cfg.model_name
         cfg = cfg.ctrl_sim
@@ -305,10 +321,14 @@ def main(cfg):
     
     if model_name == 'autoencoder':
         train_autoencoder(cfg, save_dir)
+    elif model_name == 'autoencoder_goal':
+        train_autoencoder(cfg, save_dir)
     elif model_name == 'autoencoder_bezier':
         train_autoencoder(cfg, save_dir, model_cls=ScenarioDreamerAutoEncoderBezier)
     elif model_name == 'ldm':
-        train_ldm(cfg, cfg_ae, save_dir) 
+        train_ldm(cfg, cfg_ae, save_dir)
+    elif model_name == 'ldm_goal':
+        train_ldm(cfg, cfg_ae, save_dir)
     elif model_name == 'cldm':
         train_ldm(cfg, cfg_ae, save_dir, model_cls=ScenarioDreamerCLDM)
     elif model_name == 'dm':

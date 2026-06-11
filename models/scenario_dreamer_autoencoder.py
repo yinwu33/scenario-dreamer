@@ -2,6 +2,7 @@ import os
 import pickle 
 from utils.train_helpers import create_lambda_lr_cosine, create_lambda_lr_linear
 from datasets.waymo.dataset_autoencoder_waymo import WaymoDatasetAutoEncoder
+from datasets.waymo.dataset_ae_goal_waymo import WaymoDatasetAEGoal
 from datasets.nuplan.dataset_autoencoder_nuplan import NuplanDatasetAutoEncoder
 from nn_modules.autoencoder import AutoEncoder
 from torch_geometric.loader import DataLoader
@@ -33,8 +34,10 @@ class ScenarioDreamerAutoEncoder(pl.LightningModule):
         self.cfg_dataset = self.cfg.dataset
         self.model = AutoEncoder(cfg.model) 
 
-        # nocturne-compatible metadata (stored in latent cache)
-        if self.cfg.eval.cache_latents.enable_caching and self.cfg.dataset_name == 'waymo':
+        # nocturne-compatible metadata (stored in latent cache); goal/selfplay data has no
+        # such metadata, so it can be skipped via cache_latents.use_nocturne_metadata=False
+        self.use_nocturne_metadata = getattr(self.cfg.eval.cache_latents, 'use_nocturne_metadata', True)
+        if self.cfg.eval.cache_latents.enable_caching and self.cfg.dataset_name == 'waymo' and self.use_nocturne_metadata:
             with open(self.cfg.eval.cache_latents.nocturne_train_filenames_path, 'rb') as f:
                 nocturne_train_filenames = pickle.load(f)
             with open(self.cfg.eval.cache_latents.nocturne_val_filenames_path, 'rb') as f:
@@ -44,8 +47,11 @@ class ScenarioDreamerAutoEncoder(pl.LightningModule):
     
     def test_dataloader(self):
         """If caching enabled, returns Dataloader for dataset we wish to cache latents, otherwise returns a DataLoader for the test dataset."""
+        use_goal = getattr(self.cfg_dataset, 'use_goal', False)
         if self.cfg.eval.cache_latents.enable_caching:
-            if self.cfg.dataset_name == 'waymo':
+            if use_goal:
+                test_dataset = WaymoDatasetAEGoal(self.cfg_dataset, split_name=self.cfg.eval.cache_latents.split_name, mode='eval')
+            elif self.cfg.dataset_name == 'waymo':
                 test_dataset = WaymoDatasetAutoEncoder(self.cfg_dataset, split_name=self.cfg.eval.cache_latents.split_name, mode='eval')
             else:
                 test_dataset = NuplanDatasetAutoEncoder(self.cfg_dataset, split_name=self.cfg.eval.cache_latents.split_name, mode='eval')
@@ -54,7 +60,9 @@ class ScenarioDreamerAutoEncoder(pl.LightningModule):
                 os.makedirs(latent_dir, exist_ok=True)
             self.files = test_dataset.files.copy()
         else:
-            if self.cfg.dataset_name == 'waymo':
+            if use_goal:
+                test_dataset = WaymoDatasetAEGoal(self.cfg_dataset, split_name='test', mode='eval')
+            elif self.cfg.dataset_name == 'waymo':
                 test_dataset = WaymoDatasetAutoEncoder(self.cfg_dataset, split_name='test', mode='eval')
             else:
                 test_dataset = NuplanDatasetAutoEncoder(self.cfg_dataset, split_name='test', mode='eval')
@@ -172,11 +180,15 @@ class ScenarioDreamerAutoEncoder(pl.LightningModule):
             }
             
             if self.cfg.dataset_name == 'waymo':
-                filename = file_path.split('/')[-1]
-                train_filename_parts = filename.split('.')[1].split('_')[:2]
-                train_filename = f'{train_filename_parts[0]}_{train_filename_parts[1]}'
-                noct_compatible = 1 if train_filename in self.nocturne_compatible_filenames else 0
-                d['nocturne_compatible'] = noct_compatible
+                if not self.use_nocturne_metadata:
+                    # selfplay/goal data has no nocturne metadata; mark all scenes compatible
+                    d['nocturne_compatible'] = 1
+                else:
+                    filename = file_path.split('/')[-1]
+                    train_filename_parts = filename.split('.')[1].split('_')[:2]
+                    train_filename = f'{train_filename_parts[0]}_{train_filename_parts[1]}'
+                    noct_compatible = 1 if train_filename in self.nocturne_compatible_filenames else 0
+                    d['nocturne_compatible'] = noct_compatible
             else:
                 d['map_id'] = map_id_i
             

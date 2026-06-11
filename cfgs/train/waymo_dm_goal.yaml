@@ -10,7 +10,7 @@ weight_decay: 1e-5
 check_val_every_n_epoch: 2
 ema_decay: 0.9999
 guidance_scale: 4.0
-devices: 4
+devices: 1
 num_samples_to_visualize: 10
 viz_dir: ${project_root}/viz_val_${dm_goal.train.run_name}
 

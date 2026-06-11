@@ -143,6 +143,12 @@ def main(cfg):
         OmegaConf.set_struct(cfg, False)   # unlock to allow setting dataset name
         cfg.dataset_name = dataset_name
         OmegaConf.set_struct(cfg, True)    # relock
+    elif cfg.model_name == 'autoencoder_goal':
+        model_name = cfg.model_name
+        cfg = cfg.ae_goal
+        OmegaConf.set_struct(cfg, False)
+        cfg.dataset_name = dataset_name
+        OmegaConf.set_struct(cfg, True)
     elif cfg.model_name in ['ldm', 'cldm']:
         model_name = cfg.model_name
         cfg_ae = cfg.ae
@@ -152,6 +158,16 @@ def main(cfg):
         cfg.dataset_name = dataset_name
         cfg_ae.dataset_name = dataset_name
         OmegaConf.set_struct(cfg, True)    # relock
+        OmegaConf.set_struct(cfg_ae, True)
+    elif cfg.model_name == 'ldm_goal':
+        model_name = cfg.model_name
+        cfg_ae = cfg.ae_goal
+        cfg = cfg.ldm_goal
+        OmegaConf.set_struct(cfg, False)
+        OmegaConf.set_struct(cfg_ae, False)
+        cfg.dataset_name = dataset_name
+        cfg_ae.dataset_name = dataset_name
+        OmegaConf.set_struct(cfg, True)
         OmegaConf.set_struct(cfg_ae, True)
     elif cfg.model_name == 'dm':
         model_name = cfg.model_name
@@ -177,9 +193,9 @@ def main(cfg):
 
     print(f"Evaluating Scenario Dreamer {model_name} trained on {cfg.dataset_name} dataset.")
 
-    if model_name == 'autoencoder':
+    if model_name in ('autoencoder', 'autoencoder_goal'):
         eval_autoencoder(cfg, save_dir)
-    elif model_name in ['ldm', 'cldm']:
+    elif model_name in ['ldm', 'cldm', 'ldm_goal']:
         model_cls = ScenarioDreamerCLDM if model_name == 'cldm' else ScenarioDreamerLDM
         if cfg.eval.mode == 'simulation_environments':
             generate_simulation_environments(cfg, cfg_ae, save_dir, model_cls=model_cls)

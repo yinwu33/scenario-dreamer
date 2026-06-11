@@ -366,7 +366,15 @@ def normalize_scene(
     # width
     agent_states[:, 6] = 2 * ((agent_states[:, 6] - (min_width))
                             / (max_width - min_width)) - 1
-    
+
+    # goal pos_x / pos_y (optional trailing columns), normalized in the same
+    # FOV frame as the current position
+    if agent_states.shape[-1] >= 9:
+        agent_states[:, 7] = 2 * ((agent_states[:, 7] - (-1 * fov/2))
+                                / fov) - 1
+        agent_states[:, 8] = 2 * ((agent_states[:, 8] - (-1 * fov/2))
+                                / fov) - 1
+
     # road pos_x
     road_points[:, :, 0] = 2 * ((road_points[:, :, 0] - (min_lane_x))
                             / (max_lane_x - min_lane_x)) - 1
@@ -406,6 +414,11 @@ def unnormalize_scene(
     agent_states[:, 5] = ((torch.clip(agent_states[:, 5], -1, 1) + 1) / 2) * (max_length - min_length) + min_length
     # width
     agent_states[:, 6] = ((torch.clip(agent_states[:, 6], -1, 1) + 1) / 2) * (max_width - min_width) + min_width
+
+    # goal pos_x / pos_y (optional trailing columns)
+    if agent_states.shape[-1] >= 9:
+        agent_states[:, 7] = ((torch.clip(agent_states[:, 7], -1, 1) + 1) / 2) * fov + (-1 * fov/2)
+        agent_states[:, 8] = ((torch.clip(agent_states[:, 8], -1, 1) + 1) / 2) * fov + (-1 * fov/2)
 
     lower_clip = -1000
     upper_clip = 1000

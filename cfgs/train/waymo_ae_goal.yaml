@@ -1,0 +1,12 @@
+defaults:
+- base
+
+run_name: scenario_dreamer_ae_goal_waymo
+max_steps: 350000
+warmup_steps: 1000
+lr_schedule: linear
+weight_decay: 1e-4
+check_val_every_n_epoch: 1
+num_samples_to_visualize: 10
+viz_dir: ${project_root}/viz_val_${ae_goal.train.run_name}
+devices: 1

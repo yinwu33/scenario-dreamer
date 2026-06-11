@@ -9,6 +9,14 @@ from cfgs.config import LANE_CONNECTION_TYPES_WAYMO, LANE_CONNECTION_TYPES_NUPLA
 from moviepy.editor import ImageSequenceClip
 import wandb
 
+
+def _tensor_to_numpy_for_viz(tensor):
+    tensor = tensor.detach().cpu()
+    if tensor.is_floating_point():
+        tensor = tensor.float()
+    return tensor.numpy()
+
+
 def plot_scene(
         agent_states, 
         road_points, 
@@ -319,12 +327,12 @@ def visualize_batch(num_samples,
     else:
         LANE_CONNECTION_TYPES = LANE_CONNECTION_TYPES_WAYMO
 
-    agent_samples = agent_samples.detach().cpu().numpy()
-    lane_samples = lane_samples.detach().cpu().numpy()
-    agent_types = agent_types.detach().cpu().numpy()
+    agent_samples = _tensor_to_numpy_for_viz(agent_samples)
+    lane_samples = _tensor_to_numpy_for_viz(lane_samples)
+    agent_types = _tensor_to_numpy_for_viz(agent_types)
     if lane_types is not None:
-        lane_types = lane_types.detach().cpu().numpy()
-    lane_conn_samples = lane_conn_samples.detach().cpu().numpy()
+        lane_types = _tensor_to_numpy_for_viz(lane_types)
+    lane_conn_samples = _tensor_to_numpy_for_viz(lane_conn_samples)
     
     # pyg data structures for indexing
     lane_batch = data['lane'].batch
@@ -336,8 +344,8 @@ def visualize_batch(num_samples,
     lane_batch = data['lane'].batch.cpu().numpy()
     condition_texts = None
     if 'condition_raw' in data.keys():
-        condition_raw = data['condition_raw'].detach().cpu().numpy()
-        condition_clipped = data['condition_clipped'].detach().cpu().numpy()
+        condition_raw = _tensor_to_numpy_for_viz(data['condition_raw'])
+        condition_clipped = _tensor_to_numpy_for_viz(data['condition_clipped'])
         condition_texts = []
         for condition_idx in range(condition_raw.shape[0]):
             raw = condition_raw[condition_idx]
@@ -422,11 +430,11 @@ def visualize_predicted_graph(num_samples,
     from the GT-aligned reconstruction for context. Logged under ``tag`` so it
     sits next to the GT-matched ``scene_plot`` panels in W&B.
     """
-    agent_samples = agent_samples.detach().cpu().numpy()
-    agent_types = agent_types.detach().cpu().numpy()
-    agent_batch = agent_batch.detach().cpu().numpy()
-    pred_lanes = pred_lanes.detach().cpu().numpy()
-    pred_lane_batch = pred_lane_batch.detach().cpu().numpy()
+    agent_samples = _tensor_to_numpy_for_viz(agent_samples)
+    agent_types = _tensor_to_numpy_for_viz(agent_types)
+    agent_batch = _tensor_to_numpy_for_viz(agent_batch)
+    pred_lanes = _tensor_to_numpy_for_viz(pred_lanes)
+    pred_lane_batch = _tensor_to_numpy_for_viz(pred_lane_batch)
 
     images_to_log = {}
     for i in range(num_samples):

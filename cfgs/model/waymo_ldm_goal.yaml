@@ -1,0 +1,6 @@
+defaults:
+- ldm
+
+# diffuse over the goal-augmented autoencoder latents
+autoencoder_run_name: scenario_dreamer_ae_goal_waymo # Name of the goal autoencoder run
+autoencoder_path: ${scratch_root}/checkpoints/${ldm_goal.model.autoencoder_run_name}/last.ckpt # Path to the pre-trained goal autoencoder checkpoint
