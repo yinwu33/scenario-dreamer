@@ -1,24 +1,18 @@
-scratch_root: ${oc.env:SCRATCH_ROOT}
-dataset_root: ${oc.env:DATASET_ROOT}
-project_root: ${oc.env:PROJECT_ROOT}
-waymo_data_folder: ${dataset_root}/waymo_open_dataset_motion_v_1_1_0
-waymo_train_folder: ${waymo_data_folder}/training
-waymo_val_folder: ${waymo_data_folder}/validation
-waymo_test_folder: ${waymo_data_folder}/testing
-
-hydra:
-  run:
-    dir: ${project_root}/slurm_logs/${now:%Y.%m.%d}/${now:%H.%M.%S}/${hydra.job.override_dirname}
+# dm_goal diffusion model training on Waymo.
+#
+# Usage:
+#   python train.py --config-name config_dm_goal_train
 
 model_name: dm_goal
 
 defaults:
+  - _base
   - dataset_name: waymo
-  - dataset@dm_goal.dataset: waymo_dm_goal
-  - train@dm_goal.train: waymo_dm_goal
-  - eval@dm_goal.eval: waymo_dm_goal
-  - model@dm_goal.model: waymo_dm_goal
-  - datamodule@dm_goal.datamodule: waymo_dm_goal
+  - dm_goal/dataset@dm_goal.dataset
+  - dm_goal/train@dm_goal.train
+  - dm_goal/eval@dm_goal.eval
+  - dm_goal/model@dm_goal.model
+  - dm_goal/datamodule@dm_goal.datamodule
   - sim: base
   - _self_
 

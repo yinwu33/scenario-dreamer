@@ -8,7 +8,11 @@ from utils.viz import visualize_batch
 
 
 def unnormalize_scene_with_goal(agent_states, lane_states, cfg_dataset):
-    agent_states, lane_states = unnormalize_scene(
+    # NOTE: goal columns [7, 8] are unnormalized by ``unnormalize_scene`` itself
+    # (FOV-frame, same as init position). Do NOT re-apply the goal transform here:
+    # the second clip(-1, 1) would treat the already-metre-scale goal as a
+    # normalized value and saturate it to the four FOV corners (±fov/2, ±fov/2).
+    return unnormalize_scene(
         agent_states,
         lane_states,
         fov=cfg_dataset.fov,
@@ -23,10 +27,6 @@ def unnormalize_scene_with_goal(agent_states, lane_states, cfg_dataset):
         max_lane_x=cfg_dataset.max_lane_x,
         max_lane_y=cfg_dataset.max_lane_y,
     )
-    if agent_states.shape[-1] >= 9:
-        agent_states[:, 7] = ((torch.clip(agent_states[:, 7], -1, 1) + 1) / 2) * cfg_dataset.fov - cfg_dataset.fov / 2
-        agent_states[:, 8] = ((torch.clip(agent_states[:, 8], -1, 1) + 1) / 2) * cfg_dataset.fov - cfg_dataset.fov / 2
-    return agent_states, lane_states
 
 
 class ScenarioDreamerDMGoal(ScenarioDreamerDM):

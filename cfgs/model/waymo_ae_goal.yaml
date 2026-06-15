@@ -4,3 +4,5 @@ defaults:
 state_dim: 9 # [x, y, speed, cosθ, sinθ, length, width, goal_x, goal_y]
 lane_conn_attr: ${ae_goal.dataset.num_lane_connection_types} # number of lane connection types
 num_lane_types: ${ae_goal.dataset.num_lane_types} # number of lane types (0 for waymo)
+num_points_per_lane: ${ae_goal.dataset.num_points_per_lane}
+max_num_lanes: ${ae_goal.dataset.max_num_lanes}

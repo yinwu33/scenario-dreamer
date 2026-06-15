@@ -13,6 +13,9 @@ metadata/simulation_environment_datasets/waymo_sim_test_pickles/
 metadata/simulation_environment_datasets/waymo_sim_test_jsons/
 run.sh
 
+*.pt
+*.pkl
+
 data
 .vscode/
 diag_gt_to_bezier_out/

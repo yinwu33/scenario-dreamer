@@ -1,4 +1,4 @@
-checkpoint: selfplay_drive_178121292262.pt
+checkpoint: model_selfplay_drive_001000.pt
 device: auto
 input_size: 64
 hidden_size: 256

@@ -1,0 +1,19 @@
+# DDPO fine-tuning of dm_goal against a frozen PufferDrive planner.
+#
+# Usage:
+#   python train.py --config-name config_ddpo_dm_goal
+#   python train.py --config-name config_ddpo_dm_goal ddpo.mode=goal   # goal | init_goal | all
+
+model_name: ddpo
+
+defaults:
+  - _base
+  - dataset_name: waymo
+  - dm_goal/dataset@dm_goal.dataset
+  - dm_goal/train@dm_goal.train
+  - dm_goal/eval@dm_goal.eval
+  - dm_goal/model@dm_goal.model
+  - dm_goal/datamodule@dm_goal.datamodule
+  - ddpo/dm_goal@ddpo
+  - sim: base
+  - _self_

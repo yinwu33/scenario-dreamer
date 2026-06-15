@@ -2,8 +2,9 @@
 
 Style follows scenario-dreamer's ``utils/viz.py`` ``plot_scene``: lanes are drawn
 twice (a thin dashed grey centerline plus a wide light-grey solid stroke that mimics
-the road surface), agents are rounded boxes (ego red, vehicles blue, ...), and the
-ego goal is a dotted line + ``x`` marker.
+the road surface), agents are rounded boxes (ego red, vehicles blue, ...), and a
+moving agent's goal is a dotted line + same-colour ``x`` marker. Parked/static
+agents (goal within 2 m of spawn) instead get a bold black ``x`` at their centre.
 
 Two output modes:
   * static (``render_rollout``): the whole first episode on one frame — each agent is
@@ -31,6 +32,7 @@ _VEH_COLOR = "#87b3e6"      # light blue (other vehicles)
 _PED_COLOR = "#bea9f5"      # light purple (pedestrians)
 _CYC_COLOR = "#5fa55f"      # green (cyclists)
 _JUMP_THRESH = 10.0         # metres/step above which motion is a teleport, not driving
+_PARKING_DIST = 2.0         # MIN_DISTANCE_TO_GOAL: goal within this of spawn => parked/static
 
 
 def _agent_color(is_ego: bool, type_id) -> str:
@@ -140,9 +142,16 @@ def _draw_goals(ax, agent_states, x0, y0, color, V):
     if agent_states is None or agent_states.shape[0] < 9:
         return
     gx, gy = float(agent_states[7]), float(agent_states[8])
-    if np.isfinite(gx) and np.isfinite(gy):
-        ax.plot([x0, gx], [y0, gy], color=color, linestyle=":", alpha=0.7, linewidth=V["goal_lw"], zorder=3)
-        ax.scatter(gx, gy, marker="x", color=color, s=V["goal_ms"], linewidths=max(V["goal_lw"], 0.5), zorder=7)
+    if not (np.isfinite(gx) and np.isfinite(gy)):
+        return
+    if np.hypot(gx - x0, gy - y0) < _PARKING_DIST:
+        # parked/static agent (goal sits on its spawn): no travel goal to draw -
+        # mark the agent centre with a bold black x instead of the same-colour one.
+        ax.scatter(x0, y0, marker="x", color="black", s=V["goal_ms"],
+                   linewidths=max(V["goal_lw"] * 2.0, 1.2), zorder=8)
+        return
+    ax.plot([x0, gx], [y0, gy], color=color, linestyle=":", alpha=0.7, linewidth=V["goal_lw"], zorder=3)
+    ax.scatter(gx, gy, marker="x", color=color, s=V["goal_ms"], linewidths=max(V["goal_lw"], 0.5), zorder=7)
 
 
 def _finish(ax, fig, V, title, status_txt, status_color):

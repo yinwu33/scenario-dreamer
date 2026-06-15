@@ -34,6 +34,11 @@ if str(REPO_ROOT) not in sys.path:
 
 
 def default_preprocess_dir() -> str:
+    """Return the default Waymo goal preprocess directory.
+
+    If ``DATASET_ROOT`` is set, the preprocess directory is resolved relative
+    to it; otherwise the repository-local data path is used.
+    """
     dataset_root = os.environ.get("DATASET_ROOT")
     if dataset_root:
         return os.path.join(dataset_root, "scene_goal_preprocess_waymo")
@@ -41,6 +46,7 @@ def default_preprocess_dir() -> str:
 
 
 def default_device() -> str:
+    """Return ``cuda`` when PyTorch can see a GPU, otherwise ``cpu``."""
     try:
         import torch
 
@@ -50,7 +56,11 @@ def default_device() -> str:
 
 
 def raw_agent_to_model_state(agent_states: np.ndarray) -> np.ndarray:
-    """[x,y,vx,vy,yaw,l,w] -> [x,y,speed,cos,sin,l,w]."""
+    """Convert raw agent state columns to the planner model state layout.
+
+    Input rows are interpreted as ``[x, y, vx, vy, yaw, length, width]`` and
+    output rows are ``[x, y, speed, cos(yaw), sin(yaw), length, width]``.
+    """
     out = np.zeros_like(agent_states[:, :7], dtype=np.float32)
     out[:, :2] = agent_states[:, :2]
     out[:, 2] = np.sqrt(agent_states[:, 2] ** 2 + agent_states[:, 3] ** 2)
@@ -61,8 +71,15 @@ def raw_agent_to_model_state(agent_states: np.ndarray) -> np.ndarray:
 
 
 def select_training_agents(data: dict, max_num_agents: int, require_ego_valid_goal: bool) -> np.ndarray:
+    """Select agents with valid clipped final goals for planner evaluation.
+
+    The selection is capped to ``max_num_agents`` by keeping the valid agents
+    nearest the current local origin. If requested, the local ego agent must
+    have a valid clipped final goal.
+    """
     valid_goal = np.asarray(data["clipped_final_valid"], dtype=bool)
     if require_ego_valid_goal and (len(valid_goal) == 0 or not bool(valid_goal[0])):
+        # idx 0 is ego
         raise ValueError("ego/local agent 0 has no valid clipped final goal")
     idx = np.nonzero(valid_goal)[0]
     if len(idx) == 0:
@@ -75,6 +92,11 @@ def select_training_agents(data: dict, max_num_agents: int, require_ego_valid_go
 
 
 def build_generated_scene(data: dict, selected: np.ndarray, device: str) -> tuple[GeneratedScenes, np.ndarray, np.ndarray]:
+    """Build a single ``GeneratedScenes`` planner input from preprocessed data.
+
+    Returns the scene object plus numpy copies of the model-layout agent states
+    and integer agent types used by rendering.
+    """
     import torch
 
     from ddpo.interfaces import GeneratedScenes
@@ -98,7 +120,11 @@ def build_generated_scene(data: dict, selected: np.ndarray, device: str) -> tupl
 
 
 def _fill_invalid(values: np.ndarray, valid: np.ndarray, fallback: np.ndarray) -> np.ndarray:
-    """Fill invalid trajectory values for stable view bounds; invalid frames are hidden later."""
+    """Forward-fill invalid trajectory samples for stable render bounds.
+
+    Invalid frames are still hidden later via the respawn mask; this function
+    only prevents missing samples from distorting plot limits.
+    """
     out = values.copy()
     n, t, d = out.shape
     for a in range(n):
@@ -115,6 +141,12 @@ def _fill_invalid(values: np.ndarray, valid: np.ndarray, fallback: np.ndarray) -
 
 
 def build_original_traj(data: dict, selected: np.ndarray) -> dict:
+    """Build a renderer-compatible trajectory dict from dataset trajectories.
+
+    The returned arrays use the frame-major layout expected by
+    ``render_rollout_frames`` and mark invalid dataset frames as respawned so
+    they are omitted from the visualization.
+    """
     traj = np.asarray(data["local_trajectory"], dtype=np.float32)[selected]
     valid = np.asarray(data.get("clipped_valid", data["trajectory_valid"]), dtype=bool)[selected]
     current = np.asarray(data["agent_states"], dtype=np.float32)[selected]
@@ -141,17 +173,27 @@ def build_original_traj(data: dict, selected: np.ndarray) -> dict:
 
 
 def original_parking_mask(data: dict, selected: np.ndarray, parking_threshold: float) -> np.ndarray:
+    """Return a boolean mask for agents whose clipped goal is near the start.
+
+    Agents are considered parking or stationary when their current position and
+    clipped final goal are closer than ``parking_threshold`` meters.
+    """
     current = np.asarray(data["agent_states"], dtype=np.float32)[selected, :2]
     goals = np.asarray(data["clipped_final_states"], dtype=np.float32)[selected, :2]
     return np.linalg.norm(goals - current, axis=-1) < parking_threshold
 
 
 def parking_agent_colors(is_parking: np.ndarray) -> list[str | None]:
+    """Return render colors that mark parking agents in black."""
     return ["black" if bool(v) else None for v in is_parking]
 
 
 def pad_frames(frames: np.ndarray, target_len: int) -> np.ndarray:
-    """Freeze on the last frame so both sides advance one sim step per frame."""
+    """Pad a frame stack by repeating the last frame to ``target_len``.
+
+    Freezing on the last frame lets both sides of the comparison advance one
+    simulation step per GIF frame even when their original lengths differ.
+    """
     if len(frames) >= target_len:
         return frames
     if len(frames) == 0:
@@ -161,6 +203,7 @@ def pad_frames(frames: np.ndarray, target_len: int) -> np.ndarray:
 
 
 def side_by_side(left: np.ndarray, right: np.ndarray) -> np.ndarray:
+    """Concatenate two frame stacks horizontally after length and height sync."""
     t = max(len(left), len(right))
     left = pad_frames(left, t)
     right = pad_frames(right, t)
@@ -172,11 +215,17 @@ def side_by_side(left: np.ndarray, right: np.ndarray) -> np.ndarray:
 
 
 def safe_name(path: str) -> str:
+    """Return a filesystem-safe output stem derived from ``path``."""
     stem = Path(path).stem
     return "".join(c if c.isalnum() or c in "._-" else "_" for c in stem)
 
 
 def choose_files(args) -> list[str]:
+    """Return input pickle files requested by CLI arguments.
+
+    Explicit ``--files`` are used as-is. Otherwise files are loaded from
+    ``<preprocess_dir>/<split>/*.pkl`` and optionally sampled with ``--seed``.
+    """
     if args.files:
         return args.files
     pattern = os.path.join(args.preprocess_dir, args.split, "*.pkl")
@@ -190,6 +239,7 @@ def choose_files(args) -> list[str]:
 
 
 def main() -> None:
+    """Parse CLI arguments and write original-vs-planner comparison GIFs."""
     ap = argparse.ArgumentParser()
     ap.add_argument("--preprocess-dir", default=default_preprocess_dir())
     ap.add_argument("--split", default="val")
@@ -230,16 +280,16 @@ def main() -> None:
         with open(path, "rb") as f:
             data = pickle.load(f)
         try:
-            selected = select_training_agents(data, args.max_num_agents, args.require_ego_valid_goal)
+            selected_idx = select_training_agents(data, args.max_num_agents, args.require_ego_valid_goal)
         except ValueError as exc:
             print(f"[skip] {path}: {exc}")
             continue
 
-        scenes, agent_states, agent_types = build_generated_scene(data, selected, args.device)
+        scenes, agent_states, agent_types = build_generated_scene(data, selected_idx, args.device)
         metrics = reward.evaluate(scenes, record_trajectories=True)
         planner_traj = metrics["trajectories"][0]
-        original_traj = build_original_traj(data, selected)
-        is_parking = original_parking_mask(data, selected, args.parking_threshold)
+        original_traj = build_original_traj(data, selected_idx)
+        is_parking = original_parking_mask(data, selected_idx, args.parking_threshold)
         agent_colors = parking_agent_colors(is_parking)
         lanes = np.asarray(data["road_points"], dtype=np.float32)[: int(data.get("num_lanes", len(data["road_points"])))]
 
@@ -277,7 +327,7 @@ def main() -> None:
             f"collision={int(metrics['ego_collision'][0] > 0)} "
             f"goal_offlane={metrics['goal_offlane_frac'][0]:.3f} "
             f"parking={int(is_parking.sum())}/{len(is_parking)} "
-            f"agents={len(selected)}"
+            f"agents={len(selected_idx)}"
         )
 
     print(f"wrote {wrote} comparison gif(s) to {out_dir}")

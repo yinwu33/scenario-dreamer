@@ -257,7 +257,17 @@ def train_autoencoder(cfg, save_dir=None, model_cls=ScenarioDreamerAutoEncoder):
 
 @hydra.main(version_base=None, config_path=CONFIG_PATH, config_name="config")
 def main(cfg):
-    # need to track whether we are training a nuplan or waymo model as 
+    # DDPO fine-tuning has its own RL training loop (not PyTorch Lightning) and
+    # needs the full root cfg (both cfg.ddpo and cfg.dm_goal), so it is dispatched
+    # before the generic per-project collapse below. The import is lazy because it
+    # pulls in PufferDrive-specific deps only needed on this path.
+    #   python train.py --config-name config_ddpo
+    if cfg.model_name == 'ddpo':
+        from ddpo.train_loop import run_ddpo
+        run_ddpo(cfg)
+        return
+
+    # need to track whether we are training a nuplan or waymo model as
     # nuplan predicts lane types (lane/green light/red light) and waymo does not
     dataset_name = cfg.dataset_name.name
     if cfg.model_name in ('autoencoder', 'autoencoder_bezier'):

@@ -1,5 +1,6 @@
 defaults:
-- waymo_base
+- /dataset/waymo_base@_here_
+- _self_
 
 dataset_path: ${dataset_root}/scenario_dreamer_waymo
 preprocess_dir: ${dataset_root}/scene_goal_preprocess_waymo

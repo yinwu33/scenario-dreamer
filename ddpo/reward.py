@@ -5,9 +5,11 @@ runs on the in-repo numpy port of the simulator (``pufferdrive_sim``) - no C env
 no .bin files, no second venv:
 
   * only the ego (scene agent 0) is scored;
-  * ``init_invalid`` flags scenes whose ego already overlaps another agent at
-    t=0 (reward hacking by spawning a doomed ego) -> strong negative reward;
-  * ``ego_collision`` is the planner-rollout collision flag (+1 reward);
+  * the base reward is a DENSE criticality term ``clip(1 - min_TTC/tau, 0, 1)``
+    over the ego's min time-to-collision along the rollout, so near-misses give
+    gradient even without an actual crash; an ego collision caps it at 1;
+  * ``init_invalid`` flags scenes with overlapping vehicles at t=0 (degenerate
+    init / reward hacking) -> strong negative reward;
   * ``ego_offroad`` is kept for interface compatibility but is always 0: the
     generated maps carry no road edges (see pufferdrive_sim docstring);
   * a scene stops being stepped/scored once its ego reaches its goal.
@@ -20,35 +22,74 @@ import torch
 
 from .interfaces import GeneratedScenes
 from planner.selfplay_drive.planner import load_planner, load_planner_config
-from .pufferdrive_sim import MIN_DISTANCE_TO_GOAL, SimScene, load_sim_config
-
-
-def default_reward_fn(ego_collision, ego_offroad_, init_invalid):
-    """Critical-scene reward: +1 if the planner collides, -1 for degenerate scenes."""
-    r = np.where(ego_collision > 0, 1.0, 0.0)
-    r = np.where(init_invalid > 0, -1.0, r)
-    return r.astype(np.float32)
+from .pufferdrive_sim import SimScene, load_sim_config
+from .reward_hooks import (
+    EgoCollisionHook,
+    EgoMinTTCHook,
+    EgoOffroadHook,
+    GoalOfflaneHook,
+    InitOverlapHook,
+    ParkingMismatchHook,
+    ReachedGoalHook,
+    TrajectoryHook,
+)
+from .rollout_runner import PlannerRolloutRunner
 
 
 class PufferDriveReward:
+    """Evaluate generated scenes by rolling them out with the frozen planner.
+
+    The reward object converts batched ``GeneratedScenes`` into independent
+    simulator scenes, executes the planner for each active ego, and returns the
+    collision reward plus goal validity penalties used by DDPO training.
+    """
+
     def __init__(
         self,
         *,
         sim_steps: int = 91,
         deterministic: bool | None = None,
-        reward_fn=default_reward_fn,
+        ttc_tau: float = 3.0,
+        init_overlap_margin: float = 0.0,
         goal_offlane_threshold: float = 3.0,
+        goal_onroad_threshold: float = 2.0,
         goal_offlane_penalty: float = 0.5,
         parking_mismatch_penalty: float = 0.5,
         seed: int = 0,
     ):
+        """Initialize planner-backed reward evaluation.
+
+        Args:
+            sim_steps: Maximum number of simulator steps per scene.
+            deterministic: Whether planner actions should be deterministic. If
+                ``None``, use the planner config default.
+            ttc_tau: Time-to-collision horizon (seconds) normalising the dense
+                criticality reward ``clip(1 - min_TTC/ttc_tau, 0, 1)``.
+            init_overlap_margin: Box-inflation margin (metres) for the t=0
+                vehicle-overlap (init_invalid) check; 0 rejects only true overlap
+                and allows bumper-to-bumper traffic-jam spawns.
+            goal_offlane_threshold: Lane-centerline distance in meters above
+                which a moving car's goal is considered off-lane.
+            goal_onroad_threshold: Lane-centerline distance in meters within
+                which a car is considered to have *spawned* on the road (only
+                such cars are required to keep an on-lane goal).
+            goal_offlane_penalty: Penalty scale applied to the off-lane goal
+                fraction for each scene.
+            parking_mismatch_penalty: Penalty scale applied when generated
+                parking/static state disagrees with ``meta["gt_parking_mask"]``.
+            seed: RNG seed passed into simulator scene construction.
+        """
         planner_cfg = load_planner_config()
         sim_cfg = load_sim_config()
         self.planner = load_planner()
         self.device = str(next(self.planner.parameters()).device)
         self.sim_steps = int(sim_steps)
-        self.deterministic = planner_cfg.deterministic if deterministic is None else deterministic
-        self.reward_fn = reward_fn
+        self.deterministic = (
+            planner_cfg.deterministic if deterministic is None else deterministic
+        )
+        self.ttc_tau = float(ttc_tau)
+        self.init_overlap_margin = float(init_overlap_margin)
+        self.goal_onroad_threshold = float(goal_onroad_threshold)
         self.goal_radius = sim_cfg.goal_radius
         # Goals of moving (controlled) agents must lie on the road: the planner was
         # trained with goals taken from real on-lane trajectories, so an off-lane
@@ -68,6 +109,12 @@ class PufferDriveReward:
 
     # ------------------------------------------------------------------ build
     def _build_scenes(self, scenes: GeneratedScenes) -> list[SimScene]:
+        """Convert a batched ``GeneratedScenes`` object into simulator scenes.
+
+        Agent and lane tensors are grouped by their scene-index metadata, moved
+        to CPU numpy arrays, and wrapped in ``SimScene`` instances that share
+        this reward object's RNG.
+        """
         states = scenes.agent_states.detach().cpu().numpy()
         types = scenes.agent_types.detach().cpu().numpy()
         a_idx = scenes.agent_scene_idx.detach().cpu().numpy()
@@ -90,125 +137,81 @@ class PufferDriveReward:
             )
         return sims
 
+    def _reward(self, ego_collision, ego_min_ttc, init_invalid):
+        """Dense critical-scene reward.
+
+        Base term is continuous time-to-collision criticality in [0, 1]
+        (``clip(1 - min_TTC/tau, 0, 1)``; ``min_TTC=inf`` -> 0). An actual ego
+        collision caps it at 1; degenerate init (overlapping vehicles) -> -1.
+        """
+        ttc_term = np.clip(1.0 - ego_min_ttc / self.ttc_tau, 0.0, 1.0)
+        r = np.where(ego_collision > 0, 1.0, ttc_term)
+        r = np.where(init_invalid > 0, -1.0, r)
+        return r.astype(np.float32)
+
     # --------------------------------------------------------------- evaluate
     @torch.no_grad()
-    def evaluate(self, scenes: GeneratedScenes, record_trajectories: bool = False) -> dict:
+    def evaluate(
+        self, scenes: GeneratedScenes, record_trajectories: bool = False
+    ) -> dict:
+        """Roll out generated scenes and return reward metrics.
+
+        Args:
+            scenes: Batched generated scenes containing agent states, types,
+                agent-to-scene indices, lane polylines, and lane-to-scene
+                metadata.
+            record_trajectories: If true, include per-scene trajectory arrays
+                suitable for rollout visualization.
+
+        Returns:
+            Dictionary of per-scene numpy arrays for reward, collision, offroad,
+            initial invalid state, goal completion, goal off-lane fraction, and
+            parking mismatch fraction. When ``record_trajectories`` is true, the
+            dictionary also contains a ``trajectories`` list.
+        """
         sims = self._build_scenes(scenes)
-        m = len(sims)
-        ego_collision = np.zeros(m, dtype=np.float32)
-        ego_offroad = np.zeros(m, dtype=np.float32)
-        init_invalid = np.zeros(m, dtype=np.float32)
-        reached_goal = np.zeros(m, dtype=np.float32)
-        finished = np.zeros(m, dtype=bool)
+        hooks = [
+            InitOverlapHook(self.init_overlap_margin),
+            EgoCollisionHook(),
+            EgoOffroadHook(),
+            EgoMinTTCHook(),
+            TrajectoryHook(),
+            ReachedGoalHook(self.goal_radius),
+            GoalOfflaneHook(self.goal_offlane_threshold, self.goal_onroad_threshold),
+            ParkingMismatchHook(),
+        ]
+        runner = PlannerRolloutRunner(
+            planner=self.planner,
+            device=self.device,
+            deterministic=self.deterministic,
+            sim_steps=self.sim_steps,
+            hooks=hooks,
+        )
+        ctx = runner.rollout(scenes, sims, record_trajectories=record_trajectories)
+        metrics = ctx.metrics
 
-        traj = None
-        if record_trajectories:
-            traj = [
-                {"x": [], "y": [], "heading": [], "respawn": [], "done": [],
-                 "length": sim.length.copy(), "width": sim.width.copy()}
-                for sim in sims
-            ]
-
-        # Egos whose generated goal is already inside the 2 m radius are static in
-        # PufferDrive (never controlled); the scene is trivially over.
-        for s, sim in enumerate(sims):
-            if sim.n == 0 or 0 not in sim.controlled:
-                reached_goal[s] = 1.0
-                finished[s] = True
-
-        for t in range(self.sim_steps):
-            # ---- score current state (mirrors reward.py: read state, then step)
-            for s, sim in enumerate(sims):
-                if finished[s]:
-                    continue
-                collided = sim.ego_collides_now()
-                if t == 0 and collided:
-                    init_invalid[s] = 1.0
-                ego_collision[s] = max(ego_collision[s], float(collided))
-                if traj is not None:
-                    traj[s]["x"].append(sim.x.copy())
-                    traj[s]["y"].append(sim.y.copy())
-                    traj[s]["heading"].append(sim.heading.copy())
-                    traj[s]["respawn"].append(sim.respawned.copy())
-                # state-based fallback (covers ego spawned near goal)
-                d = float(np.hypot(sim.goal[0, 0] - sim.x[0], sim.goal[0, 1] - sim.y[0]))
-                if d < self.goal_radius:
-                    reached_goal[s] = 1.0
-                    finished[s] = True
-                    if traj is not None:
-                        traj[s]["done"].append(True)
-
-            active = [s for s in range(m) if not finished[s]]
-            if not active:
-                break
-
-            # ---- planner forward over all controlled agents of active scenes
-            obs_list = [sims[s].compute_obs() for s in active]
-            obs = torch.as_tensor(np.concatenate(obs_list), device=self.device)
-            actions = self.planner.act(obs, deterministic=self.deterministic).cpu().numpy()
-
-            off = 0
-            for s, ob in zip(active, obs_list):
-                n_ctrl = ob.shape[0]
-                sims[s].step_dynamics(actions[off : off + n_ctrl])
-                sims[s].update_metrics()
-                ego_reached, _ = sims[s].goal_step()
-                off += n_ctrl
-                if ego_reached:
-                    reached_goal[s] = 1.0
-                    finished[s] = True
-                if traj is not None and traj[s]["x"]:
-                    traj[s]["done"].append(bool(ego_reached))
-
-        # ---- off-lane goal penalty (initial controlled agents only; see __init__)
-        # "initial_controlled" implements the parking exemption: agents whose goal
-        # is within 2 m of spawn are static in PufferDrive and never enter this
-        # penalty (their goal may legitimately sit off-lane in a parking spot).
-        # Keep this fixed across the rollout so goal_behavior="remove" cannot erase
-        # agents from the penalty after they reach their goal.
-        goal_offlane_frac = np.zeros(m, dtype=np.float32)
-        for s, sim in enumerate(sims):
-            if len(sim.initial_controlled) == 0:
-                continue
-            d = sim.dist_to_lane_centerline(sim.goal[sim.initial_controlled])
-            offlane = np.isfinite(d) & (d > self.goal_offlane_threshold)
-            goal_offlane_frac[s] = float(offlane.mean())
-
-        # ---- parking-state mismatch penalty (goal mode only) -------------------
-        parking_mismatch_frac = np.zeros(m, dtype=np.float32)
-        gt_parking = scenes.meta.get("gt_parking_mask")
-        if gt_parking is not None:
-            if isinstance(gt_parking, torch.Tensor):
-                gt_parking = gt_parking.detach().cpu().numpy()
-            a_idx = scenes.agent_scene_idx.detach().cpu().numpy()
-            for s, sim in enumerate(sims):
-                gt_p = gt_parking[a_idx == s]
-                gen_dist = np.hypot(sim.goal[:, 0] - sim.spawn[:, 0], sim.goal[:, 1] - sim.spawn[:, 1])
-                gen_p = gen_dist < MIN_DISTANCE_TO_GOAL
-                if len(gt_p):
-                    parking_mismatch_frac[s] = float((gen_p != gt_p).mean())
-
-        rewards = self.reward_fn(ego_collision, ego_offroad, init_invalid)
+        rewards = self._reward(
+            metrics["ego_collision"],
+            metrics["ego_min_ttc"],
+            metrics["init_invalid"],
+        )
         # All penalty terms are per-scene FRACTIONS in [0, 1] (count-normalised),
         # so scenes with many agents are not penalised more than sparse ones; the
         # coefficients set the scale relative to the +/-1 collision reward.
-        rewards = rewards - self.goal_offlane_penalty * goal_offlane_frac
-        rewards = rewards - self.parking_mismatch_penalty * parking_mismatch_frac
+        rewards = rewards - self.goal_offlane_penalty * metrics["goal_offlane_frac"]
+        rewards = (
+            rewards - self.parking_mismatch_penalty * metrics["parking_mismatch_frac"]
+        )
         out = {
             "reward": rewards,
-            "ego_collision": ego_collision,
-            "ego_offroad": ego_offroad,
-            "init_invalid": init_invalid,
-            "reached_goal": reached_goal,
-            "goal_offlane_frac": goal_offlane_frac,
-            "parking_mismatch_frac": parking_mismatch_frac,
+            "ego_collision": metrics["ego_collision"],
+            "ego_min_ttc": metrics["ego_min_ttc"],
+            "ego_offroad": metrics["ego_offroad"],
+            "init_invalid": metrics["init_invalid"],
+            "reached_goal": metrics["reached_goal"],
+            "goal_offlane_frac": metrics["goal_offlane_frac"],
+            "parking_mismatch_frac": metrics["parking_mismatch_frac"],
         }
-        if traj is not None:
-            for tr in traj:
-                tr["x"] = np.asarray(tr["x"], dtype=np.float32) if tr["x"] else np.zeros((0, 0), np.float32)
-                tr["y"] = np.asarray(tr["y"], dtype=np.float32) if tr["y"] else np.zeros((0, 0), np.float32)
-                tr["heading"] = np.asarray(tr["heading"], dtype=np.float32) if tr["heading"] else np.zeros((0, 0), np.float32)
-                tr["respawn"] = np.asarray(tr["respawn"], dtype=bool) if tr["respawn"] else np.zeros((0, 0), bool)
-                tr["done"] = np.asarray(tr["done"], dtype=bool)
-            out["trajectories"] = traj
+        if ctx.trajectories is not None:
+            out["trajectories"] = ctx.trajectories
         return out

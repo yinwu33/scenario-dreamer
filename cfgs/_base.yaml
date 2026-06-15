@@ -1,0 +1,16 @@
+# Shared environment / root boilerplate.
+# Included first in every project's `config_*.yaml` defaults list:
+#   defaults:
+#     - _base
+#     - ...
+scratch_root: ${oc.env:SCRATCH_ROOT} # scratch root directory, used for datasets and checkpoints
+dataset_root: ${oc.env:DATASET_ROOT} # root directory for datasets
+project_root: ${oc.env:PROJECT_ROOT} # project root directory
+waymo_data_folder: ${dataset_root}/waymo_open_dataset_motion_v_1_1_0 # path to the Waymo Open Dataset
+waymo_train_folder: ${waymo_data_folder}/training # path to the training set of the Waymo Open Dataset
+waymo_val_folder: ${waymo_data_folder}/validation # path to the validation set of the Waymo Open Dataset
+waymo_test_folder: ${waymo_data_folder}/testing # path to the testing set of the Waymo Open Dataset
+
+hydra:
+  run:
+    dir: ${project_root}/slurm_logs/${now:%Y.%m.%d}/${now:%H.%M.%S}/${hydra.job.override_dirname}

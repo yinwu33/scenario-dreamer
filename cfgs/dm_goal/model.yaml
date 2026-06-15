@@ -1,5 +1,6 @@
 defaults:
-- dm
+- /model/dm@_here_
+- _self_
 
 state_dim: 9
 lane_attr: 2

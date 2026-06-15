@@ -516,3 +516,56 @@ class SimScene:
             return False
         boxes = _corners(self.x, self.y, self.heading, self.length, self.width)
         return bool(_sat_overlap(boxes[0], boxes[others]).any())
+
+    def ego_min_ttc_now(self) -> float:
+        """Point-mass time-to-collision of the ego (agent 0) with the nearest
+        approaching active agent at the current state; ``+inf`` if none approach.
+
+        Range / range-rate surrogate ``ttc = -|p|^2 / (p . v)`` for ``p . v < 0``,
+        where ``p`` is the ego->other relative position and ``v`` the relative
+        velocity. Pedestrians (never collide) and inactive/respawned agents are
+        excluded - this is the dense criticality feature behind the DDPO reward.
+        """
+        if self.n <= 1 or self.respawned[0]:
+            return float(np.inf)
+        others = self.slot_order[(self.slot_order != 0) & (~self.respawned[self.slot_order])]
+        others = others[self.ptype[others] != TYPE_PEDESTRIAN]
+        if not len(others):
+            return float(np.inf)
+        px = self.x[others] - self.x[0]
+        py = self.y[others] - self.y[0]
+        vx = self.vx[others] - self.vx[0]
+        vy = self.vy[others] - self.vy[0]
+        pv = px * vx + py * vy
+        approaching = pv < -1e-6
+        if not approaching.any():
+            return float(np.inf)
+        p2 = px * px + py * py
+        ttc = -p2[approaching] / pv[approaching]
+        return float(ttc.min())
+
+    def any_vehicle_overlap(self, margin: float = 0.0) -> bool:
+        """True if any two active (non-pedestrian, non-respawned) agent boxes overlap.
+
+        Boxes are grown by ``margin`` metres per side before the SAT test, so a
+        positive margin also rejects near-touching spawns; ``margin=0`` is exact
+        overlap. Used to flag degenerate generated init states (init_invalid).
+        """
+        active = self.slot_order[~self.respawned[self.slot_order]]
+        active = active[self.ptype[active] != TYPE_PEDESTRIAN]
+        if len(active) < 2:
+            return False
+        boxes = _corners(
+            self.x[active],
+            self.y[active],
+            self.heading[active],
+            self.length[active] + 2.0 * margin,
+            self.width[active] + 2.0 * margin,
+        )
+        for k in range(len(active) - 1):
+            dx = self.x[active[k + 1:]] - self.x[active[k]]
+            dy = self.y[active[k + 1:]] - self.y[active[k]]
+            gate = (dx * dx + dy * dy) <= COLLISION_DIST2_GATE
+            if gate.any() and _sat_overlap(boxes[k], boxes[k + 1:][gate]).any():
+                return True
+        return False

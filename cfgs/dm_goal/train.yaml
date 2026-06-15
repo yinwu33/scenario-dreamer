@@ -1,5 +1,6 @@
 defaults:
-- base
+- /train/base@_here_
+- _self_
 
 run_name: scenario_dreamer_dm_goal_base_waymo
 lr_schedule: constant

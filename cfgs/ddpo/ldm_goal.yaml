@@ -1,0 +1,60 @@
+# DDPO fine-tuning of ldm_goal against a frozen PufferDrive planner.
+# Latent-space policy: nn_modules.ldm.LDM + frozen goal AutoEncoder decoder.
+
+model_type: ldm_goal
+device: cuda
+seed: 0
+
+# --- artifacts --------------------------------------------------------------
+ldm_ckpt: ${scratch_root}/checkpoints/scenario_dreamer_ldm_goal_waymo/last.ckpt
+ae_ckpt: ${scratch_root}/checkpoints/scenario_dreamer_ae_goal_waymo/last.ckpt
+use_ema_weights: true
+
+# --- conditioning pools (native ldm_goal latent cache; no dump step) ----------
+train_split: train
+eval_split: val
+pool_size: 2048
+
+# --- rollout / reward ---------------------------------------------------------
+sim_steps: 91
+planner_deterministic: true
+ttc_tau: 3.0
+init_overlap_margin: 0.0
+goal_offlane_threshold: 1.5
+goal_onroad_threshold: 2.0
+goal_offlane_penalty: 5
+parking_mismatch_penalty: 0.0
+
+# --- DDPO ---------------------------------------------------------------------
+batch_size: 16
+num_iterations: 2000
+inner_epochs: 1
+k_steps: 8
+min_diffusion_t: 5
+lr: 1e-5
+weight_decay: 1e-4
+grad_clip: 1.0
+save_every: 100
+output_dir: ${scratch_root}/checkpoints/ddpo_ldm_goal
+
+ddpo:
+  estimator: is
+  clip_range: 1.0e-4
+  kl_coef: 0.01
+  adv_clip: 5.0
+  adv_eps: 1.0e-6
+  logratio_clip: 20.0
+
+# --- logging / eval -----------------------------------------------------------
+wandb:
+  enabled: true
+  project: scenario_dreamer_ddpo
+  entity: null
+  run_name: null            # null -> ddpo_ldm_goal
+eval_every: 50
+eval_num_scenes: 4
+eval_visualize_reference: true
+eval_visualize_conditioning: true
+save_gif: true
+gif_fps: 10
+gif_max_frames: 90
