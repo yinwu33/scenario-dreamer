@@ -1,0 +1,64 @@
+# DDPO fine-tuning of dm_goal against a frozen PufferDrive planner.
+# The planner is trained in PufferDrive and its .pt copied to data/planner/.
+
+device: cuda
+seed: 0
+
+# --- training mode --------------------------------------------------------
+# goal      : fixed map + fixed agent init states, only goal points trained
+# init_goal : fixed map, agent init states AND goal points trained
+# all       : map (lane chain) + agent init states + goal points trained
+mode: goal
+inpaint_noised: true        # goal mode: inpaint fixed dims with q_sample(x0,t); false -> clean x0
+
+# --- artifacts --------------------------------------------------------------
+model_ckpt: ${scratch_root}/checkpoints/scenario_dreamer_dm_goal_train/last.ckpt
+use_ema_weights: true
+
+# --- conditioning pools (native dm_goal dataset; no dump step) ---------------
+train_split: train
+eval_split: val
+pool_size: 2048             # graphs drawn from the train split (lazy-loaded)
+
+# --- rollout / reward ---------------------------------------------------------
+sim_steps: 91
+planner_deterministic: true
+goal_offlane_threshold: 1.5     # metres from nearest lane centerline
+goal_offlane_penalty: 5       # reward -= penalty * frac of moving agents w/ off-lane goal
+                                # (parked agents - goal within 2m of spawn - are exempt)
+parking_mismatch_penalty: 0.5   # goal mode: reward -= penalty * frac of agents whose
+                                # parking state (goal<2m of spawn) differs from GT
+
+# --- DDPO ---------------------------------------------------------------------
+batch_size: 16              # scenes generated + rolled out per iteration
+num_iterations: 2000
+inner_epochs: 1             # >1 requires estimator=is (PPO importance sampling)
+k_steps: 8                  # random denoising steps differentiated per update
+min_diffusion_t: 5          # skip very low-noise steps (brittle log-prob ratios)
+lr: 1e-5
+weight_decay: 1e-4
+grad_clip: 1.0
+save_every: 100
+output_dir: ${scratch_root}/checkpoints/ddpo_dm_goal_${ddpo.mode}
+
+ddpo:
+  estimator: is             # "sf" (REINFORCE) | "is" (PPO clip)
+  clip_range: 1.0e-4
+  kl_coef: 0.01             # KL-to-base: keeps scenes on-manifold (anti reward-hacking)
+  adv_clip: 5.0
+  adv_eps: 1.0e-6
+  logratio_clip: 20.0
+
+# --- logging / eval -----------------------------------------------------------
+wandb:
+  enabled: true
+  project: scenario_dreamer_ddpo
+  entity: null
+  run_name: null            # null -> ddpo_dm_goal_${mode}
+eval_every: 50              # val viz pass every N iterations (0 disables)
+eval_num_scenes: 4
+eval_visualize_reference: true      # frozen pretrained policy, same val conditioning/noise
+eval_visualize_conditioning: true   # unmodified validation init/goals/map, no diffusion sample
+save_gif: true
+gif_fps: 10
+gif_max_frames: 90

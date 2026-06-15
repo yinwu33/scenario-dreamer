@@ -1,0 +1,5 @@
+checkpoint: selfplay_drive_178121292262.pt
+device: auto
+input_size: 64
+hidden_size: 256
+deterministic: true
