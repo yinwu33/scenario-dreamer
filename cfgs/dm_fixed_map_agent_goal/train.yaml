@@ -1,0 +1,21 @@
+defaults:
+- /train/base@_here_
+- _self_
+
+run_name: scenario_dreamer_dm_fixed_map_agent_goal_base_waymo
+lr_schedule: constant
+save_top_k: 0
+max_steps: 300000
+warmup_steps: 500
+weight_decay: 1e-5
+check_val_every_n_epoch: 2
+ema_decay: 0.9999
+guidance_scale: 4.0
+devices: 1
+num_samples_to_visualize: 10
+viz_dir: ${project_root}/viz_val_${dm_fixed_map_agent_goal.train.run_name}
+
+lane_weight: 0
+agent_type_weight: 1.0
+parking_cls_weight: 1.0
+goal_weight: 1.0

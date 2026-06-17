@@ -5,6 +5,7 @@ from models.scenario_dreamer_autoencoder import ScenarioDreamerAutoEncoder
 from models.scenario_dreamer_ldm import ScenarioDreamerLDM
 from models.scenario_dreamer_dm import ScenarioDreamerDM
 from models.scenario_dreamer_dm_goal import ScenarioDreamerDMGoal
+from models.scenario_dreamer_dm_fixed_map_agent_goal import ScenarioDreamerDMFixedMapAgentGoal
 from models.scenario_dreamer_cldm import ScenarioDreamerCLDM
 from metrics import Metrics
 
@@ -181,6 +182,12 @@ def main(cfg):
         OmegaConf.set_struct(cfg, False)
         cfg.dataset_name = dataset_name
         OmegaConf.set_struct(cfg, True)
+    elif cfg.model_name == 'dm_fixed_map_agent_goal':
+        model_name = cfg.model_name
+        cfg = cfg.dm_fixed_map_agent_goal
+        OmegaConf.set_struct(cfg, False)
+        cfg.dataset_name = dataset_name
+        OmegaConf.set_struct(cfg, True)
     else:
         raise ValueError(f"Unsupported evaluation model_name: {cfg.model_name}")
     
@@ -205,6 +212,8 @@ def main(cfg):
         eval_dm(cfg, save_dir)
     elif model_name == 'dm_goal':
         eval_dm(cfg, save_dir, model_cls=ScenarioDreamerDMGoal)
+    elif model_name == 'dm_fixed_map_agent_goal':
+        eval_dm(cfg, save_dir, model_cls=ScenarioDreamerDMFixedMapAgentGoal)
 
 
 if __name__ == '__main__':

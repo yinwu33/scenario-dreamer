@@ -1,0 +1,27 @@
+defaults:
+- /eval/base@_here_
+- _self_
+
+run_name: scenario_dreamer_dm_fixed_map_agent_goal_base_waymo
+
+mode: lane_conditioned
+num_samples: 100
+init_prob_matrix_path: ${project_root}/metadata/initial_prob_matrix_waymo.pt
+inpainting_prob_matrix_path: ${project_root}/metadata/inpainting_prob_matrix_waymo.pt
+batch_size: 32
+visualize: False
+viz_dir: ${project_root}/viz_gen_samples_${dm_fixed_map_agent_goal.eval.run_name}
+cache_samples: False
+conditioning_path: ${dm_fixed_map_agent_goal.dataset.preprocess_dir}/val
+
+sim_envs:
+  num_inpainting_candidates: 8
+  overhead_factor: 5
+  route_length: 500
+  nocturne_compatible_only: True
+
+metrics:
+  samples_path: ${dataset_root}/checkpoints/${dm_fixed_map_agent_goal.eval.run_name}/lane_conditioned_samples
+  metrics_save_path: ${dataset_root}/checkpoints/${dm_fixed_map_agent_goal.eval.run_name}
+  eval_set: ${project_root}/metadata/waymo_eval_set.pkl
+  gt_test_dir: ${dataset_root}/scenario_dreamer_selfplay_waymo/test

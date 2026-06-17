@@ -1,0 +1,13 @@
+defaults:
+- /model/dm@_here_
+- _self_
+
+state_dim: 9
+lane_attr: 2
+num_points_per_lane: ${dm_fixed_map_agent_goal.dataset.num_points_per_lane}
+parking_dim: 2
+parking_class_id: 1
+goal_loss_for_parking: False
+agent_latent_dim: 14
+lane_latent_dim: 40
+lane_conn_hidden_dim: 64

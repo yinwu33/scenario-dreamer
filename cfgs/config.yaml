@@ -45,7 +45,7 @@ convert_pickles_to_jsons:
   path_to_jsons: ${scratch_root}/simulation_environment_datasets/${convert_pickles_to_jsons.directory}_jsons # path to the json files
   dataset_size: 250 # number of simulation environments to convert
 
-model_name: autoencoder # or ldm, cldm, dm, dm_goal, autoencoder_goal, ldm_goal, or ctrl_sim
+model_name: autoencoder # or ldm, cldm, dm, dm_goal, dm_fixed_map_agent_goal, autoencoder_goal, ldm_goal, or ctrl_sim
 
 # hacky way to not have to manually change the dataset name in all config groups from command line
 # only dataset_name has to be configured from command line 
@@ -73,6 +73,11 @@ defaults:
   - optional eval@dm_goal.eval:       ${dataset_name}_dm_goal
   - optional model@dm_goal.model:      ${dataset_name}_dm_goal
   - optional datamodule@dm_goal.datamodule: ${dataset_name}_dm_goal
+  - optional dm_fixed_map_agent_goal@dm_fixed_map_agent_goal.dataset: dataset
+  - optional dm_fixed_map_agent_goal@dm_fixed_map_agent_goal.train: train
+  - optional dm_fixed_map_agent_goal@dm_fixed_map_agent_goal.eval: eval
+  - optional dm_fixed_map_agent_goal@dm_fixed_map_agent_goal.model: model
+  - optional dm_fixed_map_agent_goal@dm_fixed_map_agent_goal.datamodule: datamodule
   - optional dataset@ae_goal.dataset:    ${dataset_name}_ae_goal
   - optional train@ae_goal.train:      ${dataset_name}_ae_goal
   - optional eval@ae_goal.eval:       ${dataset_name}_ae_goal

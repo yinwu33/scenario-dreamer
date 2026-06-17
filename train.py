@@ -5,6 +5,7 @@ from models.scenario_dreamer_autoencoder_bezier import ScenarioDreamerAutoEncode
 from models.scenario_dreamer_ldm import ScenarioDreamerLDM
 from models.scenario_dreamer_dm import ScenarioDreamerDM
 from models.scenario_dreamer_dm_goal import ScenarioDreamerDMGoal
+from models.scenario_dreamer_dm_fixed_map_agent_goal import ScenarioDreamerDMFixedMapAgentGoal
 from models.scenario_dreamer_cldm import ScenarioDreamerCLDM
 from models.ctrl_sim import CtRLSim
 
@@ -299,6 +300,12 @@ def main(cfg):
         OmegaConf.set_struct(cfg, False)
         cfg.dataset_name = dataset_name
         OmegaConf.set_struct(cfg, True)
+    elif cfg.model_name == 'dm_fixed_map_agent_goal':
+        model_name = cfg.model_name
+        cfg = cfg.dm_fixed_map_agent_goal
+        OmegaConf.set_struct(cfg, False)
+        cfg.dataset_name = dataset_name
+        OmegaConf.set_struct(cfg, True)
     elif cfg.model_name == 'autoencoder_goal':
         model_name = cfg.model_name
         cfg = cfg.ae_goal
@@ -345,6 +352,8 @@ def main(cfg):
         train_dm(cfg, save_dir)
     elif model_name == 'dm_goal':
         train_dm(cfg, save_dir, model_cls=ScenarioDreamerDMGoal)
+    elif model_name == 'dm_fixed_map_agent_goal':
+        train_dm(cfg, save_dir, model_cls=ScenarioDreamerDMFixedMapAgentGoal)
     elif model_name == 'ctrl_sim':
         train_ctrl_sim(cfg, save_dir)
 
