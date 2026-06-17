@@ -2,8 +2,10 @@
 
 Style follows scenario-dreamer's ``utils/viz.py`` ``plot_scene``: lanes are drawn
 twice (a thin dashed grey centerline plus a wide light-grey solid stroke that mimics
-the road surface), agents are rounded boxes (ego red, vehicles blue, ...), and a
-moving agent's goal is a dotted line + same-colour ``x`` marker. Parked/static
+the road surface), agents are rounded boxes (ego red, vehicles blue, ...; callers
+may pass ``agent_colors`` to override per agent, e.g. DDPO-controlled non-ego
+agents in green), and a moving agent's goal is a dotted line + same-colour ``x``
+marker. Parked/static
 agents (goal within 2 m of spawn) instead get a bold black ``x`` at their centre.
 
 Two output modes:
@@ -31,6 +33,8 @@ _EGO_COLOR = "#de5959"      # light red  (ego = local index 0)
 _VEH_COLOR = "#87b3e6"      # light blue (other vehicles)
 _PED_COLOR = "#bea9f5"      # light purple (pedestrians)
 _CYC_COLOR = "#5fa55f"      # green (cyclists)
+CONTROL_COLOR = "#2ca02c"   # vivid green: DDPO-controlled (generated) non-ego agents,
+                            # passed in via ``agent_colors`` to flag who is being trained
 _JUMP_THRESH = 10.0         # metres/step above which motion is a teleport, not driving
 _PARKING_DIST = 2.0         # MIN_DISTANCE_TO_GOAL: goal within this of spawn => parked/static
 
@@ -73,11 +77,32 @@ def _break_on_jumps(x, y):
     return np.insert(x.astype(float), bad + 1, np.nan), np.insert(y.astype(float), bad + 1, np.nan)
 
 
-def _status_text(reward, collided, offroad, init_invalid) -> tuple[str, str]:
-    """Reward breakdown line + a colour keyed to the outcome."""
+def _fmt_float(value, *, signed: bool = False, digits: int = 2, inf: str = "inf") -> str:
+    if value is None:
+        return "nan"
+    v = float(value)
+    if not np.isfinite(v):
+        return inf
+    sign = "+" if signed else ""
+    return f"{v:{sign}.{digits}f}"
+
+
+def _status_text(
+    reward,
+    collided,
+    init_invalid,
+    *,
+    ego_min_ttc=None,
+    goal_offlane_frac=None,
+    parking_mismatch_frac=None,
+) -> tuple[str, str]:
+    """Short reward status line aligned with the DDPO reward formula."""
     r = 0.0 if reward is None else float(reward)
-    txt = (f"R={r:+.2f}   collision={int(bool(collided))}  "
-           f"offroad={int(bool(offroad))}  init_invalid={int(bool(init_invalid))}")
+    txt = (
+        f"R={r:+.2f}  TTC={_fmt_float(ego_min_ttc)}  "
+        f"col={int(bool(collided))}  init={int(bool(init_invalid))}  "
+        f"gOff={_fmt_float(goal_offlane_frac)}  pMis={_fmt_float(parking_mismatch_frac)}"
+    )
     if collided:
         color = _EGO_COLOR
     elif init_invalid:
@@ -110,7 +135,10 @@ def _view(lanes_arr, x, y, end, n_agents):
         if len(flat):
             xs.append(flat[:, 0]); ys.append(flat[:, 1])
     if n_agents:
-        xs.append(x[:end].ravel()); ys.append(y[:end].ravel())
+        ax, ay = x[:end].ravel(), y[:end].ravel()
+        finite = np.isfinite(ax) & np.isfinite(ay)  # drop removed-agent NaN poses
+        if finite.any():
+            xs.append(ax[finite]); ys.append(ay[finite])
     if xs:
         ax_min, ax_max = float(np.concatenate(xs).min()), float(np.concatenate(xs).max())
         ay_min, ay_max = float(np.concatenate(ys).min()), float(np.concatenate(ys).max())
@@ -164,6 +192,7 @@ def _finish(ax, fig, V, title, status_txt, status_color):
 
 def render_rollout(traj, lanes, *, agent_states=None, agent_types=None, agent_colors=None,
                    reward=None, ego_collision=False, ego_offroad=False, init_invalid=False,
+                   ego_min_ttc=None, goal_offlane_frac=None, parking_mismatch_frac=None,
                    title="") -> "plt.Figure":
     """Static summary of the first episode: each agent a fading sequence of boxes."""
     fig, ax = plt.subplots(figsize=(5, 5), dpi=120)
@@ -199,7 +228,14 @@ def render_rollout(traj, lanes, *, agent_states=None, agent_types=None, agent_co
                             V["bbox_lw"] * (1.4 if t == idxs[-1] else 1.0), alpha=0.22 + 0.78 * frac)
         _draw_goals(ax, agent_states[a] if agent_states is not None else None, xa[0], ya[0], color, V)
 
-    txt, scol = _status_text(reward, ego_collision, ego_offroad, init_invalid)
+    txt, scol = _status_text(
+        reward,
+        ego_collision,
+        init_invalid,
+        ego_min_ttc=ego_min_ttc,
+        goal_offlane_frac=goal_offlane_frac,
+        parking_mismatch_frac=parking_mismatch_frac,
+    )
     _finish(ax, fig, V, title, txt, scol)
     return fig
 
@@ -213,6 +249,7 @@ def _fig_to_rgb(fig) -> np.ndarray:
 
 def render_rollout_frames(traj, lanes, *, agent_states=None, agent_types=None, agent_colors=None,
                           reward=None, ego_collision=False, ego_offroad=False, init_invalid=False,
+                          ego_min_ttc=None, goal_offlane_frac=None, parking_mismatch_frac=None,
                           title="", max_frames=50) -> np.ndarray:
     """One frame per rollout step (agents move, trail grows). Returns [T, H, W, 3] uint8.
 
@@ -225,7 +262,14 @@ def render_rollout_frames(traj, lanes, *, agent_states=None, agent_types=None, a
     T = max(T, 1)
     lanes_arr = np.asarray(lanes) if (lanes is not None and len(lanes) > 0) else None
     V = _view(lanes_arr, x, y, end, n_agents)
-    txt, scol = _status_text(reward, ego_collision, ego_offroad, init_invalid)
+    txt, scol = _status_text(
+        reward,
+        ego_collision,
+        init_invalid,
+        ego_min_ttc=ego_min_ttc,
+        goal_offlane_frac=goal_offlane_frac,
+        parking_mismatch_frac=parking_mismatch_frac,
+    )
     lengths = [float(traj["length"][a]) for a in range(n_agents)]
     widths = [float(traj["width"][a]) for a in range(n_agents)]
 

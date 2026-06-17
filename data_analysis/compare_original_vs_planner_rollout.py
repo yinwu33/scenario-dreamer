@@ -314,6 +314,9 @@ def main() -> None:
             ego_collision=metrics["ego_collision"][0] > 0,
             ego_offroad=metrics["ego_offroad"][0] > 0,
             init_invalid=metrics["init_invalid"][0] > 0,
+            ego_min_ttc=metrics["ego_min_ttc"][0],
+            goal_offlane_frac=metrics["goal_offlane_frac"][0],
+            parking_mismatch_frac=metrics["parking_mismatch_frac"][0],
             title=f"planner rollout {title_base} parking=black",
             max_frames=args.max_frames,
         )

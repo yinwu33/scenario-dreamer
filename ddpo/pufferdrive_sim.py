@@ -66,6 +66,7 @@ MAX_CONTROLLED_AGENTS = 32         # config/pacific/selfplay_drive.ini max_contr
 MIN_DISTANCE_TO_GOAL = 2.0         # static-agent threshold at spawn
 PARTNER_DIST2_GATE = 4096.0        # 64 m
 COLLISION_DIST2_GATE = 225.0       # 15 m
+TTC_SWEEP_HORIZON = 10.0           # seconds; reward clips all values >= ttc_tau to 0
 CONFIG_SIM_PATH = Path(__file__).with_name("config_sim.yaml")
 
 TYPE_VEHICLE, TYPE_PEDESTRIAN, TYPE_CYCLIST = 1, 2, 3
@@ -175,6 +176,9 @@ class SimScene:
         # same spawn velocities scene_codec wrote into the .bin trajectories
         self.vx = (speed * s[:, 3]).astype(np.float32)
         self.vy = (speed * s[:, 4]).astype(np.float32)
+        # Generated spawn-speed magnitude, kept constant by the dummy goal-seek
+        # planner (step_goal_seek); always >= 0 regardless of the sign of speed.
+        self.speed0 = np.hypot(self.vx, self.vy).astype(np.float32)
         self.length = np.maximum(s[:, 5], 0.5).astype(np.float32)
         self.width = np.maximum(s[:, 6], 0.5).astype(np.float32)
         self.goal = s[:, 7:9].copy()
@@ -410,6 +414,36 @@ class SimScene:
         self.vx[idx] = new_vx
         self.vy[idx] = new_vy
 
+    def step_goal_seek(self) -> None:
+        """Dummy rule-based motion: translate each controlled agent toward its
+        goal at its generated spawn speed, with NO acceleration/steering
+        integration (the ``DummyPlanner`` rollout).
+
+        Heading (and thus the collision box orientation) is left at the generated
+        value, so an agent whose goal is not straight ahead slides diagonally
+        toward it. The step is not clamped to the goal (it may overshoot);
+        arrival is handled afterwards by ``goal_step``. Stopped / respawned agents
+        are frozen, matching ``step_dynamics``.
+        """
+        idx = self.controlled[~self.stopped[self.controlled]]
+        idx = idx[~self.respawned[idx]]
+        if len(idx) == 0:
+            return
+        gx = self.goal[idx, 0] - self.x[idx]
+        gy = self.goal[idx, 1] - self.y[idx]
+        dist = np.hypot(gx, gy)
+        moving = dist > 1e-6
+        sel = idx[moving]
+        if len(sel) == 0:
+            return
+        inv_speed = self.speed0[sel] / dist[moving]
+        vx = gx[moving] * inv_speed
+        vy = gy[moving] * inv_speed
+        self.vx[sel] = vx
+        self.vy[sel] = vy
+        self.x[sel] += vx * self.dt
+        self.y[sel] += vy * self.dt
+
     # --------------------------------------------------------------- metrics
     def update_metrics(self) -> None:
         """Vehicle-collision state per controlled agent (collision_check port).
@@ -518,13 +552,13 @@ class SimScene:
         return bool(_sat_overlap(boxes[0], boxes[others]).any())
 
     def ego_min_ttc_now(self) -> float:
-        """Point-mass time-to-collision of the ego (agent 0) with the nearest
-        approaching active agent at the current state; ``+inf`` if none approach.
+        """Box-aware TTC for the ego driving into another active agent.
 
-        Range / range-rate surrogate ``ttc = -|p|^2 / (p . v)`` for ``p . v < 0``,
-        where ``p`` is the ego->other relative position and ``v`` the relative
-        velocity. Pedestrians (never collide) and inactive/respawned agents are
-        excluded - this is the dense criticality feature behind the DDPO reward.
+        This deliberately uses ego-only motion: the ego box is swept forward with
+        its current velocity and heading, while other boxes stay at their current
+        poses. That matches the reward intent of scoring "ego would hit another
+        car" and avoids rewarding cases where another actor is merely closing on
+        the ego.
         """
         if self.n <= 1 or self.respawned[0]:
             return float(np.inf)
@@ -532,17 +566,31 @@ class SimScene:
         others = others[self.ptype[others] != TYPE_PEDESTRIAN]
         if not len(others):
             return float(np.inf)
-        px = self.x[others] - self.x[0]
-        py = self.y[others] - self.y[0]
-        vx = self.vx[others] - self.vx[0]
-        vy = self.vy[others] - self.vy[0]
-        pv = px * vx + py * vy
-        approaching = pv < -1e-6
-        if not approaching.any():
+        ego_vx = float(self.vx[0])
+        ego_vy = float(self.vy[0])
+        if ego_vx * ego_vx + ego_vy * ego_vy < 1e-6:
             return float(np.inf)
-        p2 = px * px + py * py
-        ttc = -p2[approaching] / pv[approaching]
-        return float(ttc.min())
+
+        other_boxes = _corners(
+            self.x[others],
+            self.y[others],
+            self.heading[others],
+            self.length[others],
+            self.width[others],
+        )
+        steps = int(np.ceil(TTC_SWEEP_HORIZON / max(self.dt, 1e-3)))
+        for step in range(0, steps + 1):
+            t = step * self.dt
+            ego_box = _corners(
+                np.asarray([self.x[0] + ego_vx * t]),
+                np.asarray([self.y[0] + ego_vy * t]),
+                np.asarray([self.heading[0]]),
+                np.asarray([self.length[0]]),
+                np.asarray([self.width[0]]),
+            )[0]
+            if _sat_overlap(ego_box, other_boxes).any():
+                return float(t)
+        return float(np.inf)
 
     def any_vehicle_overlap(self, margin: float = 0.0) -> bool:
         """True if any two active (non-pedestrian, non-respawned) agent boxes overlap.

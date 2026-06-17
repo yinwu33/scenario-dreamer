@@ -1,0 +1,4 @@
+# Rule-based goal-seeking rollout: each controlled agent moves straight toward
+# its goal at the generated spawn speed, with no network and no accel/steering
+# integration. Deterministic -> isolates DDPO scene-init from planner variance.
+name: dummy

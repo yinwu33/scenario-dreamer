@@ -30,6 +30,20 @@ def _gaussian_logprob(x: torch.Tensor, mean: torch.Tensor, logvar: torch.Tensor)
     return per_elem.flatten(1).sum(dim=1)
 
 
+def _gaussian_kl(mean: torch.Tensor, mean_ref: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
+    """Per-node KL between two diagonal Gaussians that share ``logvar``.
+
+    The DDPM reverse-step variance is a fixed schedule (independent of the
+    network weights), so the policy's and the reference's per-step Gaussians
+    differ only in their means and KL reduces to the closed form
+    ``sum_d (mean - mean_ref)^2 / (2 var)`` (always >= 0). Summed over feature
+    dims; differentiable through ``mean``.
+    """
+    var = logvar.exp()
+    per_elem = 0.5 * (mean - mean_ref) ** 2 / var
+    return per_elem.flatten(1).sum(dim=1)
+
+
 class LDMGoalDDPOPolicy:
     def __init__(
         self,
@@ -189,7 +203,16 @@ class LDMGoalDDPOPolicy:
         step_indices: torch.Tensor,
         *,
         use_reference: bool = False,
-    ) -> torch.Tensor:
+        with_kl: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Per-step log-prob of the recorded trajectory (optionally with KL).
+
+        Returns ``(logprob, kl)``, both ``[num_scenes, len(step_indices)]``. When
+        ``with_kl`` the closed-form KL to the frozen reference policy is also
+        returned (a proper, >= 0 trust-region penalty differentiable through the
+        policy mean); otherwise ``kl`` is ``None``. The reference mean is computed
+        in the same loop, so this costs one extra (no-grad) forward per step.
+        """
         data = conditioning.to(self.device)
         net = self.ref if use_reference else self.net
         steps = trajectory.records["steps"]
@@ -199,6 +222,7 @@ class LDMGoalDDPOPolicy:
         target_lane = self._lane_latents(data)
 
         out = torch.zeros((num_scenes, len(step_indices)), device=self.device)
+        kl = torch.zeros((num_scenes, len(step_indices)), device=self.device) if with_kl else None
         ctx = torch.no_grad() if use_reference else torch.enable_grad()
         with ctx:
             for col, s in enumerate(step_indices.tolist()):
@@ -211,7 +235,14 @@ class LDMGoalDDPOPolicy:
                 )
                 node_lp = _gaussian_logprob(x_tm1, mean_a, logvar_a)
                 out[:, col] = out[:, col].index_add(0, agent_batch, node_lp)
-        return out
+                if with_kl:
+                    with torch.no_grad():
+                        mean_ref, _, _, _ = self.ref.p_mean_variance(
+                            x_t, target_lane, data, t[agent_batch], t[lane_batch]
+                        )
+                    node_kl = _gaussian_kl(mean_a, mean_ref, logvar_a)
+                    kl[:, col] = kl[:, col].index_add(0, agent_batch, node_kl)
+        return out, kl
 
     # ----------------------------------------------------------- decode
     @torch.no_grad()
@@ -242,11 +273,17 @@ class LDMGoalDDPOPolicy:
             min_lane_y=self.cfg_dataset.min_lane_y,
             max_lane_y=self.cfg_dataset.max_lane_y,
         )
+        meta = {"lane_scene_idx": data["lane"].batch}
+        lane_edge_store = data["lane", "to", "lane"]
+        if "edge_index" in lane_edge_store:
+            meta["lane_edge_index"] = lane_edge_store.edge_index
+        if "type" in lane_edge_store:
+            meta["lane_edge_type"] = lane_edge_store.type
         return GeneratedScenes(
             agent_states=agent_states,
             agent_types=agent_types,
             agent_scene_idx=data["agent"].batch,
             lane_polylines=data["lane"].road_points,
             num_scenes=int(data.batch_size),
-            meta={"lane_scene_idx": data["lane"].batch},
+            meta=meta,
         )

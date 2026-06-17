@@ -23,3 +23,4 @@ diag_gt_to_bezier_out/
 data_selfplay/
 wandb
 data_analysis/rollout_compare
+test_scripts/

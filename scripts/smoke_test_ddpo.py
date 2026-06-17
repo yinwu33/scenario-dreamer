@@ -1,11 +1,17 @@
 """End-to-end DDPO smoke test: one tiny iteration per mode.
 
 Run from the repo root after `source scripts/define_env_variables.sh`:
-    .venv/bin/python scripts/smoke_test_ddpo.py [--modes goal init_goal all]
+    .venv/bin/python scripts/smoke_test_ddpo.py [--modes full agent_only goal_only]
 """
 
 import argparse
+import sys
 import time
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 import torch
 from hydra import compose, initialize_config_dir
@@ -19,16 +25,25 @@ from ddpo.reward import PufferDriveReward
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--modes", nargs="*", default=["goal", "init_goal", "all"])
+    ap.add_argument("--modes", nargs="*", default=["full", "agent_only", "goal_only"])
     ap.add_argument("--batch-size", type=int, default=2)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    ap.add_argument("--control-agent-num", type=int, default=-1,
+                    help="number of non-ego agents to generate (-1 = all)")
+    ap.add_argument("--sampler", choices=["ddpm", "ddim"], default="ddpm")
+    ap.add_argument("--ddim-steps", type=int, default=25)
+    ap.add_argument("--ddim-eta", type=float, default=1.0)
+    ap.add_argument("--no-control-ego", dest="control_ego", action="store_false",
+                    help="fix ego to GT (generate only other agents)")
+    ap.set_defaults(control_ego=True)
     args = ap.parse_args()
 
     with initialize_config_dir(config_dir=CONFIG_PATH, version_base=None):
         cfg = compose(config_name="config_ddpo")
 
     pool = ConditioningPool(cfg.dm_goal.dataset, split_name="val", pool_size=8,
-                            device=args.device, seed=0)
+                            device=args.device, seed=0,
+                            control_agent_num=args.control_agent_num)
     reward = PufferDriveReward(
         sim_steps=91,
         goal_offlane_threshold=cfg.ddpo.get("goal_offlane_threshold", 3.0),
@@ -42,7 +57,10 @@ def main():
         print(f"\n=== mode={mode} ===")
         t0 = time.time()
         policy = DMGoalDDPOPolicy(cfg.dm_goal, ckpt_path=cfg.ddpo.model_ckpt, mode=mode,
-                                  device=args.device)
+                                  device=args.device, control_ego=args.control_ego,
+                                  control_agent_num=args.control_agent_num,
+                                  sampler=args.sampler, ddim_steps=args.ddim_steps,
+                                  ddim_eta=args.ddim_eta)
         cond = pool.sample_batch(args.batch_size)
         scenes, traj = policy.sample(cond)
         t_sample = time.time() - t0
@@ -57,11 +75,13 @@ def main():
 
         rewards = torch.as_tensor(metrics["reward"], device=args.device)
         adv = compute_advantages(rewards, ddpo_cfg)
-        k_idx = torch.arange(0, 95)[torch.randperm(95)[:4]]
-        new_lp = policy.trajectory_logprob(traj, cond, k_idx)
+        stochastic_steps = policy.stochastic_step_indices(min_diffusion_t=5)
+        k_idx = stochastic_steps[torch.randperm(len(stochastic_steps))[:4]]
+        new_lp, kl_term = policy.trajectory_logprob(
+            traj, cond, k_idx, with_kl=ddpo_cfg.kl_coef > 0
+        )
         old_lp = traj.old_logprob[:, k_idx]
-        ref_lp = policy.trajectory_logprob(traj, cond, k_idx, use_reference=True)
-        loss, log = ddpo_loss(new_lp, old_lp, adv, ddpo_cfg, ref_lp)
+        loss, log = ddpo_loss(new_lp, old_lp, adv, ddpo_cfg, kl_term)
         loss.backward()
         gnorm = torch.nn.utils.clip_grad_norm_(list(policy.trainable_parameters()), 1.0)
         # ratio should be ~1 on the same parameters; grads must be finite

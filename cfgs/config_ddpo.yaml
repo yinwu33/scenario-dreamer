@@ -6,7 +6,7 @@
 # Usage:
 #   python train.py --config-name config_ddpo      # same as config_ddpo_dm_goal
 #   python train_ddpo.py                            # deprecated shim, still works
-#   python train.py --config-name config_ddpo ddpo.mode=goal   # goal | init_goal | all
+#   python train.py --config-name config_ddpo ddpo.mode=goal_only   # goal_only | agent_only | full
 
 model_name: ddpo
 

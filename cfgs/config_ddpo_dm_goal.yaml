@@ -2,7 +2,8 @@
 #
 # Usage:
 #   python train.py --config-name config_ddpo_dm_goal
-#   python train.py --config-name config_ddpo_dm_goal ddpo.mode=goal   # goal | init_goal | all
+#   python train.py --config-name config_ddpo_dm_goal ddpo.mode=goal_only   # goal_only | agent_only | full
+#   python train.py --config-name config_ddpo_dm_goal ddpo.mode=goal_only ddpo.control_ego=false ddpo.control_agent_num=1
 
 model_name: ddpo
 
@@ -15,5 +16,6 @@ defaults:
   - dm_goal/model@dm_goal.model
   - dm_goal/datamodule@dm_goal.datamodule
   - ddpo/dm_goal@ddpo
+  - planner@ddpo.planner: selfplay_drive
   - sim: base
   - _self_

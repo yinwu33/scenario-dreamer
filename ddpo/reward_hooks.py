@@ -79,10 +79,11 @@ class EgoCollisionHook(RewardHook):
     """Track ego collisions over the rollout (+1 / criticality cap)."""
 
     def before_step_scene(self, ctx: RolloutContext, scene_idx: int, sim: SimScene) -> None:
-        ctx.metrics["ego_collision"][scene_idx] = max(
-            ctx.metrics["ego_collision"][scene_idx],
-            float(sim.ego_collides_now()),
-        )
+        # ctx.metrics["ego_collision"][scene_idx] = max(
+        #     ctx.metrics["ego_collision"][scene_idx],
+        #     float(sim.ego_collides_now()),
+        # )
+        ctx.metrics["ego_collision"][scene_idx] = 0.  # ! debug, TODO: remove collision, because it encourage agent to crash ego
 
 
 class EgoMinTTCHook(RewardHook):
@@ -199,17 +200,21 @@ class TrajectoryHook(RewardHook):
 
 
 class GoalOfflaneHook(RewardHook):
-    """Penalty feature for moving-car goals that leave the road.
+    """Penalty feature for moving cars placed off the lane graph.
 
-    Only agents that are (a) moving (generated goal >= 2 m from spawn, i.e. in
-    ``initial_controlled``), (b) cars, and (c) *spawned* on a lane are required
-    to keep an on-lane goal. Pedestrians/cyclists and cars that started off-road
-    are exempt - real data has vehicles that legitimately drive off the lane
-    graph, so penalising those would be a false signal. The penalty is the
-    fraction of *eligible* agents whose goal is off-lane.
+    Every moving car (generated goal >= 2 m from spawn, i.e. in
+    ``initial_controlled``) is required to keep BOTH its spawn and its goal on a
+    lane: a moving vehicle is flagged off-lane when its spawn is farther than
+    ``onroad_threshold`` from the nearest lane centerline OR its goal is farther
+    than ``threshold``. This closes the reward-hacking hole where the policy
+    spawned an adversary off-road to dodge the goal-off-lane penalty (an off-road
+    spawn used to exempt the agent entirely). Pedestrians/cyclists are exempt
+    (they do not follow the lane graph). The penalty is the fraction of moving
+    cars that are off-lane by either criterion. Distances that cannot be measured
+    (scene has no lane geometry -> +inf) do not count as off-lane.
     """
 
-    def __init__(self, threshold: float, onroad_threshold: float = 2.0):
+    def __init__(self, threshold: float, onroad_threshold: float = 1.0):
         self.threshold = float(threshold)
         self.onroad_threshold = float(onroad_threshold)
 
@@ -219,16 +224,15 @@ class GoalOfflaneHook(RewardHook):
             idx = sim.initial_controlled
             if len(idx) == 0:
                 continue
-            spawn_d = sim.dist_to_lane_centerline(sim.spawn[idx, :2])
-            eligible = (
-                (sim.ptype[idx] == TYPE_VEHICLE)
-                & np.isfinite(spawn_d)
-                & (spawn_d <= self.onroad_threshold)
-            )
+            eligible = sim.ptype[idx] == TYPE_VEHICLE
             if not eligible.any():
                 continue
+            spawn_d = sim.dist_to_lane_centerline(sim.spawn[idx, :2])
             goal_d = sim.dist_to_lane_centerline(sim.goal[idx])
-            offlane = eligible & np.isfinite(goal_d) & (goal_d > self.threshold)
+            offlane = eligible & (
+                (np.isfinite(spawn_d) & (spawn_d > self.onroad_threshold))
+                | (np.isfinite(goal_d) & (goal_d > self.threshold))
+            )
             frac[s] = float(offlane.sum() / eligible.sum())
         ctx.metrics["goal_offlane_frac"] = frac
 
@@ -253,4 +257,83 @@ class ParkingMismatchHook(RewardHook):
                 if len(gt_p):
                     frac[s] = float((gen_p != gt_p).mean())
         ctx.metrics["parking_mismatch_frac"] = frac
+
+
+def controlled_nonego_local_indices(scenes, num_scenes):
+    """Per-scene sim-local indices of DDPO-controlled non-ego agents.
+
+    ``_build_scenes`` keeps the GeneratedScenes agent order when slicing each
+    scene, so an agent's local index within its scene equals its index in the
+    corresponding SimScene (ego is always local 0). ``meta['controlled_mask']``
+    (set by the policy decode) flags the generated nodes; the ego is dropped.
+    Returns empty arrays when no mask is present (e.g. raw conditioning scenes).
+    """
+    controlled = scenes.meta.get("controlled_mask")
+    if controlled is None:
+        return [np.zeros(0, dtype=np.int64) for _ in range(num_scenes)]
+    if isinstance(controlled, torch.Tensor):
+        controlled = controlled.detach().cpu().numpy()
+    a_idx = scenes.agent_scene_idx
+    if isinstance(a_idx, torch.Tensor):
+        a_idx = a_idx.detach().cpu().numpy()
+    out = []
+    for s in range(num_scenes):
+        local = np.nonzero(controlled[a_idx == s])[0]
+        out.append(local[local > 0].astype(np.int64))
+    return out
+
+
+class EgoAdvMinDistHook(RewardHook):
+    """Dense shaping feature: min same-step ego<->controlled-adversary distance.
+
+    Complements EgoMinTTCHook, which sweeps only the ego forward (an adversary
+    closing on a slow/stationary ego yields TTC=inf, hence no gradient). This
+    symmetric centre distance gives signal at any range and regardless of which
+    party is moving. Only DDPO-controlled non-ego agents are measured, so the
+    metric is attributable to the policy (fixed GT neighbours never move it).
+    """
+
+    def before_rollout(self, ctx: RolloutContext) -> None:
+        ctx.metrics["ego_adv_min_dist"] = np.full(ctx.num_scenes, np.inf, dtype=np.float32)
+        self._adv = controlled_nonego_local_indices(ctx.scenes, ctx.num_scenes)
+
+    def before_step_scene(self, ctx: RolloutContext, scene_idx: int, sim: SimScene) -> None:
+        # # ! debug, TODO: remove this for testing
+        # return
+        adv = self._adv[scene_idx]
+        if len(adv) == 0 or sim.respawned[0]:
+            return
+        adv = adv[~sim.respawned[adv]]  # drop removed / respawned adversaries
+        if len(adv) == 0:
+            return
+        dx = sim.x[adv] - sim.x[0]
+        dy = sim.y[adv] - sim.y[0]
+        d = float(np.sqrt(dx * dx + dy * dy).min())
+        if d < ctx.metrics["ego_adv_min_dist"][scene_idx]:
+            ctx.metrics["ego_adv_min_dist"][scene_idx] = d
+
+
+class ControlledParkingHook(RewardHook):
+    """Penalty feature: fraction of controlled non-ego agents generated parked.
+
+    A generated adversary whose goal sits within MIN_DISTANCE_TO_GOAL of its
+    spawn is static (the sim never controls it - see ``set_active_agents``). To
+    push the policy to make the adversary actually drive, penalise the fraction
+    of controlled non-ego agents that are parked. Unlike ParkingMismatchHook this
+    is independent of GT, so it works in agent_only mode (no gt_parking_mask).
+    """
+
+    def after_rollout(self, ctx: RolloutContext) -> None:
+        frac = np.zeros(ctx.num_scenes, dtype=np.float32)
+        adv = controlled_nonego_local_indices(ctx.scenes, ctx.num_scenes)
+        for s, sim in enumerate(ctx.sims):
+            idx = adv[s]
+            if len(idx) == 0:
+                continue
+            gen_dist = np.hypot(
+                sim.goal[idx, 0] - sim.spawn[idx, 0],
+                sim.goal[idx, 1] - sim.spawn[idx, 1],
+            )
+            frac[s] = float((gen_dist < MIN_DISTANCE_TO_GOAL).mean())
+        ctx.metrics["controlled_parking_frac"] = frac
 

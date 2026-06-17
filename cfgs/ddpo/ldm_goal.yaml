@@ -16,6 +16,8 @@ eval_split: val
 pool_size: 2048
 
 # --- rollout / reward ---------------------------------------------------------
+reward_backend: numpy      # "numpy" | "puffer"
+pufferdrive_root: ${project_root}/PufferDrive
 sim_steps: 91
 planner_deterministic: true
 ttc_tau: 3.0
@@ -29,8 +31,9 @@ parking_mismatch_penalty: 0.0
 batch_size: 16
 num_iterations: 2000
 inner_epochs: 1
-k_steps: 8
+k_steps: 4
 min_diffusion_t: 5
+bf16: true
 lr: 1e-5
 weight_decay: 1e-4
 grad_clip: 1.0
@@ -40,7 +43,7 @@ output_dir: ${scratch_root}/checkpoints/ddpo_ldm_goal
 ddpo:
   estimator: is
   clip_range: 1.0e-4
-  kl_coef: 0.01
+  kl_coef: 0.0  # analytic KL(policy||ref) trust region; 0 disables. Retune: magnitude differs from the old (broken) sampled estimator.
   adv_clip: 5.0
   adv_eps: 1.0e-6
   logratio_clip: 20.0
