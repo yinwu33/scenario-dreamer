@@ -57,11 +57,13 @@ def add_static_metrics(
     goal_offlane_threshold: float,
     goal_onroad_threshold: float,
 ) -> dict:
-    """Fill goal-off-lane / parking-mismatch / controlled-parking fractions.
+    """Fill controlled-agent lane / parking-mismatch / parking fractions.
 
-    Adds the keys in place and returns ``metrics``. ``ego_adv_min_dist`` needs
-    per-step rollout positions this static path does not have; it is left at
-    +inf (zero shaping bonus) unless the caller already populated it.
+    Goal-off-lane and lane-distance metrics are computed only over DDPO-controlled
+    non-ego vehicles, mirroring ``GoalOfflaneHook``. Adds the keys in place and
+    returns ``metrics``. ``ego_adv_min_dist`` needs per-step rollout positions
+    this static path does not have; it is left at +inf (zero shaping bonus)
+    unless the caller already populated it.
     """
     states = _to_numpy(scenes.agent_states, np.float32)
     types = _to_numpy(scenes.agent_types, np.int64)
@@ -97,6 +99,7 @@ def add_static_metrics(
             if len(gt_p):
                 parking_mismatch[s] = float(((gen_dist < MIN_DISTANCE_TO_GOAL) != gt_p).mean())
 
+        adv_local = np.zeros(0, dtype=np.int64)
         if controlled is not None:
             ctrl_s = controlled[a_sel]
             adv_local = np.nonzero(ctrl_s)[0]
@@ -104,8 +107,7 @@ def add_static_metrics(
             if len(adv_local):
                 controlled_parking[s] = float((gen_dist[adv_local] < MIN_DISTANCE_TO_GOAL).mean())
 
-        controlled_local = np.nonzero(gen_dist >= MIN_DISTANCE_TO_GOAL)[0]
-        controlled_local = controlled_local[: int(sim_cfg.max_controlled_agents)]
+        controlled_local = adv_local[: int(sim_cfg.max_controlled_agents)]
         if len(controlled_local) == 0:
             continue
 
@@ -114,8 +116,8 @@ def add_static_metrics(
         if not eligible.any():
             continue
 
-        # Mirror GoalOfflaneHook: a moving car is off-lane when its spawn OR its
-        # goal leaves the lane graph (off-road spawn no longer exempts it).
+        # Mirror GoalOfflaneHook: only DDPO-controlled non-ego vehicles are
+        # scored; ego/fixed GT agents are excluded from the lane constraint.
         s_lanes = lanes[lane_scene_idx == s]
         spawn_d = _lane_distance(spawn[controlled_local], s_lanes)
         goal_d = _lane_distance(goal[controlled_local], s_lanes)

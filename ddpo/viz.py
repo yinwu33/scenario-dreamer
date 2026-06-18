@@ -100,10 +100,11 @@ def _fmt_float(value, *, signed: bool = False, digits: int = 2, inf: str = "inf"
 # keys are skipped so this degrades gracefully as new components are added
 # (Phase 3/5). The leading field of each line is that line's total.
 _COMPONENT_LINES = [
-    [("crit", "criticality"), ("ttc", "r_ttc"), ("appr", "r_approach"),
-     ("risk", "r_risk"), ("coll", "r_collision")],
-    [("cons", "constraint"), ("lane", "c_lane"), ("park", "c_parking"),
-     ("triv", "c_trivial")],
+    [("risk", "r_risk"), ("ttc", "r_ttc"), ("appr", "r_approach"),
+     ("coll", "r_collision")],
+    [("lane", "c_lane"), ("gD", "goal_lane_dist"), ("sD", "spawn_lane_dist"),
+     ("gFrac", "goal_offlane_frac")],
+    [("park", "c_parking"), ("triv", "c_trivial")],
     [("d0", "ego_adv_init_dist"), ("dmin", "ego_adv_min_dist_warmup"),
      ("tcol", "ego_collision_time")],
 ]
@@ -126,11 +127,19 @@ def _status_text(
     is rendered on extra lines below the summary.
     """
     r = 0.0 if reward is None else float(reward)
-    lines = [
-        f"R={r:+.2f}  TTC={_fmt_float(ego_min_ttc)}  "
-        f"col={int(bool(collided))}  init={int(bool(init_invalid))}  "
-        f"gOff={_fmt_float(goal_offlane_frac)}  pMis={_fmt_float(parking_mismatch_frac)}"
-    ]
+    if components and "criticality" in components and "constraint" in components:
+        lines = [
+            f"R={r:+.2f} = crit {_fmt_float(components['criticality'])}"
+            f" - cons {_fmt_float(components['constraint'])}  "
+            f"TTC={_fmt_float(ego_min_ttc)}  col={int(bool(collided))}  "
+            f"init={int(bool(init_invalid))}"
+        ]
+    else:
+        lines = [
+            f"R={r:+.2f}  TTC={_fmt_float(ego_min_ttc)}  "
+            f"col={int(bool(collided))}  init={int(bool(init_invalid))}  "
+            f"gOff={_fmt_float(goal_offlane_frac)}  pMis={_fmt_float(parking_mismatch_frac)}"
+        ]
     if components:
         for fields in _COMPONENT_LINES:
             parts = [

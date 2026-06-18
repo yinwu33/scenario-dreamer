@@ -220,18 +220,15 @@ class TrajectoryHook(RewardHook):
 
 
 class GoalOfflaneHook(RewardHook):
-    """Penalty feature for moving cars placed off the lane graph.
+    """Penalty feature for DDPO-controlled vehicles placed off the lane graph.
 
-    Every moving car (generated goal >= 2 m from spawn, i.e. in
-    ``initial_controlled``) is required to keep BOTH its spawn and its goal on a
-    lane: a moving vehicle is flagged off-lane when its spawn is farther than
+    Only generated non-ego agents marked by ``meta["controlled_mask"]`` are
+    scored here, and pedestrians/cyclists are exempt. Ego and fixed GT agents are
+    deliberately excluded so the lane constraint is attributable to the policy.
+    A controlled vehicle is flagged off-lane when its spawn is farther than
     ``onroad_threshold`` from the nearest lane centerline OR its goal is farther
-    than ``threshold``. This closes the reward-hacking hole where the policy
-    spawned an adversary off-road to dodge the goal-off-lane penalty (an off-road
-    spawn used to exempt the agent entirely). Pedestrians/cyclists are exempt
-    (they do not follow the lane graph). The penalty is the fraction of moving
-    cars that are off-lane by either criterion. Distances that cannot be measured
-    (scene has no lane geometry -> +inf) do not count as off-lane.
+    than ``threshold``. Distances that cannot be measured (scene has no lane
+    geometry -> +inf) do not count as off-lane.
     """
 
     def __init__(self, threshold: float, onroad_threshold: float = 1.0):
@@ -240,14 +237,15 @@ class GoalOfflaneHook(RewardHook):
 
     def after_rollout(self, ctx: RolloutContext) -> None:
         frac = np.zeros(ctx.num_scenes, dtype=np.float32)
-        # Continuous worst-case lane distances over eligible moving cars, for the
-        # smoothstep lane penalty in reward.py (replaces the binary fraction,
-        # which jumps 0->1 in the one-agent setup). Non-finite (no lane geometry)
-        # distances are ignored -> 0, matching the fraction's "doesn't count".
+        # Continuous worst-case lane distances over eligible controlled vehicles,
+        # for the smoothstep lane penalty in reward.py. Non-finite (no lane
+        # geometry) distances are ignored -> 0, matching the fraction's
+        # "doesn't count".
         goal_lane_dist = np.zeros(ctx.num_scenes, dtype=np.float32)
         spawn_lane_dist = np.zeros(ctx.num_scenes, dtype=np.float32)
+        controlled_adv = controlled_nonego_local_indices(ctx.scenes, ctx.num_scenes)
         for s, sim in enumerate(ctx.sims):
-            idx = sim.initial_controlled
+            idx = controlled_adv[s]
             if len(idx) == 0:
                 continue
             eligible = sim.ptype[idx] == TYPE_VEHICLE
@@ -388,4 +386,3 @@ class ControlledParkingHook(RewardHook):
             )
             frac[s] = float((gen_dist < MIN_DISTANCE_TO_GOAL).mean())
         ctx.metrics["controlled_parking_frac"] = frac
-
