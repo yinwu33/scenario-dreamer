@@ -6,6 +6,7 @@ import os
 from utils.geometry import *
 import math
 from cfgs.config import LANE_CONNECTION_TYPES_WAYMO, LANE_CONNECTION_TYPES_NUPLAN
+from ddpo.goal_schema import MIN_DISTANCE_TO_GOAL
 from moviepy.editor import ImageSequenceClip
 import wandb
 
@@ -184,6 +185,18 @@ def plot_scene(
         if agent_states.shape[1] >= 9:
             goal = agent_states[a, 7:9]
             if np.all(np.isfinite(goal)):
+                vehicle_center = agent_states[a, :2]
+                if np.linalg.norm(goal - vehicle_center) < MIN_DISTANCE_TO_GOAL:
+                    ax.scatter(
+                        vehicle_center[0],
+                        vehicle_center[1],
+                        marker='x',
+                        color='black',
+                        s=goal_marker_size,
+                        linewidths=max(goal_linewidth * 2.0, 1.2),
+                        zorder=8,
+                    )
+                    continue
                 ax.plot(
                     [agent_states[a, 0], goal[0]],
                     [agent_states[a, 1], goal[1]],

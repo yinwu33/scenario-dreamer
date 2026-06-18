@@ -56,14 +56,14 @@ from torch_geometric.data import Batch
 
 from models.scenario_dreamer_dm_goal import unnormalize_scene_with_goal
 from nn_modules.dm_goal import DMGoal
+from nn_modules.dm_fixed_map_agent_goal import DMFixedMapAgentGoal
 
 from .goal_schema import (
-    GOAL_DIMS,
+    AgentSchema,
+    DM_FIXED_MAP_AGENT_GOAL_SCHEMA,
+    DM_GOAL_AGENT_SCHEMA,
     GOAL_SLICE,
     MIN_DISTANCE_TO_GOAL,
-    SIZE_DIMS,
-    TYPE_DIMS,
-    VEHICLE_TYPE_ID,
     fov_unnormalize,
 )
 from .interfaces import GeneratedScenes, SamplingTrajectory
@@ -97,6 +97,16 @@ def _masked_gaussian_kl(mean, mean_ref, logvar, free_mask):
 
 
 class DMGoalDDPOPolicy:
+    NET_CLS = DMGoal
+    AGENT_SCHEMA = DM_GOAL_AGENT_SCHEMA
+
+    def _build_net(self, cfg):
+        return self.NET_CLS(cfg)
+
+    @property
+    def agent_schema(self) -> AgentSchema:
+        return self.AGENT_SCHEMA
+
     def __init__(
         self,
         cfg,                      # cfg.dm_goal node (model / dataset / train children)
@@ -111,6 +121,7 @@ class DMGoalDDPOPolicy:
         sampler: str = "ddpm",
         ddim_steps: int | None = None,
         ddim_eta: float = 1.0,
+        force_driving: bool = False,
     ):
         if mode not in MODES:
             raise ValueError(f"mode must be one of {MODES}, got {mode!r}")
@@ -126,11 +137,12 @@ class DMGoalDDPOPolicy:
         self.inpaint_noised = inpaint_noised
         self.control_ego = bool(control_ego)
         self.control_agent_num = int(control_agent_num)
+        self.force_driving = bool(force_driving)
         self.sampler = str(sampler).lower()
         if self.sampler not in ("ddpm", "ddim"):
             raise ValueError(f"sampler must be one of ('ddpm', 'ddim'), got {sampler!r}")
 
-        self.net = DMGoal(cfg).to(device)
+        self.net = self._build_net(cfg).to(device)
         if ckpt_path is not None:
             self._load_checkpoint(ckpt_path, use_ema_weights)
         # eval() disables dropout/label-dropout so recomputed log-probs are
@@ -159,11 +171,15 @@ class DMGoalDDPOPolicy:
         self.lane_free = mode == "full"
 
         free = torch.zeros(self.agent_latent_dim, dtype=torch.bool)
+        size_dims = self.agent_schema.size_dims
+        type_dims = self.agent_schema.type_dims
         if mode == "goal_only":
-            free[list(GOAL_DIMS)] = True
+            free[list(self.agent_schema.goal_dims)] = True
         else:
             free[:] = True
-            free[list(SIZE_DIMS + TYPE_DIMS)] = False
+            free[list(size_dims + type_dims)] = False
+            if self.agent_schema.parking_dims is not None:
+                free[list(self.agent_schema.parking_dims)] = False
         self.agent_free_mask = free.to(device)
         # Inpainting is needed if some dims are fixed (goal_only) OR some nodes
         # are fixed (control_ego False / control_agent_num >= 0).
@@ -294,13 +310,20 @@ class DMGoalDDPOPolicy:
         target_agent = target_agent.clone()
         counts = torch.bincount(agent_batch, minlength=num_scenes)
         ego_idx = torch.cumsum(counts, 0) - counts
-        size_slice = slice(SIZE_DIMS[0], SIZE_DIMS[-1] + 1)
-        type_slice = slice(TYPE_DIMS[0], TYPE_DIMS[-1] + 1)
+        size_slice = slice(self.agent_schema.size_dims[0], self.agent_schema.size_dims[-1] + 1)
+        type_slice = slice(self.agent_schema.type_dims[0], self.agent_schema.type_dims[-1] + 1)
         target_agent[controlled, :, size_slice] = target_agent[
             ego_idx[agent_batch[controlled]], :, size_slice
         ]
         target_agent[controlled, :, type_slice] = 0.0
-        target_agent[controlled, :, TYPE_DIMS[VEHICLE_TYPE_ID]] = 1.0
+        target_agent[controlled, :, type_slice.start + self.agent_schema.vehicle_type_id] = 1.0
+        if self.force_driving and self.agent_schema.parking_dims is not None:
+            parking_slice = slice(
+                self.agent_schema.parking_dims[0],
+                self.agent_schema.parking_dims[-1] + 1,
+            )
+            target_agent[controlled, :, parking_slice] = 0.0
+            target_agent[controlled, :, self.agent_schema.parking_dims[0]] = 1.0
         return target_agent
 
     def _project_decoded_vehicle_footprint(
@@ -311,9 +334,11 @@ class DMGoalDDPOPolicy:
             return agent_states, agent_types
         counts = torch.bincount(agent_batch, minlength=num_scenes)
         ego_idx = torch.cumsum(counts, 0) - counts
-        ego_size = agent_states[ego_idx, 5:7]
-        agent_states[controlled, 5:7] = ego_size[agent_batch[controlled]]
-        agent_types[controlled] = VEHICLE_TYPE_ID
+        ego_size = agent_states[ego_idx, self.agent_schema.size_dims[0]:self.agent_schema.size_dims[-1] + 1]
+        agent_states[controlled, self.agent_schema.size_dims[0]:self.agent_schema.size_dims[-1] + 1] = ego_size[
+            agent_batch[controlled]
+        ]
+        agent_types[controlled] = self.agent_schema.vehicle_type_id
         return agent_states, agent_types
 
     # -------------------------------------------------------------- inpainting
@@ -614,3 +639,49 @@ class DMGoalDDPOPolicy:
             num_scenes=int(data.batch_size),
             meta=meta,
         )
+
+
+class DMFixedMapAgentGoalDDPOPolicy(DMGoalDDPOPolicy):
+    NET_CLS = DMFixedMapAgentGoal
+    AGENT_SCHEMA = DM_FIXED_MAP_AGENT_GOAL_SCHEMA
+
+    def __init__(
+        self,
+        cfg,
+        ckpt_path: str | None,
+        *,
+        mode: str = "agent_only",
+        device: str = "cuda",
+        use_ema_weights: bool = True,
+        inpaint_noised: bool = True,
+        control_ego: bool = True,
+        control_agent_num: int = -1,
+        sampler: str = "ddpm",
+        ddim_steps: int | None = None,
+        ddim_eta: float = 1.0,
+        force_driving: bool = True,
+    ):
+        if mode != "agent_only":
+            raise ValueError(
+                f"dm_fixed_map_agent_goal supports only mode='agent_only', got {mode!r}"
+            )
+        if str(sampler).lower() == "ddim":
+            raise ValueError(
+                "dm_fixed_map_agent_goal does not support sampler='ddim'; use sampler='ddpm'"
+            )
+
+        super().__init__(
+            cfg,
+            ckpt_path,
+            mode=mode,
+            device=device,
+            use_ema_weights=use_ema_weights,
+            inpaint_noised=inpaint_noised,
+            control_ego=control_ego,
+            control_agent_num=control_agent_num,
+            sampler=sampler,
+            ddim_steps=ddim_steps,
+            ddim_eta=ddim_eta,
+            force_driving=force_driving,
+        )
+        self.lane_free = False

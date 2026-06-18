@@ -1,31 +1,62 @@
-"""Single source of truth for the dm_goal agent-state schema.
+"""Single source of truth for agent-state layout constants.
 
-Two agent-state layouts share the same goal columns:
-  * decoded / physical (9 dims), as carried by ``GeneratedScenes`` and the numpy
-    sim:  ``[x, y, speed, cos, sin, length, width, goal_x, goal_y]``
-  * normalized diffusion latent (12 dims), as sampled by the dm_goal policy:
-    ``[x, y, speed, cos, sin, length, width, goal_x, goal_y, type_onehot(3)]``
-The first 9 columns coincide, so ``GOAL_DIMS`` / ``GOAL_SLICE`` / ``SIZE_DIMS``
-index both layouts.
+The diffusion policies operate on normalized latents; reward and rendering use
+the same first 9 physical columns:
 
-NOTE on type encodings (do NOT conflate): ``TYPE_DIMS`` / ``VEHICLE_TYPE_ID``
-below describe the latent one-hot block. The numpy sim uses a different scheme
-(class ids ``TYPE_VEHICLE/PEDESTRIAN/CYCLIST = 1/2/3`` in ``pufferdrive_sim``).
+``[x, y, speed, cos, sin, length, width, goal_x, goal_y]``.
 
-This module is a leaf (no ``ddpo`` imports) so the sim / policy / viz can all
-import it without circular imports.
+Different DDPO generators share the same first 9 columns and goal columns, but
+different latent extensions (e.g. fixed-map adds parking and still keeps the
+vehicle-type block).
 """
 
 from __future__ import annotations
 
-# --- column layout (shared by the 9-dim physical and 12-dim latent vectors) ---
-GOAL_DIMS = (7, 8)            # goal_x, goal_y
-GOAL_SLICE = slice(7, 9)
-SIZE_DIMS = (5, 6)           # length, width
+from dataclasses import dataclass
 
-# --- latent-only (12-dim) type one-hot block --------------------------------
-TYPE_DIMS = (9, 10, 11)
-VEHICLE_TYPE_ID = 0          # index WITHIN TYPE_DIMS that means "vehicle"
+
+@dataclass(frozen=True)
+class AgentSchema:
+    """Layout for the normalized agent latent.
+
+    All indices are absolute in the latent vector and describe one-hot blocks in
+    absolute index coordinates, not relative to any other layout.
+    """
+
+    agent_latent_dim: int
+    goal_dims: tuple[int, int]
+    size_dims: tuple[int, int]
+    type_dims: tuple[int, int, int]
+    vehicle_type_id: int = 0
+    parking_dims: tuple[int, int] | None = None
+
+
+DM_GOAL_AGENT_SCHEMA = AgentSchema(
+    agent_latent_dim=12,
+    goal_dims=(7, 8),
+    size_dims=(5, 6),
+    type_dims=(9, 10, 11),
+    vehicle_type_id=0,
+    parking_dims=None,
+)
+
+
+DM_FIXED_MAP_AGENT_GOAL_SCHEMA = AgentSchema(
+    agent_latent_dim=14,
+    goal_dims=(7, 8),
+    size_dims=(5, 6),
+    type_dims=(11, 12, 13),
+    vehicle_type_id=0,
+    parking_dims=(9, 10),
+)
+
+
+# Backwards-compatible module-level constants for existing dm_goal imports.
+GOAL_DIMS = DM_GOAL_AGENT_SCHEMA.goal_dims
+GOAL_SLICE = slice(DM_GOAL_AGENT_SCHEMA.goal_dims[0], DM_GOAL_AGENT_SCHEMA.goal_dims[-1] + 1)
+SIZE_DIMS = DM_GOAL_AGENT_SCHEMA.size_dims
+TYPE_DIMS = DM_GOAL_AGENT_SCHEMA.type_dims
+VEHICLE_TYPE_ID = DM_GOAL_AGENT_SCHEMA.vehicle_type_id
 
 # --- thresholds -------------------------------------------------------------
 MIN_DISTANCE_TO_GOAL = 2.0   # metres; goal within this of spawn => parked/static

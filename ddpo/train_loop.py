@@ -22,9 +22,10 @@ from omegaconf import OmegaConf
 
 from ddpo.conditioning import ConditioningPool, LDMGoalConditioningPool
 from ddpo.ddpo_loss import DDPOConfig, compute_advantages, ddpo_loss
-from ddpo.policy import DMGoalDDPOPolicy
+from ddpo.policy import DMFixedMapAgentGoalDDPOPolicy, DMGoalDDPOPolicy
 from ddpo.policy_ldm import LDMGoalDDPOPolicy
 from ddpo.reward import PufferDriveReward
+from datasets.waymo.dataset_dm_fixed_map_agent_goal_waymo import WaymoDatasetDMFixedMapAgentGoal
 from utils.train_helpers import cache_latent_stats, set_latent_stats
 
 
@@ -85,6 +86,33 @@ def _build_policy_and_pool(cfg_root, cfg, device: str):
             seed=cfg.seed,
         )
         eval_dataset_cfg = ldm_cfg.dataset
+    elif model_type == "dm_fixed_map_agent_goal":
+        _set_dataset_name(cfg_root.dm_fixed_map_agent_goal, dataset_name)
+        policy = DMFixedMapAgentGoalDDPOPolicy(
+            cfg_root.dm_fixed_map_agent_goal,
+            ckpt_path=cfg.model_ckpt,
+            mode=cfg.mode,
+            device=device,
+            use_ema_weights=cfg.get("use_ema_weights", True),
+            inpaint_noised=cfg.get("inpaint_noised", True),
+            control_ego=cfg.get("control_ego", True),
+            control_agent_num=cfg.get("control_agent_num", -1),
+            sampler=cfg.get("sampler", "ddpm"),
+            ddim_steps=cfg.get("ddim_steps", None),
+            ddim_eta=cfg.get("ddim_eta", 1.0),
+            force_driving=cfg.get("force_driving", True),
+        )
+        pool = ConditioningPool(
+            cfg_root.dm_fixed_map_agent_goal.dataset,
+            split_name=cfg.train_split,
+            pool_size=cfg.pool_size,
+            device=device,
+            seed=cfg.seed,
+            control_agent_num=cfg.get("control_agent_num", -1),
+            ego_goal_override=cfg.get("ego_goal_override", None),
+            dataset_cls=WaymoDatasetDMFixedMapAgentGoal,
+        )
+        eval_dataset_cfg = cfg_root.dm_fixed_map_agent_goal.dataset
     else:
         raise ValueError(f"Unsupported ddpo.model_type: {model_type}")
 
@@ -96,6 +124,8 @@ def _default_run_name(cfg, model_type: str) -> str:
         if cfg.get("sampler", "ddpm") == "ddim":
             return f"ddpo_dm_goal_{cfg.mode}_ddim{cfg.ddim_steps}_eta{cfg.ddim_eta}"
         return f"ddpo_dm_goal_{cfg.mode}"
+    if model_type == "dm_fixed_map_agent_goal":
+        return f"ddpo_dm_fixed_map_agent_goal_{cfg.mode}"
     return f"ddpo_{model_type}"
 
 
@@ -242,16 +272,20 @@ def run_ddpo(cfg_root):
     eval_every = int(cfg.get("eval_every", 0))
     eval_pool = None
     if eval_every > 0:
-        pool_cls = ConditioningPool if model_type == "dm_goal" else LDMGoalConditioningPool
-        # Only the dm_goal pool prunes agents; the ldm pool has no such knob.
-        prune_kwargs = (
-            {
+        if model_type == "ldm_goal":
+            pool_cls = LDMGoalConditioningPool
+            prune_kwargs = {}
+            pool_kwargs = {}
+        else:
+            pool_cls = ConditioningPool
+            prune_kwargs = {
                 "control_agent_num": cfg.get("control_agent_num", -1),
                 "ego_goal_override": cfg.get("ego_goal_override", None),
             }
-            if model_type == "dm_goal"
-            else {}
-        )
+            pool_kwargs = {}
+            if model_type == "dm_fixed_map_agent_goal":
+                pool_kwargs["dataset_cls"] = WaymoDatasetDMFixedMapAgentGoal
+
         eval_pool = pool_cls(
             eval_dataset_cfg,
             split_name=cfg.eval_split,
@@ -259,6 +293,7 @@ def run_ddpo(cfg_root):
             device=device,
             seed=cfg.seed,
             **prune_kwargs,
+            **pool_kwargs,
         )
 
     min_diffusion_t = int(cfg.get("min_diffusion_t", 5))  # TODO: understand the priciple

@@ -97,9 +97,7 @@ def _float_pair(value, name: str) -> tuple[float, float]:
     return float(value[0]), float(value[1])
 
 
-@lru_cache(maxsize=1)
-def load_sim_config() -> SimConfig:
-    raw = OmegaConf.load(CONFIG_SIM_PATH)
+def _build_sim_config(raw) -> SimConfig:
     return SimConfig(
         dt=float(raw.get("dt", 0.1)),
         goal_radius=float(raw.get("goal_radius", 2.0)),
@@ -114,6 +112,20 @@ def load_sim_config() -> SimConfig:
         offroad_factor_range=_float_pair(raw.get("offroad_factor_range", (0.0, 2.0)), "offroad_factor_range"),
         lane_width_range=_float_pair(raw.get("lane_width_range", (1.0, 5.0)), "lane_width_range"),
     )
+
+
+@lru_cache(maxsize=1)
+def _load_default_sim_config() -> SimConfig:
+    return _build_sim_config(OmegaConf.load(CONFIG_SIM_PATH))
+
+
+def load_sim_config(overrides=None) -> SimConfig:
+    if overrides is None:
+        return _load_default_sim_config()
+    if OmegaConf.is_config(overrides):
+        overrides = OmegaConf.create(OmegaConf.to_container(overrides, resolve=True))
+    raw = OmegaConf.merge(OmegaConf.load(CONFIG_SIM_PATH), overrides)
+    return _build_sim_config(raw)
 
 
 def spiral_offsets(vision_range: int = VISION_RANGE) -> np.ndarray:
@@ -154,8 +166,9 @@ class SimScene:
         lane_polylines: np.ndarray,  # [L, P, 2]
         *,
         rng: np.random.Generator,
+        sim_cfg: SimConfig | None = None,
     ):
-        cfg = load_sim_config()
+        cfg = sim_cfg or load_sim_config()
         s = np.asarray(agent_states, dtype=np.float32)
         n = s.shape[0]
         self.n = n

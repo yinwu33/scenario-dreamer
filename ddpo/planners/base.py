@@ -89,7 +89,7 @@ class NumpyPlanner(RolloutPlanner):
 
     def __init__(self, planner_cfg, params: RolloutParams, *, device: str | None = None):
         self.params = params
-        self.sim_cfg = load_sim_config()
+        self.sim_cfg = load_sim_config(planner_cfg.get("sim", None))
         self.rng = np.random.default_rng(int(params.seed))
 
     # ------------------------------------------------------------------ build
@@ -113,6 +113,7 @@ class NumpyPlanner(RolloutPlanner):
                     types[a_idx == s],
                     lanes[l_idx == s],
                     rng=self.rng,
+                    sim_cfg=self.sim_cfg,
                 )
             )
         return sims

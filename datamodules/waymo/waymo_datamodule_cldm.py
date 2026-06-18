@@ -47,7 +47,7 @@ class WaymoDataModuleCLDM(pl.LightningDataModule):
     def val_dataloader(self):
         return DataLoader(self.val_dataset,
                           batch_size=self.val_batch_size,
-                          shuffle=True,
+                          shuffle=False,
                           num_workers=self.num_workers,
                           pin_memory=self.pin_memory,
                           drop_last=True)

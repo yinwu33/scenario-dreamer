@@ -1,0 +1,29 @@
+# Recurrent PufferDrive bad_driver policy + in-repo numpy classic dynamics.
+name: bad_driver
+checkpoint: ${project_root}/planner/bad_driver/bad_driver_178126787233.pt
+device: auto
+deterministic: true
+
+policy:
+  input_size: 64
+  hidden_size: 256
+
+rnn_name: Recurrent
+rnn:
+  input_size: 256
+  hidden_size: 256
+
+# Env/observation settings translated from PufferDrive/pufferlib/config/pacific/bad_driver.ini.
+sim:
+  dt: 0.1
+  goal_radius: 2.0
+  goal_speed: 100.0
+  goal_behavior: respawn
+  max_controlled_agents: 64
+  condition_sample_mode: fixed
+  fixed_collision_factor: 0.5
+  fixed_offroad_factor: 0.5
+  fixed_lane_width: 3.5
+  collision_factor_range: [0.0, 2.0]
+  offroad_factor_range: [0.0, 2.0]
+  lane_width_range: [1.0, 5.0]

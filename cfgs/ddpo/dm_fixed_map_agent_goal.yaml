@@ -1,0 +1,92 @@
+# DDPO fine-tuning of dm_fixed_map_agent_goal against a frozen PufferDrive
+# planner. No-geometry diffusion is active; agent state (init + goal) is generated.
+
+model_type: dm_fixed_map_agent_goal
+device: cuda
+seed: 0
+
+# --- training mode (WHICH dims are free) ----------------------------------
+mode: agent_only
+inpaint_noised: true        # inpaint fixed entries with q_sample(x0,t); false -> clean x0
+
+# --- node control (WHICH agents are free; ego is local index 0) ------------
+control_ego: false           # false -> fix ego to GT, generate only other agents
+control_agent_num: 1       # number of non-ego agents to generate; -1 = all
+
+# --- fixed-map policy constraints ------------------------------------------
+force_driving: true          # always project controlled parking to not-parked class
+
+# --- ego goal override (rule-based, applied at conditioning load) ----------
+# Real SDC trajectories often barely move (goal ~= spawn), so the ego is never
+# controlled and the criticality reward gets no signal. Replace the ego goal
+# with a far, forward, on-road lane endpoint so the ego then conditions the
+# generated adversaries.
+ego_goal_override:
+  enabled: true
+  min_distance: 15.0
+  top_k: 8
+  noise: 1.0
+  seed: 0
+
+# --- artifacts ------------------------------------------------------------
+model_ckpt: ${scratch_root}/checkpoints/scenario_dreamer_dm_fixed_map_agent_goal_train/last.ckpt
+use_ema_weights: true
+
+# --- conditioning pools (native dm_goal dataset; no dump step) -------------
+train_split: train
+eval_split: val
+pool_size: 2048
+
+# --- rollout / reward -----------------------------------------------------
+reward_backend: numpy
+pufferdrive_root: ${project_root}/PufferDrive
+sim_steps: 91
+planner_deterministic: true
+ttc_tau: 3.0
+init_overlap_margin: 0.0
+goal_offlane_threshold: 1.0
+goal_onroad_threshold: 1.0
+goal_offlane_penalty: 1.0
+parking_mismatch_penalty: 0.5
+min_dist_coef: 0.5
+min_dist_dmax: 10.0
+controlled_parking_penalty: 0.5
+
+# --- DDPO ----------------------------------------------------------------
+sampler: ddpm                 # keep DDPM only for fixed-map; ddim is rejected below
+ddim_steps: 25
+ddim_eta: 1.0
+batch_size: 32
+num_iterations: 20000
+inner_epochs: 2
+k_steps: 8
+min_diffusion_t: 20
+bf16: false
+logprob_bf16: false
+lr: 1e-5
+weight_decay: 1e-4
+grad_clip: 1.0
+save_every: 100
+output_dir: ${experiment.output_dir}
+
+ddpo:
+  estimator: is
+  clip_range: 1.0e-4
+  kl_coef: 0.01
+  adv_clip: 5.0
+  adv_eps: 1.0e-6
+  logratio_clip: 20.0
+
+# --- logging / eval ------------------------------------------------------
+wandb:
+  enabled: true
+  project: ${experiment.project}
+  entity: null
+  run_name: ${experiment.run_name}
+eval_every: 50
+eval_num_scenes: 16
+eval_visualize_reference: true
+eval_visualize_conditioning: true
+save_gif: true
+gif_fps: 10
+gif_max_frames: 90

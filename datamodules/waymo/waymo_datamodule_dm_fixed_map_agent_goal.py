@@ -48,7 +48,7 @@ class WaymoDataModuleDMFixedMapAgentGoal(pl.LightningDataModule):
         return DataLoader(
             self.val_dataset,
             batch_size=self.val_batch_size,
-            shuffle=True,
+            shuffle=False,
             num_workers=self.num_workers,
             pin_memory=self.pin_memory,
             persistent_workers=self.persistent_workers,

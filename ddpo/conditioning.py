@@ -55,6 +55,10 @@ def prune_agents(d, control_agent_num: int):
 
     d["agent"].x = d["agent"].x[:keep]
     d["agent"].type = d["agent"].type[:keep]
+    if "parking" in d["agent"]:
+        d["agent"].parking = d["agent"].parking[:keep]
+    if "parking_label" in d["agent"]:
+        d["agent"].parking_label = d["agent"].parking_label[:keep]
     if "partition_mask" in d["agent"]:
         d["agent"].partition_mask = d["agent"].partition_mask[:keep]
     d["num_agents"] = keep
@@ -139,6 +143,13 @@ def _override_ego_goal(d, dataset_cfg, params: EgoGoalOverride, rng) -> None:
 
     ax[0, 7] = 2.0 * ((gx + half) / fov) - 1.0
     ax[0, 8] = 2.0 * ((gy + half) / fov) - 1.0
+    # Override can be undone in decode if ego remains parked (parking head->spawn goal),
+    # so force ego to not-parked in the conditioning graph when fields exist.
+    if "parking_label" in d["agent"]:
+        d["agent"].parking_label[0] = 0
+    if "parking" in d["agent"]:
+        d["agent"].parking[0] = 0.0
+        d["agent"].parking[0, 0] = 1.0
 
 
 class ConditioningPool:
@@ -148,14 +159,15 @@ class ConditioningPool:
         *,
         split_name: str = "train",
         pool_size: int = 2048,
+        dataset_cls=WaymoDatasetDMGoal,
         device: str = "cuda",
         seed: int = 0,
         control_agent_num: int = -1,
         ego_goal_override=None,
     ):
-        self.dataset = WaymoDatasetDMGoal(dataset_cfg, split_name=split_name, mode="eval")
+        self.dataset = dataset_cls(dataset_cfg, split_name=split_name, mode="eval")
         if len(self.dataset) == 0:
-            raise RuntimeError(f"empty dm_goal dataset for split '{split_name}' "
+            raise RuntimeError(f"empty conditioning dataset for split '{split_name}' "
                                f"({dataset_cfg.preprocess_dir})")
         self.dataset_cfg = dataset_cfg
         self.ego_goal_override = EgoGoalOverride.from_cfg(ego_goal_override)
