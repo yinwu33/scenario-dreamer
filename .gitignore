@@ -24,3 +24,11 @@ data_selfplay/
 wandb
 data_analysis/rollout_compare
 test_scripts/
+
+# critical_scene benchmark outputs: keep small summaries (summary.json /
+# per_scene.csv / manifest.yaml) tracked; heavy artifacts go to $SCRATCH_ROOT
+# (.pt already ignored above). These block heavy files if they ever land here.
+outputs/**/media/
+outputs/**/wandb/
+outputs/**/checkpoints/
+outputs/**/generated/

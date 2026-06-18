@@ -39,7 +39,7 @@ def main():
     args = ap.parse_args()
 
     with initialize_config_dir(config_dir=CONFIG_PATH, version_base=None):
-        cfg = compose(config_name="config_ddpo")
+        cfg = compose(config_name="config_critical_scene_dm_goal_ddpm")
 
     pool = ConditioningPool(cfg.dm_goal.dataset, split_name="val", pool_size=8,
                             device=args.device, seed=0,

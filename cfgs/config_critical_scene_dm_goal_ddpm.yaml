@@ -1,0 +1,35 @@
+# Critical-scene Stage 2: DDPO fine-tuning of dm_goal (DDPM sampler) against a
+# frozen planner. Entrypoint kept at cfgs/ root (Hydra @package composition does
+# not resolve correctly for primary configs nested in a subdirectory).
+#
+# Usage:
+#   python train.py --config-name config_critical_scene_dm_goal_ddpm
+#   python train.py --config-name config_critical_scene_dm_goal_ddpm ddpo.mode=goal_only
+#   python train.py --config-name config_critical_scene_dm_goal_ddpm planner@ddpo.planner=dummy
+
+model_name: ddpo
+
+defaults:
+  - _base
+  - dataset_name: waymo
+  - dm_goal/dataset@dm_goal.dataset
+  - dm_goal/train@dm_goal.train
+  - dm_goal/eval@dm_goal.eval
+  - dm_goal/model@dm_goal.model
+  - dm_goal/datamodule@dm_goal.datamodule
+  - ddpo/dm_goal@ddpo
+  - planner@ddpo.planner: selfplay_drive
+  - sim: base
+  - _self_
+
+# Single source of truth for run identity. ddpo.output_dir / ddpo.wandb.* are
+# interpolations of these (see cfgs/ddpo/dm_goal.yaml), so the whole run is named
+# and located from here without hardcoding paths in the group config.
+experiment:
+  project: critical_scene
+  stage: ddpo
+  generator: dm_goal
+  sampler: ${ddpo.sampler}
+  planner_name: ${oc.select:ddpo.planner.name,none}
+  run_name: critical_scene_${experiment.stage}_${experiment.generator}_${experiment.sampler}_${experiment.planner_name}_${ddpo.mode}
+  output_dir: ${scratch_root}/critical_scene/${experiment.run_name}

@@ -6,7 +6,7 @@ needed, then enable the chosen sampler in DDPO training.
 
 Example:
     .venv/bin/python scripts/eval_dm_goal_sampler.py \
-        --config-name config_ddpo_dm_goal --num-scenes 256 --candidates 25 50
+        --config-name config_critical_scene_dm_goal_ddpm --num-scenes 256 --candidates 25 50
 """
 
 from __future__ import annotations
@@ -248,7 +248,7 @@ def _save_visuals(
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config-name", default="config_ddpo_dm_goal")
+    ap.add_argument("--config-name", default="config_critical_scene_dm_goal_ddpm")
     ap.add_argument("--split", default="val")
     ap.add_argument("--num-scenes", type=int, default=256)
     ap.add_argument("--batch-size", type=int, default=32)

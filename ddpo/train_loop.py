@@ -1,10 +1,10 @@
 """DDPO fine-tuning loops against a frozen PufferDrive planner.
 
-This module holds the actual training loop. It is dispatched from train.py
-when ``model_name == 'ddpo'`` (i.e. ``python train.py --config-name config_ddpo``),
-and also from the deprecated ``train_ddpo.py`` shim. Heavy / PufferDrive-specific
-imports live at module top level here so they are only paid when the ddpo path is
-actually taken (train.py imports this module lazily inside its dispatch branch).
+This module holds the actual training loop. It is dispatched from train.py when
+``model_name == 'ddpo'`` (e.g. ``python train.py --config-name
+config_critical_scene_dm_goal_ddpm``). Heavy / PufferDrive-specific imports live
+at module top level here so they are only paid when the ddpo path is actually
+taken (train.py imports this module lazily inside its dispatch branch).
 
 Pipeline per iteration:
     ConditioningPool.sample_batch(B)          # real conditioning graphs
@@ -100,11 +100,10 @@ def _default_run_name(cfg, model_type: str) -> str:
 
 
 def _checkpoint_prefix(cfg, model_type: str) -> str:
-    if model_type == "dm_goal":
-        if cfg.get("sampler", "ddpm") == "ddim":
-            return f"ddpo_dm_goal_{cfg.mode}_ddim{cfg.ddim_steps}"
-        return f"ddpo_dm_goal_{cfg.mode}"
-    return f"ddpo_{model_type}"
+    # Checkpoint filename tracks the run name (experiment.run_name, surfaced as
+    # cfg.wandb.run_name via the group config); fall back to the legacy derived
+    # name for configs without an experiment.* block.
+    return cfg.wandb.get("run_name", None) or _default_run_name(cfg, model_type)
 
 
 def _bf16_autocast(device: str, enabled: bool = True):

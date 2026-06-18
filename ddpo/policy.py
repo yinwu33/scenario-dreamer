@@ -57,14 +57,19 @@ from torch_geometric.data import Batch
 from models.scenario_dreamer_dm_goal import unnormalize_scene_with_goal
 from nn_modules.dm_goal import DMGoal
 
+from .goal_schema import (
+    GOAL_DIMS,
+    GOAL_SLICE,
+    MIN_DISTANCE_TO_GOAL,
+    SIZE_DIMS,
+    TYPE_DIMS,
+    VEHICLE_TYPE_ID,
+    fov_unnormalize,
+)
 from .interfaces import GeneratedScenes, SamplingTrajectory
 
 _LOG_2PI = math.log(2.0 * math.pi)
 MODES = ("full", "agent_only", "goal_only")
-GOAL_DIMS = (7, 8)
-SIZE_DIMS = (5, 6)
-TYPE_DIMS = (9, 10, 11)
-VEHICLE_TYPE_ID = 0
 
 
 def _masked_gaussian_logprob(x, mean, logvar, free_mask):
@@ -597,10 +602,10 @@ class DMGoalDDPOPolicy:
             # penalises generated scenes whose parking state diverges from this.
             fov = float(self.cfg_dataset.fov)
             gt = data["agent"].x.float()
-            gt_init = (gt[:, 0:2] + 1) / 2 * fov - fov / 2
-            gt_goal = (gt[:, 7:9] + 1) / 2 * fov - fov / 2
+            gt_init = fov_unnormalize(gt[:, 0:2], fov)
+            gt_goal = fov_unnormalize(gt[:, GOAL_SLICE], fov)
             gt_dist = torch.linalg.norm(gt_goal - gt_init, dim=-1)
-            meta["gt_parking_mask"] = gt_dist < 2.0  # MIN_DISTANCE_TO_GOAL
+            meta["gt_parking_mask"] = gt_dist < MIN_DISTANCE_TO_GOAL
         return GeneratedScenes(
             agent_states=agent_states,
             agent_types=agent_types,

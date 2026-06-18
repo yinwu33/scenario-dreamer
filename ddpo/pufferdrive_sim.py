@@ -36,6 +36,7 @@ import numpy as np
 from omegaconf import OmegaConf
 
 from .geometry import _corners, _sat_overlap
+from .goal_schema import MIN_DISTANCE_TO_GOAL
 from planner.selfplay_drive.planner import (
     EGO_FEATURES,
     MAX_AGENTS,
@@ -63,7 +64,8 @@ MAX_ROAD_SCALE = 100.0
 GRID_CELL_SIZE = 5.0
 VISION_RANGE = 21                  # drive.h init_grid_map (hardcoded)
 MAX_CONTROLLED_AGENTS = 32         # config/pacific/selfplay_drive.ini max_controlled_agents
-MIN_DISTANCE_TO_GOAL = 2.0         # static-agent threshold at spawn
+# MIN_DISTANCE_TO_GOAL (static-agent threshold at spawn) imported from .goal_schema
+# and re-exported here for the planner/metric modules that import it from this file.
 PARTNER_DIST2_GATE = 4096.0        # 64 m
 COLLISION_DIST2_GATE = 225.0       # 15 m
 TTC_SWEEP_HORIZON = 10.0           # seconds; reward clips all values >= ttc_tau to 0

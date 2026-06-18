@@ -29,6 +29,8 @@ import matplotlib.pyplot as plt
 import matplotlib.transforms as transforms
 import numpy as np
 
+from .goal_schema import MIN_DISTANCE_TO_GOAL
+
 _EGO_COLOR = "#de5959"      # light red  (ego = local index 0)
 _VEH_COLOR = "#87b3e6"      # light blue (other vehicles)
 _PED_COLOR = "#bea9f5"      # light purple (pedestrians)
@@ -36,7 +38,7 @@ _CYC_COLOR = "#5fa55f"      # green (cyclists)
 CONTROL_COLOR = "#2ca02c"   # vivid green: DDPO-controlled (generated) non-ego agents,
                             # passed in via ``agent_colors`` to flag who is being trained
 _JUMP_THRESH = 10.0         # metres/step above which motion is a teleport, not driving
-_PARKING_DIST = 2.0         # MIN_DISTANCE_TO_GOAL: goal within this of spawn => parked/static
+_PARKING_DIST = MIN_DISTANCE_TO_GOAL  # goal within this of spawn => parked/static
 
 
 def _agent_color(is_ego: bool, type_id) -> str:

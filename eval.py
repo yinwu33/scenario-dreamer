@@ -1,12 +1,12 @@
-import os 
+import os
 import hydra
-from omegaconf import OmegaConf
 from models.scenario_dreamer_autoencoder import ScenarioDreamerAutoEncoder
 from models.scenario_dreamer_ldm import ScenarioDreamerLDM
 from models.scenario_dreamer_dm import ScenarioDreamerDM
 from models.scenario_dreamer_dm_goal import ScenarioDreamerDMGoal
 from models.scenario_dreamer_dm_fixed_map_agent_goal import ScenarioDreamerDMFixedMapAgentGoal
 from models.scenario_dreamer_cldm import ScenarioDreamerCLDM
+from model_registry import collapse_cfg
 from metrics import Metrics
 
 import torch
@@ -134,63 +134,16 @@ def eval_autoencoder(cfg, save_dir=None):
 
 @hydra.main(version_base=None, config_path=CONFIG_PATH, config_name="config")
 def main(cfg):
-    # need to track whether we are evaluating a nuplan or waymo model as 
-    # nuplan predicts lane types (lane/green light/red light) and waymo does not
-    dataset_name = cfg.dataset_name.name
-    if cfg.model_name == 'autoencoder':
-        model_name = cfg.model_name
-        cfg = cfg.ae
-        # not the cleanest solution, but need to track dataset name
-        OmegaConf.set_struct(cfg, False)   # unlock to allow setting dataset name
-        cfg.dataset_name = dataset_name
-        OmegaConf.set_struct(cfg, True)    # relock
-    elif cfg.model_name == 'autoencoder_goal':
-        model_name = cfg.model_name
-        cfg = cfg.ae_goal
-        OmegaConf.set_struct(cfg, False)
-        cfg.dataset_name = dataset_name
-        OmegaConf.set_struct(cfg, True)
-    elif cfg.model_name in ['ldm', 'cldm']:
-        model_name = cfg.model_name
-        cfg_ae = cfg.ae
-        cfg = cfg.ldm
-        OmegaConf.set_struct(cfg, False)   # unlock to allow setting dataset name
-        OmegaConf.set_struct(cfg_ae, False)
-        cfg.dataset_name = dataset_name
-        cfg_ae.dataset_name = dataset_name
-        OmegaConf.set_struct(cfg, True)    # relock
-        OmegaConf.set_struct(cfg_ae, True)
-    elif cfg.model_name == 'ldm_goal':
-        model_name = cfg.model_name
-        cfg_ae = cfg.ae_goal
-        cfg = cfg.ldm_goal
-        OmegaConf.set_struct(cfg, False)
-        OmegaConf.set_struct(cfg_ae, False)
-        cfg.dataset_name = dataset_name
-        cfg_ae.dataset_name = dataset_name
-        OmegaConf.set_struct(cfg, True)
-        OmegaConf.set_struct(cfg_ae, True)
-    elif cfg.model_name == 'dm':
-        model_name = cfg.model_name
-        cfg = cfg.dm
-        OmegaConf.set_struct(cfg, False)
-        cfg.dataset_name = dataset_name
-        OmegaConf.set_struct(cfg, True)
-    elif cfg.model_name == 'dm_goal':
-        model_name = cfg.model_name
-        cfg = cfg.dm_goal
-        OmegaConf.set_struct(cfg, False)
-        cfg.dataset_name = dataset_name
-        OmegaConf.set_struct(cfg, True)
-    elif cfg.model_name == 'dm_fixed_map_agent_goal':
-        model_name = cfg.model_name
-        cfg = cfg.dm_fixed_map_agent_goal
-        OmegaConf.set_struct(cfg, False)
-        cfg.dataset_name = dataset_name
-        OmegaConf.set_struct(cfg, True)
-    else:
-        raise ValueError(f"Unsupported evaluation model_name: {cfg.model_name}")
-    
+    # need to track whether we are evaluating a nuplan or waymo model as
+    # nuplan predicts lane types (lane/green light/red light) and waymo does not.
+    # collapse_cfg picks the right root-config child node, injects dataset_name,
+    # and returns the (frozen) autoencoder cfg for the latent-diffusion family.
+    model_name = cfg.model_name
+    # eval.py supports a subset of trained models (no ctrl_sim, no autoencoder_bezier).
+    if model_name in ('ctrl_sim', 'autoencoder_bezier'):
+        raise ValueError(f"Unsupported evaluation model_name: {model_name}")
+    spec, cfg, cfg_ae = collapse_cfg(cfg, model_name)
+
     pl.seed_everything(cfg.eval.seed, workers=True)
 
     # checkpoints loaded from here
@@ -200,20 +153,15 @@ def main(cfg):
 
     print(f"Evaluating Scenario Dreamer {model_name} trained on {cfg.dataset_name} dataset.")
 
-    if model_name in ('autoencoder', 'autoencoder_goal'):
+    if spec.kind == 'autoencoder':
         eval_autoencoder(cfg, save_dir)
-    elif model_name in ['ldm', 'cldm', 'ldm_goal']:
-        model_cls = ScenarioDreamerCLDM if model_name == 'cldm' else ScenarioDreamerLDM
+    elif spec.kind == 'ldm':
         if cfg.eval.mode == 'simulation_environments':
-            generate_simulation_environments(cfg, cfg_ae, save_dir, model_cls=model_cls)
+            generate_simulation_environments(cfg, cfg_ae, save_dir, model_cls=spec.model_cls)
         else:
-            eval_ldm(cfg, cfg_ae, save_dir, model_cls=model_cls)
-    elif model_name == 'dm':
-        eval_dm(cfg, save_dir)
-    elif model_name == 'dm_goal':
-        eval_dm(cfg, save_dir, model_cls=ScenarioDreamerDMGoal)
-    elif model_name == 'dm_fixed_map_agent_goal':
-        eval_dm(cfg, save_dir, model_cls=ScenarioDreamerDMFixedMapAgentGoal)
+            eval_ldm(cfg, cfg_ae, save_dir, model_cls=spec.model_cls)
+    elif spec.kind == 'dm':
+        eval_dm(cfg, save_dir, model_cls=spec.model_cls)
 
 
 if __name__ == '__main__':

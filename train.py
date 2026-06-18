@@ -1,4 +1,4 @@
-import os 
+import os
 import hydra
 from models.scenario_dreamer_autoencoder import ScenarioDreamerAutoEncoder
 from models.scenario_dreamer_autoencoder_bezier import ScenarioDreamerAutoEncoderBezier
@@ -8,6 +8,7 @@ from models.scenario_dreamer_dm_goal import ScenarioDreamerDMGoal
 from models.scenario_dreamer_dm_fixed_map_agent_goal import ScenarioDreamerDMFixedMapAgentGoal
 from models.scenario_dreamer_cldm import ScenarioDreamerCLDM
 from models.ctrl_sim import CtRLSim
+from model_registry import collapse_cfg
 
 import torch
 import shutil
@@ -19,7 +20,6 @@ from pytorch_lightning.strategies import DDPStrategy
 from pytorch_lightning.loggers import WandbLogger
 from cfgs.config import CONFIG_PATH
 from hydra.utils import instantiate
-from omegaconf import OmegaConf
 from utils.train_helpers import cache_latent_stats, set_latent_stats
 
 
@@ -260,101 +260,35 @@ def train_autoencoder(cfg, save_dir=None, model_cls=ScenarioDreamerAutoEncoder):
 def main(cfg):
     # DDPO fine-tuning has its own RL training loop (not PyTorch Lightning) and
     # needs the full root cfg (both cfg.ddpo and cfg.dm_goal), so it is dispatched
-    # before the generic per-project collapse below. The import is lazy because it
+    # before the generic registry collapse below. The import is lazy because it
     # pulls in PufferDrive-specific deps only needed on this path.
-    #   python train.py --config-name config_ddpo
+    #   python train.py --config-name config_critical_scene_dm_goal_ddpm
     if cfg.model_name == 'ddpo':
         from ddpo.train_loop import run_ddpo
         run_ddpo(cfg)
         return
 
     # need to track whether we are training a nuplan or waymo model as
-    # nuplan predicts lane types (lane/green light/red light) and waymo does not
-    dataset_name = cfg.dataset_name.name
-    if cfg.model_name in ('autoencoder', 'autoencoder_bezier'):
-        model_name = cfg.model_name
-        cfg = cfg.ae
-        # not the cleanest solution, but need to track dataset name
-        OmegaConf.set_struct(cfg, False)   # unlock to allow setting dataset name
-        cfg.dataset_name = dataset_name
-        OmegaConf.set_struct(cfg, True)    # relock
-    elif cfg.model_name in ['ldm', 'cldm']:
-        model_name = cfg.model_name
-        cfg_ae = cfg.ae
-        cfg = cfg.ldm
-        OmegaConf.set_struct(cfg, False)   # unlock to allow setting dataset name
-        OmegaConf.set_struct(cfg_ae, False)
-        cfg.dataset_name = dataset_name
-        cfg_ae.dataset_name = dataset_name
-        OmegaConf.set_struct(cfg, True)    # relock
-        OmegaConf.set_struct(cfg_ae, True)
-    elif cfg.model_name == 'dm':
-        model_name = cfg.model_name
-        cfg = cfg.dm
-        OmegaConf.set_struct(cfg, False)
-        cfg.dataset_name = dataset_name
-        OmegaConf.set_struct(cfg, True)
-    elif cfg.model_name == 'dm_goal':
-        model_name = cfg.model_name
-        cfg = cfg.dm_goal
-        OmegaConf.set_struct(cfg, False)
-        cfg.dataset_name = dataset_name
-        OmegaConf.set_struct(cfg, True)
-    elif cfg.model_name == 'dm_fixed_map_agent_goal':
-        model_name = cfg.model_name
-        cfg = cfg.dm_fixed_map_agent_goal
-        OmegaConf.set_struct(cfg, False)
-        cfg.dataset_name = dataset_name
-        OmegaConf.set_struct(cfg, True)
-    elif cfg.model_name == 'autoencoder_goal':
-        model_name = cfg.model_name
-        cfg = cfg.ae_goal
-        OmegaConf.set_struct(cfg, False)
-        cfg.dataset_name = dataset_name
-        OmegaConf.set_struct(cfg, True)
-    elif cfg.model_name == 'ldm_goal':
-        model_name = cfg.model_name
-        cfg_ae = cfg.ae_goal
-        cfg = cfg.ldm_goal
-        OmegaConf.set_struct(cfg, False)
-        OmegaConf.set_struct(cfg_ae, False)
-        cfg.dataset_name = dataset_name
-        cfg_ae.dataset_name = dataset_name
-        OmegaConf.set_struct(cfg, True)
-        OmegaConf.set_struct(cfg_ae, True)
-    else:
-        model_name = cfg.model_name
-        cfg = cfg.ctrl_sim
-        OmegaConf.set_struct(cfg, False)
-        cfg.dataset_name = dataset_name
-        OmegaConf.set_struct(cfg, True)
-    
+    # nuplan predicts lane types (lane/green light/red light) and waymo does not.
+    # collapse_cfg picks the right root-config child node, injects dataset_name,
+    # and returns the (frozen) autoencoder cfg for the latent-diffusion family.
+    model_name = cfg.model_name
+    spec, cfg, cfg_ae = collapse_cfg(cfg, model_name)
+
     pl.seed_everything(cfg.train.seed, workers=True)
 
     # checkpoints saved here
     save_dir = os.path.join(cfg.train.save_dir, cfg.train.run_name)
     if not os.path.exists(save_dir):
         os.makedirs(save_dir, exist_ok=True)
-    
-    if model_name == 'autoencoder':
-        train_autoencoder(cfg, save_dir)
-    elif model_name == 'autoencoder_goal':
-        train_autoencoder(cfg, save_dir)
-    elif model_name == 'autoencoder_bezier':
-        train_autoencoder(cfg, save_dir, model_cls=ScenarioDreamerAutoEncoderBezier)
-    elif model_name == 'ldm':
-        train_ldm(cfg, cfg_ae, save_dir)
-    elif model_name == 'ldm_goal':
-        train_ldm(cfg, cfg_ae, save_dir)
-    elif model_name == 'cldm':
-        train_ldm(cfg, cfg_ae, save_dir, model_cls=ScenarioDreamerCLDM)
-    elif model_name == 'dm':
-        train_dm(cfg, save_dir)
-    elif model_name == 'dm_goal':
-        train_dm(cfg, save_dir, model_cls=ScenarioDreamerDMGoal)
-    elif model_name == 'dm_fixed_map_agent_goal':
-        train_dm(cfg, save_dir, model_cls=ScenarioDreamerDMFixedMapAgentGoal)
-    elif model_name == 'ctrl_sim':
+
+    if spec.kind == 'autoencoder':
+        train_autoencoder(cfg, save_dir, model_cls=spec.model_cls)
+    elif spec.kind == 'ldm':
+        train_ldm(cfg, cfg_ae, save_dir, model_cls=spec.model_cls)
+    elif spec.kind == 'dm':
+        train_dm(cfg, save_dir, model_cls=spec.model_cls)
+    elif spec.kind == 'ctrl_sim':
         train_ctrl_sim(cfg, save_dir)
 
 if __name__ == '__main__':

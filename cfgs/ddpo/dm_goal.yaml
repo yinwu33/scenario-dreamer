@@ -74,7 +74,8 @@ lr: 3e-6
 weight_decay: 1e-4
 grad_clip: 1.0
 save_every: 100
-output_dir: ${scratch_root}/checkpoints/ddpo_dm_goal_${ddpo.mode}
+# Derived from the entrypoint's experiment.* block (single source of truth).
+output_dir: ${experiment.output_dir}
 
 ddpo:
   estimator: is
@@ -87,9 +88,9 @@ ddpo:
 # --- logging / eval -----------------------------------------------------------
 wandb:
   enabled: true
-  project: scenario_dreamer_ddpo
+  project: ${experiment.project}
   entity: null
-  run_name: null            # null -> ddpo_dm_goal_${mode}
+  run_name: ${experiment.run_name}
 eval_every: 50
 eval_num_scenes: 4
 eval_visualize_reference: true
