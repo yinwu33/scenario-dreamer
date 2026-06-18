@@ -44,8 +44,8 @@ sim_steps: 91
 planner_deterministic: true
 ttc_tau: 3.0
 init_overlap_margin: 0.0
-goal_offlane_threshold: 1.75     # = hard end of the continuous lane penalty (m)
-goal_onroad_threshold: 1.75
+goal_offlane_threshold: 2.75     # = hard end of the continuous lane penalty (m)
+goal_onroad_threshold: 2.75
 # Phase 2 reward shaping ----------------------------------------------------
 # criticality = risk_coef * noisy_OR(R_ttc, R_approach) + collision_coef*R_coll
 risk_coef: 1.0
@@ -56,7 +56,7 @@ approach_close_scale: 1.0        # closing-gate sharpness (smaller = crisper gat
 approach_warmup_time: 0.5        # ignore first N s when measuring closing
 # constraints (subtracted, each >= 0)
 goal_offlane_penalty: 1.0        # weight on the continuous lane-distance penalty
-lane_soft: 1                  # lane penalty starts ramping here (m)
+lane_soft: 1.75                  # lane penalty starts ramping here (m)
 parking_mismatch_penalty: 0.5    # inert in agent_only mode (no gt_parking_mask)
 controlled_parking_penalty: 0.5
 # collision: time-gated bonus (not a +1 override). Trivial crashes < 0.75s get
