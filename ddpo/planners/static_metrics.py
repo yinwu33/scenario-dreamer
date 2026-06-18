@@ -70,6 +70,8 @@ def add_static_metrics(
     lane_scene_idx = _to_numpy(scenes.meta["lane_scene_idx"], np.int64)
 
     goal_offlane = np.zeros(scenes.num_scenes, dtype=np.float32)
+    goal_lane_dist = np.zeros(scenes.num_scenes, dtype=np.float32)
+    spawn_lane_dist = np.zeros(scenes.num_scenes, dtype=np.float32)
     parking_mismatch = np.zeros(scenes.num_scenes, dtype=np.float32)
     controlled_parking = np.zeros(scenes.num_scenes, dtype=np.float32)
     gt_parking = scenes.meta.get("gt_parking_mask")
@@ -122,8 +124,16 @@ def add_static_metrics(
             | (np.isfinite(goal_d) & (goal_d > goal_offlane_threshold))
         )
         goal_offlane[s] = float(offlane.sum() / eligible.sum())
+        gd = goal_d[eligible & np.isfinite(goal_d)]
+        sd = spawn_d[eligible & np.isfinite(spawn_d)]
+        if gd.size:
+            goal_lane_dist[s] = float(gd.max())
+        if sd.size:
+            spawn_lane_dist[s] = float(sd.max())
 
     metrics["goal_offlane_frac"] = goal_offlane
+    metrics["goal_lane_dist"] = goal_lane_dist
+    metrics["spawn_lane_dist"] = spawn_lane_dist
     metrics["parking_mismatch_frac"] = parking_mismatch
     metrics["controlled_parking_frac"] = controlled_parking
     metrics.setdefault(

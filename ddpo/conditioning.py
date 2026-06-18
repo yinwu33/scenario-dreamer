@@ -208,6 +208,27 @@ class ConditioningPool:
         idx = self.rng.integers(0, len(self.pool_indices), size=batch_size)
         return self.batch_from_indices(idx)
 
+    def sample_group_batch(self, num_groups: int, group_size: int):
+        """Sample ``num_groups`` distinct contexts, each replicated ``group_size``
+        times, for per-context (GRPO-style) advantage normalisation.
+
+        Returns ``(batch, group_ids)`` where ``group_ids`` is a CPU LongTensor of
+        shape ``[num_groups * group_size]`` mapping each scene to its context
+        group. The same conditioning graph is repeated ``group_size`` times; the
+        policy draws independent per-node noise, so the repeats yield different
+        samples that share map / ego / ego-goal. Per-group whitening of the
+        resulting rewards then isolates "which generation is more critical in
+        THIS context" from "which contexts are intrinsically easy".
+        """
+        pool_n = len(self.pool_indices)
+        replace = int(num_groups) > pool_n
+        groups = self.rng.choice(pool_n, size=int(num_groups), replace=replace)
+        idx = np.repeat(groups, int(group_size))
+        group_ids = torch.repeat_interleave(
+            torch.arange(int(num_groups)), int(group_size)
+        )
+        return self.batch_from_indices(idx), group_ids
+
 
 class LDMGoalConditioningPool:
     """Conditioning pool for ldm_goal DDPO.
@@ -281,3 +302,14 @@ class LDMGoalConditioningPool:
     def sample_batch(self, batch_size: int) -> Batch:
         idx = self.rng.integers(0, len(self.pool_indices), size=batch_size)
         return self.batch_from_indices(idx)
+
+    def sample_group_batch(self, num_groups: int, group_size: int):
+        """See ``ConditioningPool.sample_group_batch``."""
+        pool_n = len(self.pool_indices)
+        replace = int(num_groups) > pool_n
+        groups = self.rng.choice(pool_n, size=int(num_groups), replace=replace)
+        idx = np.repeat(groups, int(group_size))
+        group_ids = torch.repeat_interleave(
+            torch.arange(int(num_groups)), int(group_size)
+        )
+        return self.batch_from_indices(idx), group_ids

@@ -76,14 +76,34 @@ class InitOverlapHook(RewardHook):
 
 
 class EgoCollisionHook(RewardHook):
-    """Track ego collisions over the rollout (+1 / criticality cap)."""
+    """Track ego collisions and the time of the first collision over the rollout.
+
+    Collision was previously disabled outright (it rewarded the policy for
+    teleporting an adversary into the ego at t=0). It is now ``enabled``-gated
+    and, crucially, time-stamped: ``ego_collision_time`` lets the reward reward
+    only *meaningful* late collisions and penalise *trivial* early ones, instead
+    of treating every contact as +1. When disabled, ``ego_collision`` stays 0
+    (current default behaviour) but ``ego_collision_time`` is still populated as
+    +inf so downstream reward code is uniform.
+    """
+
+    def __init__(self, enabled: bool = False):
+        self.enabled = bool(enabled)
+
+    def before_rollout(self, ctx: RolloutContext) -> None:
+        ctx.metrics["ego_collision_time"] = np.full(
+            ctx.num_scenes, np.inf, dtype=np.float32
+        )
 
     def before_step_scene(self, ctx: RolloutContext, scene_idx: int, sim: SimScene) -> None:
-        # ctx.metrics["ego_collision"][scene_idx] = max(
-        #     ctx.metrics["ego_collision"][scene_idx],
-        #     float(sim.ego_collides_now()),
-        # )
-        ctx.metrics["ego_collision"][scene_idx] = 0.  # ! debug, TODO: remove collision, because it encourage agent to crash ego
+        if not self.enabled:
+            ctx.metrics["ego_collision"][scene_idx] = 0.0
+            return
+        if sim.ego_collides_now():
+            ctx.metrics["ego_collision"][scene_idx] = 1.0
+            t = float(ctx.t * sim.dt)
+            if t < ctx.metrics["ego_collision_time"][scene_idx]:
+                ctx.metrics["ego_collision_time"][scene_idx] = t
 
 
 class EgoMinTTCHook(RewardHook):
@@ -220,6 +240,12 @@ class GoalOfflaneHook(RewardHook):
 
     def after_rollout(self, ctx: RolloutContext) -> None:
         frac = np.zeros(ctx.num_scenes, dtype=np.float32)
+        # Continuous worst-case lane distances over eligible moving cars, for the
+        # smoothstep lane penalty in reward.py (replaces the binary fraction,
+        # which jumps 0->1 in the one-agent setup). Non-finite (no lane geometry)
+        # distances are ignored -> 0, matching the fraction's "doesn't count".
+        goal_lane_dist = np.zeros(ctx.num_scenes, dtype=np.float32)
+        spawn_lane_dist = np.zeros(ctx.num_scenes, dtype=np.float32)
         for s, sim in enumerate(ctx.sims):
             idx = sim.initial_controlled
             if len(idx) == 0:
@@ -234,7 +260,15 @@ class GoalOfflaneHook(RewardHook):
                 | (np.isfinite(goal_d) & (goal_d > self.threshold))
             )
             frac[s] = float(offlane.sum() / eligible.sum())
+            gd = goal_d[eligible & np.isfinite(goal_d)]
+            sd = spawn_d[eligible & np.isfinite(spawn_d)]
+            if gd.size:
+                goal_lane_dist[s] = float(gd.max())
+            if sd.size:
+                spawn_lane_dist[s] = float(sd.max())
         ctx.metrics["goal_offlane_frac"] = frac
+        ctx.metrics["goal_lane_dist"] = goal_lane_dist
+        ctx.metrics["spawn_lane_dist"] = spawn_lane_dist
 
 
 class ParkingMismatchHook(RewardHook):
@@ -291,15 +325,29 @@ class EgoAdvMinDistHook(RewardHook):
     symmetric centre distance gives signal at any range and regardless of which
     party is moving. Only DDPO-controlled non-ego agents are measured, so the
     metric is attributable to the policy (fixed GT neighbours never move it).
+
+    Three features are exposed so the reward can score *closing* interactions
+    rather than mere spatial proximity (which the policy can trivially hack by
+    spawning the adversary on top of the ego):
+
+      * ``ego_adv_min_dist``        - min over the whole rollout (legacy);
+      * ``ego_adv_init_dist`` (d0)  - clearance at t=0 (before any motion);
+      * ``ego_adv_min_dist_warmup`` - min ignoring the first ``warmup_time``
+                                      seconds, so an adversary that only starts
+                                      close (large d0 - dmin == 0) scores low.
     """
 
+    def __init__(self, warmup_time: float = 0.5):
+        self.warmup_time = float(warmup_time)
+
     def before_rollout(self, ctx: RolloutContext) -> None:
-        ctx.metrics["ego_adv_min_dist"] = np.full(ctx.num_scenes, np.inf, dtype=np.float32)
+        n = ctx.num_scenes
+        ctx.metrics["ego_adv_min_dist"] = np.full(n, np.inf, dtype=np.float32)
+        ctx.metrics["ego_adv_init_dist"] = np.full(n, np.inf, dtype=np.float32)
+        ctx.metrics["ego_adv_min_dist_warmup"] = np.full(n, np.inf, dtype=np.float32)
         self._adv = controlled_nonego_local_indices(ctx.scenes, ctx.num_scenes)
 
     def before_step_scene(self, ctx: RolloutContext, scene_idx: int, sim: SimScene) -> None:
-        # # ! debug, TODO: remove this for testing
-        # return
         adv = self._adv[scene_idx]
         if len(adv) == 0 or sim.respawned[0]:
             return
@@ -311,6 +359,10 @@ class EgoAdvMinDistHook(RewardHook):
         d = float(np.sqrt(dx * dx + dy * dy).min())
         if d < ctx.metrics["ego_adv_min_dist"][scene_idx]:
             ctx.metrics["ego_adv_min_dist"][scene_idx] = d
+        if ctx.t == 0:
+            ctx.metrics["ego_adv_init_dist"][scene_idx] = d
+        if ctx.t * sim.dt >= self.warmup_time and d < ctx.metrics["ego_adv_min_dist_warmup"][scene_idx]:
+            ctx.metrics["ego_adv_min_dist_warmup"][scene_idx] = d
 
 
 class ControlledParkingHook(RewardHook):

@@ -200,6 +200,16 @@ def evaluate_and_visualize(policy, eval_pool, reward, cfg, it, wandb):
                     CONTROL_COLOR if (i > 0 and bool(ctrl_s[i])) else None
                     for i in range(len(ctrl_s))
                 ]
+            # Full Phase 2 reward breakdown overlaid on the GIF/figure.
+            components = {
+                k: metrics[k][s]
+                for k in (
+                    "criticality", "r_ttc", "r_approach", "r_risk", "r_collision",
+                    "constraint", "c_lane", "c_parking", "c_trivial",
+                    "ego_adv_init_dist", "ego_adv_min_dist_warmup", "ego_collision_time",
+                )
+                if k in metrics
+            }
             kwargs = dict(
                 agent_states=states[a_sel],
                 agent_types=types[a_sel],
@@ -211,6 +221,7 @@ def evaluate_and_visualize(policy, eval_pool, reward, cfg, it, wandb):
                 ego_min_ttc=metrics["ego_min_ttc"][s],
                 goal_offlane_frac=metrics["goal_offlane_frac"][s],
                 parking_mismatch_frac=metrics["parking_mismatch_frac"][s],
+                components=components,
                 title=f"{name} it{it} scene{s}",
             )
             if save_gif_mode:
@@ -249,6 +260,19 @@ def run_ddpo(cfg_root):
         min_dist_coef=cfg.get("min_dist_coef", 0.0),
         min_dist_dmax=cfg.get("min_dist_dmax", 20.0),
         controlled_parking_penalty=cfg.get("controlled_parking_penalty", 0.0),
+        risk_coef=cfg.get("risk_coef", 1.0),
+        approach_d_safe=cfg.get("approach_d_safe", 6.0),
+        approach_d_scale=cfg.get("approach_d_scale", 2.0),
+        approach_close_delta=cfg.get("approach_close_delta", 2.0),
+        approach_close_scale=cfg.get("approach_close_scale", 1.0),
+        approach_warmup_time=cfg.get("approach_warmup_time", 0.5),
+        lane_soft=cfg.get("lane_soft", 0.5),
+        collision_enabled=cfg.get("collision_enabled", False),
+        collision_coef=cfg.get("collision_coef", 0.0),
+        collision_warmup=cfg.get("collision_warmup", 0.75),
+        collision_window=cfg.get("collision_window", 0.5),
+        trivial_collision_t=cfg.get("trivial_collision_t", 0.75),
+        trivial_collision_penalty=cfg.get("trivial_collision_penalty", 0.5),
         seed=cfg.seed,
         backend=cfg.get("reward_backend", "numpy"),
         pufferdrive_root=cfg.get("pufferdrive_root", None),
@@ -312,14 +336,29 @@ def run_ddpo(cfg_root):
     out_dir = Path(cfg.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    # Per-context (GRPO) grouping: each batch is num_groups distinct contexts,
+    # each replicated group_size times, and advantages are whitened within group
+    # (see compute_advantages). group_size=1 -> legacy global whitening.
+    group_size = int(cfg.get("group_size", 1))
+    if group_size > 1 and cfg.batch_size % group_size != 0:
+        raise ValueError(
+            f"batch_size ({cfg.batch_size}) must be divisible by group_size ({group_size})"
+        )
+
     for it in range(cfg.num_iterations):
         # ---- rollout / collect -------------------------------------------------
-        cond = pool.sample_batch(cfg.batch_size)
+        if group_size > 1:
+            num_groups = cfg.batch_size // group_size
+            cond, group_ids = pool.sample_group_batch(num_groups, group_size)
+            group_ids = group_ids.to(device)
+        else:
+            cond = pool.sample_batch(cfg.batch_size)
+            group_ids = None
         scenes, traj = policy.sample(cond)
         metrics = reward.evaluate(scenes)
 
         rewards = torch.as_tensor(metrics["reward"], device=device)
-        advantages = compute_advantages(rewards, ddpo_cfg)
+        advantages = compute_advantages(rewards, ddpo_cfg, group_ids)
 
         # ---- DDPO update over random-k steps ----------------------------------
         skipped_updates = 0
@@ -361,11 +400,24 @@ def run_ddpo(cfg_root):
         finite_dist = np.isfinite(adv_dist)
         mean_adv_dist = float(adv_dist[finite_dist].mean()) if finite_dist.any() else float("nan")
         parked = float(metrics["controlled_parking_frac"].mean())
+        # Within-group reward spread: this is the only signal per-context
+        # advantage normalisation can use. If it collapses to ~0, the group has
+        # no learnable contrast (every sample equally (in)valid) and is skipped.
+        if group_ids is not None:
+            grp_std = float(
+                torch.stack(
+                    [rewards[group_ids == g].std(unbiased=False) for g in torch.unique(group_ids)]
+                ).mean()
+            )
+        else:
+            grp_std = float("nan")
+        near_miss = float((metrics["r_risk"] > 0.5).mean())
         print(
-            f"[it {it:04d}] reward={rewards.mean():.3f} critical_rate={crit:.3f} "
-            f"collide={float(metrics['ego_collision'].mean()):.3f} min_ttc={mean_ttc:.2f} "
+            f"[it {it:04d}] reward={rewards.mean():.3f} pos_reward_rate={crit:.3f} "
+            f"near_miss={near_miss:.3f} risk={float(metrics['r_risk'].mean()):.3f} "
+            f"approach={float(metrics['r_approach'].mean()):.3f} min_ttc={mean_ttc:.2f} "
             f"adv_dist={mean_adv_dist:.2f} parked={parked:.3f} "
-            f"init_invalid={inval:.3f} loss={log['loss']:.4f} "
+            f"init_invalid={inval:.3f} loss={log['loss']:.4f} grp_std={grp_std:.3f} "
             f"ratio={log.get('ratio_mean', 1.0):.3f} kl={log.get('kl_to_base', 0.0):.4f} "
             f"skipped_updates={skipped_updates}"
         )
@@ -374,7 +426,8 @@ def run_ddpo(cfg_root):
             wandb.log(
                 {
                     "train/reward": float(rewards.mean()),
-                    "train/critical_rate": crit,
+                    "train/pos_reward_rate": crit,
+                    "train/near_miss_rate": near_miss,
                     "train/init_invalid": inval,
                     "train/ego_min_ttc": mean_ttc,
                     "train/ego_adv_min_dist": mean_adv_dist,
@@ -384,6 +437,15 @@ def run_ddpo(cfg_root):
                     "train/reached_goal_rate": float(metrics["reached_goal"].mean()),
                     "train/goal_offlane_frac": float(metrics["goal_offlane_frac"].mean()),
                     "train/parking_mismatch_frac": float(metrics["parking_mismatch_frac"].mean()),
+                    # Phase 2 reward components (mean over batch).
+                    "train/r_ttc": float(metrics["r_ttc"].mean()),
+                    "train/r_approach": float(metrics["r_approach"].mean()),
+                    "train/r_risk": float(metrics["r_risk"].mean()),
+                    "train/criticality": float(metrics["criticality"].mean()),
+                    "train/c_lane": float(metrics["c_lane"].mean()),
+                    "train/c_trivial": float(metrics["c_trivial"].mean()),
+                    "train/constraint": float(metrics["constraint"].mean()),
+                    "train/group_reward_std": grp_std,
                     "train/loss": log["loss"],
                     "train/pg_loss": log.get("pg_loss", log["loss"]),
                     "train/ratio_mean": log.get("ratio_mean", 1.0),

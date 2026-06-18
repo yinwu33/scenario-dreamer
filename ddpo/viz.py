@@ -39,6 +39,11 @@ CONTROL_COLOR = "#2ca02c"   # vivid green: DDPO-controlled (generated) non-ego a
                             # passed in via ``agent_colors`` to flag who is being trained
 _JUMP_THRESH = 10.0         # metres/step above which motion is a teleport, not driving
 _PARKING_DIST = MIN_DISTANCE_TO_GOAL  # goal within this of spawn => parked/static
+FOV = 64.0                  # generated field of view (metres); the view window is
+                            # pinned to this square (centred at 0) so anything that
+                            # leaves the 64x64 FOV is clipped out of frame. Agents
+                            # are only removed from the sim at ``map_extent``, which
+                            # may be larger, so the clip and the removal differ.
 
 
 def _agent_color(is_ego: bool, type_id) -> str:
@@ -89,6 +94,21 @@ def _fmt_float(value, *, signed: bool = False, digits: int = 2, inf: str = "inf"
     return f"{v:{sign}.{digits}f}"
 
 
+# Reward-component breakdown rendered (one list == one line, in order) under the
+# summary line when the caller passes a ``components`` dict (e.g. from
+# PufferDriveReward.evaluate). Each field is (short label, component key); missing
+# keys are skipped so this degrades gracefully as new components are added
+# (Phase 3/5). The leading field of each line is that line's total.
+_COMPONENT_LINES = [
+    [("crit", "criticality"), ("ttc", "r_ttc"), ("appr", "r_approach"),
+     ("risk", "r_risk"), ("coll", "r_collision")],
+    [("cons", "constraint"), ("lane", "c_lane"), ("park", "c_parking"),
+     ("triv", "c_trivial")],
+    [("d0", "ego_adv_init_dist"), ("dmin", "ego_adv_min_dist_warmup"),
+     ("tcol", "ego_collision_time")],
+]
+
+
 def _status_text(
     reward,
     collided,
@@ -97,21 +117,36 @@ def _status_text(
     ego_min_ttc=None,
     goal_offlane_frac=None,
     parking_mismatch_frac=None,
+    components=None,
 ) -> tuple[str, str]:
-    """Short reward status line aligned with the DDPO reward formula."""
+    """Reward status line(s) aligned with the DDPO reward formula.
+
+    ``components`` (optional) is a per-scene mapping of reward-component name ->
+    scalar; when present, the full criticality / constraint / geometry breakdown
+    is rendered on extra lines below the summary.
+    """
     r = 0.0 if reward is None else float(reward)
-    txt = (
+    lines = [
         f"R={r:+.2f}  TTC={_fmt_float(ego_min_ttc)}  "
         f"col={int(bool(collided))}  init={int(bool(init_invalid))}  "
         f"gOff={_fmt_float(goal_offlane_frac)}  pMis={_fmt_float(parking_mismatch_frac)}"
-    )
+    ]
+    if components:
+        for fields in _COMPONENT_LINES:
+            parts = [
+                f"{short}={_fmt_float(components[key])}"
+                for short, key in fields
+                if key in components
+            ]
+            if parts:
+                lines.append("  ".join(parts))
     if collided:
         color = _EGO_COLOR
     elif init_invalid:
         color = "#ff7f0e"
     else:
         color = "0.3"
-    return txt, color
+    return "\n".join(lines), color
 
 
 def _draw_agent_box(ax, x, y, heading, length, width, color, lw, alpha=1.0):
@@ -128,29 +163,17 @@ def _draw_agent_box(ax, x, y, heading, length, width, color, lw, alpha=1.0):
     ax.add_patch(rect)
 
 
-def _view(lanes_arr, x, y, end, n_agents):
-    """Square view window + scale-aware linewidths (plot_scene uses a 64m reference)."""
-    xs, ys = [], []
-    if lanes_arr is not None:
-        flat = lanes_arr.reshape(-1, 2)
-        flat = flat[np.isfinite(flat).all(1)]
-        if len(flat):
-            xs.append(flat[:, 0]); ys.append(flat[:, 1])
-    if n_agents:
-        ax, ay = x[:end].ravel(), y[:end].ravel()
-        finite = np.isfinite(ax) & np.isfinite(ay)  # drop removed-agent NaN poses
-        if finite.any():
-            xs.append(ax[finite]); ys.append(ay[finite])
-    if xs:
-        ax_min, ax_max = float(np.concatenate(xs).min()), float(np.concatenate(xs).max())
-        ay_min, ay_max = float(np.concatenate(ys).min()), float(np.concatenate(ys).max())
-    else:
-        ax_min, ax_max, ay_min, ay_max = -32.0, 32.0, -32.0, 32.0
-    cx, cy = (ax_min + ax_max) / 2, (ay_min + ay_max) / 2
-    half = max((ax_max - ax_min), (ay_max - ay_min), 40.0) / 2 * 1.12
+def _view():
+    """Fixed FOV-sized square view window centred at the scene origin.
+
+    The window is pinned to the generated field of view (``FOV`` metres, centred
+    at 0) regardless of where agents drive, so anything that leaves the 64x64 FOV
+    is clipped out of frame. Linewidths keep the same 64 m reference as before
+    (``scale == 1`` here)."""
+    half = FOV / 2.0
     scale = (2 * half) / 64.0
     return {
-        "xlim": (cx - half, cx + half), "ylim": (cy - half, cy + half),
+        "xlim": (-half, half), "ylim": (-half, half),
         "base_lw": 1.5 / scale, "road_w": 20.0 / scale, "scatter": 8.0 / (scale ** 2),
         "bbox_lw": 0.35 / scale, "goal_lw": 0.6 / scale, "goal_ms": 28.0 / (scale ** 2),
     }
@@ -195,14 +218,14 @@ def _finish(ax, fig, V, title, status_txt, status_color):
 def render_rollout(traj, lanes, *, agent_states=None, agent_types=None, agent_colors=None,
                    reward=None, ego_collision=False, ego_offroad=False, init_invalid=False,
                    ego_min_ttc=None, goal_offlane_frac=None, parking_mismatch_frac=None,
-                   title="") -> "plt.Figure":
+                   components=None, title="") -> "plt.Figure":
     """Static summary of the first episode: each agent a fading sequence of boxes."""
     fig, ax = plt.subplots(figsize=(5, 5), dpi=120)
     x, y, hd = traj["x"], traj["y"], traj["heading"]
     n_agents = x.shape[1] if (x.ndim == 2 and x.size) else 0
     end = _first_episode_end(traj.get("done"))
     lanes_arr = np.asarray(lanes) if (lanes is not None and len(lanes) > 0) else None
-    V = _view(lanes_arr, x, y, end, n_agents)
+    V = _view()
     _draw_lanes(ax, lanes_arr, V)
 
     n_boxes = 5
@@ -237,6 +260,7 @@ def render_rollout(traj, lanes, *, agent_states=None, agent_types=None, agent_co
         ego_min_ttc=ego_min_ttc,
         goal_offlane_frac=goal_offlane_frac,
         parking_mismatch_frac=parking_mismatch_frac,
+        components=components,
     )
     _finish(ax, fig, V, title, txt, scol)
     return fig
@@ -252,7 +276,7 @@ def _fig_to_rgb(fig) -> np.ndarray:
 def render_rollout_frames(traj, lanes, *, agent_states=None, agent_types=None, agent_colors=None,
                           reward=None, ego_collision=False, ego_offroad=False, init_invalid=False,
                           ego_min_ttc=None, goal_offlane_frac=None, parking_mismatch_frac=None,
-                          title="", max_frames=50) -> np.ndarray:
+                          components=None, title="", max_frames=50) -> np.ndarray:
     """One frame per rollout step (agents move, trail grows). Returns [T, H, W, 3] uint8.
 
     The view window and reward text are fixed across frames so the GIF is stable.
@@ -263,7 +287,7 @@ def render_rollout_frames(traj, lanes, *, agent_states=None, agent_types=None, a
     T = end if end is not None else (x.shape[0] if n_agents else 0)
     T = max(T, 1)
     lanes_arr = np.asarray(lanes) if (lanes is not None and len(lanes) > 0) else None
-    V = _view(lanes_arr, x, y, end, n_agents)
+    V = _view()
     txt, scol = _status_text(
         reward,
         ego_collision,
@@ -271,6 +295,7 @@ def render_rollout_frames(traj, lanes, *, agent_states=None, agent_types=None, a
         ego_min_ttc=ego_min_ttc,
         goal_offlane_frac=goal_offlane_frac,
         parking_mismatch_frac=parking_mismatch_frac,
+        components=components,
     )
     lengths = [float(traj["length"][a]) for a in range(n_agents)]
     widths = [float(traj["width"][a]) for a in range(n_agents)]

@@ -59,6 +59,12 @@ class RolloutParams:
     goal_offlane_threshold: float = 3.0
     goal_onroad_threshold: float = 2.0
     pufferdrive_root: str | None = None
+    # Reward-shaping rollout knobs (Phase 2): collision scoring is off by default
+    # (kept disabled until the time-gated reward terms are tuned); the approach
+    # bonus ignores the first ``approach_warmup_time`` seconds when measuring how
+    # much the adversary closed in on the ego.
+    collision_enabled: bool = False
+    approach_warmup_time: float = 0.5
 
 
 @dataclass
@@ -123,10 +129,10 @@ class NumpyPlanner(RolloutPlanner):
         p = self.params
         return [
             InitOverlapHook(p.init_overlap_margin),
-            EgoCollisionHook(),
+            EgoCollisionHook(p.collision_enabled),
             EgoOffroadHook(),
             EgoMinTTCHook(),
-            EgoAdvMinDistHook(),
+            EgoAdvMinDistHook(p.approach_warmup_time),
             TrajectoryHook(),
             ReachedGoalHook(self.sim_cfg.goal_radius),
             GoalOfflaneHook(p.goal_offlane_threshold, p.goal_onroad_threshold),
@@ -186,6 +192,9 @@ class NumpyPlanner(RolloutPlanner):
             for s in active:
                 sims[s].update_metrics()
                 ego_reached, _ = sims[s].goal_step()
+                # goal_behavior='continue' lets non-ego agents drive past their
+                # goal; retire them once their centre leaves the map square.
+                sims[s].remove_out_of_bounds()
                 for hook in hooks:
                     hook.after_step_scene(ctx, s, sims[s], ego_reached=ego_reached)
 

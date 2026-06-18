@@ -44,22 +44,48 @@ sim_steps: 91
 planner_deterministic: true
 ttc_tau: 3.0
 init_overlap_margin: 0.0
-goal_offlane_threshold: 1.0
+goal_offlane_threshold: 1.0      # = hard end of the continuous lane penalty (m)
 goal_onroad_threshold: 1.0
-goal_offlane_penalty: 1.0
-parking_mismatch_penalty: 0.5
-min_dist_coef: 0.5
-min_dist_dmax: 10.0
+# Phase 2 reward shaping ----------------------------------------------------
+# criticality = risk_coef * noisy_OR(R_ttc, R_approach) + collision_coef*R_coll
+risk_coef: 1.0
+approach_d_safe: 6.0             # adversary "close" scale for the proximity gate (m)
+approach_d_scale: 2.0
+approach_close_delta: 2.0        # min (d0 - dmin) closed-in distance to score (m)
+approach_close_scale: 1.0        # closing-gate sharpness (smaller = crisper gate)
+approach_warmup_time: 0.5        # ignore first N s when measuring closing
+# constraints (subtracted, each >= 0)
+goal_offlane_penalty: 1.0        # weight on the continuous lane-distance penalty
+lane_soft: 0.5                   # lane penalty starts ramping here (m)
+parking_mismatch_penalty: 0.5    # inert in agent_only mode (no gt_parking_mask)
 controlled_parking_penalty: 0.5
+# collision: time-gated bonus (not a +1 override). Trivial crashes < 0.75s get
+# the trivial penalty; the bonus ramps in over [0.75, 1.25] s. Kept small per
+# review (a real crash already maxes R_ttc, so this only separates crash from
+# near-miss).
+collision_enabled: true
+collision_coef: 0.3
+collision_warmup: 0.75
+collision_window: 0.5
+trivial_collision_t: 0.75
+trivial_collision_penalty: 0.5
+# deprecated linear proximity bonus (superseded by the gated approach bonus)
+min_dist_coef: 0.0
+min_dist_dmax: 10.0
 
 # --- DDPO ----------------------------------------------------------------
 sampler: ddpm                 # keep DDPM only for fixed-map; ddim is rejected below
 ddim_steps: 25
 ddim_eta: 1.0
 batch_size: 32
+# Phase 1: per-context (GRPO) grouping. Each batch is (batch_size / group_size)
+# distinct contexts, each sampled group_size times; advantages are whitened
+# within group. batch_size must be divisible by group_size. group_size=1 ->
+# legacy global whitening.
+group_size: 8
 num_iterations: 20000
 inner_epochs: 2
-k_steps: 8
+k_steps: 4
 min_diffusion_t: 20
 bf16: false
 logprob_bf16: false
@@ -76,6 +102,9 @@ ddpo:
   adv_clip: 5.0
   adv_eps: 1.0e-6
   logratio_clip: 20.0
+  adv_mode: zscore          # "zscore" | "rank" (rank is more robust to outliers)
+  per_context: true         # whiten advantages within each context group
+  group_skip_std: 1.0e-4    # skip groups whose reward std is below this
 
 # --- logging / eval ------------------------------------------------------
 wandb:
@@ -84,7 +113,7 @@ wandb:
   entity: null
   run_name: ${experiment.run_name}
 eval_every: 50
-eval_num_scenes: 16
+eval_num_scenes: 8
 eval_visualize_reference: true
 eval_visualize_conditioning: true
 save_gif: true

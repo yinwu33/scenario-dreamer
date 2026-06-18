@@ -1,7 +1,10 @@
 dt: 0.1
 goal_radius: 2.0
 goal_speed: 5.0
-goal_behavior: remove
+goal_behavior: continue
+# Non-ego agents whose centre leaves the [-map_extent/2, map_extent/2] square
+# are removed from the rollout (matches the generated FOV; dataset fov=64).
+map_extent: 72.0
 max_controlled_agents: 32
 condition_sample_mode: fixed
 fixed_collision_factor: 0.0

@@ -33,12 +33,63 @@ class DDPOConfig:
     adv_clip: float = 5.0          # clip normalised advantages to +/- this
     adv_eps: float = 1e-6
     logratio_clip: float = 20.0    # clamp before exp() to avoid inf * 0 -> nan
+    adv_mode: str = "zscore"       # "zscore" | "rank" advantage transform
+    per_context: bool = True       # whiten advantages within each context group
+    group_skip_std: float = 1e-4   # zero out groups whose reward std is below this
 
 
-def compute_advantages(rewards: torch.Tensor, cfg: DDPOConfig) -> torch.Tensor:
-    """Per-scene whitened advantages from per-scene rewards. Shape [num_scenes]."""
+def _rank_advantage(r: torch.Tensor) -> torch.Tensor:
+    """Evenly-spaced rank advantages in [-1, 1] (ties broken by sort order).
+
+    More robust than z-scoring to the heavy-tailed / multi-modal reward
+    distributions DDPO produces: a single huge-reward outlier cannot dominate
+    the update, and the per-group scale is fixed regardless of reward variance.
+    """
+    n = r.numel()
+    if n <= 1:
+        return torch.zeros_like(r)
+    order = torch.argsort(r)
+    ranks = torch.empty_like(r)
+    ranks[order] = torch.arange(n, device=r.device, dtype=r.dtype)
+    return 2.0 * ranks / (n - 1) - 1.0
+
+
+def _whiten(r: torch.Tensor, cfg: DDPOConfig) -> torch.Tensor:
+    """Transform one (sub)group of rewards to advantages.
+
+    Degenerate groups (std below ``group_skip_std``, e.g. every sample invalid)
+    return all-zero advantages so they contribute no policy gradient instead of
+    amplifying float noise into a spurious signal.
+    """
+    std = r.std(unbiased=False)
+    if std < cfg.group_skip_std:
+        return torch.zeros_like(r)
+    if cfg.adv_mode == "rank":
+        return _rank_advantage(r)
+    return (r - r.mean()) / (std + cfg.adv_eps)
+
+
+def compute_advantages(
+    rewards: torch.Tensor,
+    cfg: DDPOConfig,
+    group_ids: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Per-scene advantages from per-scene rewards. Shape [num_scenes].
+
+    When ``group_ids`` is provided and ``cfg.per_context`` is set, rewards are
+    whitened WITHIN each context group (GRPO / per-context DDPO): this isolates
+    "which generation is more critical in this map/ego context" from "which
+    contexts are intrinsically easier", which a global z-score conflates.
+    Otherwise the whole batch is whitened together (legacy behaviour).
+    """
     r = torch.nan_to_num(rewards.float(), nan=0.0, posinf=0.0, neginf=0.0)
-    adv = (r - r.mean()) / (r.std(unbiased=False) + cfg.adv_eps)
+    if group_ids is None or not cfg.per_context:
+        return _whiten(r, cfg).clamp(-cfg.adv_clip, cfg.adv_clip)
+    group_ids = group_ids.to(r.device)
+    adv = torch.zeros_like(r)
+    for g in torch.unique(group_ids):
+        m = group_ids == g
+        adv[m] = _whiten(r[m], cfg)
     return adv.clamp(-cfg.adv_clip, cfg.adv_clip)
 
 

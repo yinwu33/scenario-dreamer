@@ -18,7 +18,9 @@ sim:
   dt: 0.1
   goal_radius: 2.0
   goal_speed: 100.0
-  goal_behavior: respawn
+  # Non-ego agents continue driving past their goal and are only retired when
+  # their centre leaves the map (map_extent defaults to 64 from config_sim.yaml).
+  goal_behavior: continue
   max_controlled_agents: 64
   condition_sample_mode: fixed
   fixed_collision_factor: 0.5

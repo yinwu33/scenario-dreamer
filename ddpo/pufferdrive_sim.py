@@ -81,6 +81,7 @@ class SimConfig:
     goal_radius: float
     goal_speed: float
     goal_behavior: str
+    map_extent: float
     max_controlled_agents: int
     condition_sample_mode: str
     fixed_collision_factor: float
@@ -103,6 +104,7 @@ def _build_sim_config(raw) -> SimConfig:
         goal_radius=float(raw.get("goal_radius", 2.0)),
         goal_speed=float(raw.get("goal_speed", 5.0)),
         goal_behavior=str(raw.get("goal_behavior", "stop")),
+        map_extent=float(raw.get("map_extent", 64.0)),
         max_controlled_agents=int(raw.get("max_controlled_agents", MAX_CONTROLLED_AGENTS)),
         condition_sample_mode=str(raw.get("condition_sample_mode", "random")),
         fixed_collision_factor=float(raw.get("fixed_collision_factor", 2.0)),
@@ -181,6 +183,9 @@ class SimScene:
                 f"'remove', got {cfg.goal_behavior!r}"
             )
         self.goal_behavior = cfg.goal_behavior
+        # Half-extent of the square map. Non-ego agents whose centre leaves
+        # [-map_half, map_half] in x or y are removed (remove_out_of_bounds).
+        self.map_half = float(cfg.map_extent) / 2.0
 
         self.x = s[:, 0].copy()
         self.y = s[:, 1].copy()
@@ -537,6 +542,24 @@ class SimScene:
             else:  # remove
                 self._remove_agent(int(i))
         return ego_reached, reached
+
+    def remove_out_of_bounds(self) -> np.ndarray:
+        """Remove non-ego controlled agents whose centre left the map square.
+
+        Called once per step after ``goal_step``. With ``goal_behavior='continue'``
+        agents keep driving past their goal, so the map boundary
+        (``|x| > map_half`` or ``|y| > map_half``) is what retires them. The ego
+        (agent 0) is exempt - its scene is finished by ``ReachedGoalHook`` when it
+        reaches its goal, never by leaving the map. Returns the removed indices.
+        """
+        idx = self.controlled
+        if len(idx) == 0:
+            return np.zeros(0, np.int64)
+        oob = idx[(np.abs(self.x[idx]) > self.map_half) | (np.abs(self.y[idx]) > self.map_half)]
+        oob = oob[oob != 0]  # ego is never removed by the bounds check
+        for i in oob:
+            self._remove_agent(int(i))
+        return oob
 
     # ------------------------------------------------------------- inspection
     def dist_to_lane_centerline(self, points: np.ndarray) -> np.ndarray:
