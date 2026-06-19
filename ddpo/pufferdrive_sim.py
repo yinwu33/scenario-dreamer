@@ -208,6 +208,10 @@ class SimScene:
         self.respawned = np.zeros(n, dtype=bool)
         self.removed = np.zeros(n, dtype=bool)
         self.stopped = np.zeros(n, dtype=bool)   # latched by GOAL_STOP; frozen in place
+        # Collision response (see latch_ego_crash): the ego and any vehicle it
+        # drives into are latched here and frozen, so boxes can no longer pass
+        # through each other. Crashed agents are excluded from TTC / min-dist.
+        self.crashed = np.zeros(n, dtype=bool)
         self.collision_state = np.zeros(n, dtype=np.int64)
 
         # Per-agent conditioning inputs fed into the trailing ego observation slots.
@@ -404,9 +408,10 @@ class SimScene:
         """Classic dynamics for all controlled agents (actions in [0, 91)).
 
         Stopped agents (GOAL_STOP) are frozen: drive.h move_dynamics zeroes their
-        velocity and returns before integrating.
+        velocity and returns before integrating. Crashed agents (collision
+        response, see latch_ego_crash) are frozen the same way.
         """
-        moving = ~self.stopped[self.controlled]
+        moving = ~(self.stopped | self.crashed)[self.controlled]
         self.vx[self.controlled[~moving]] = 0.0
         self.vy[self.controlled[~moving]] = 0.0
         idx = self.controlled[moving]
@@ -442,10 +447,10 @@ class SimScene:
         Heading (and thus the collision box orientation) is left at the generated
         value, so an agent whose goal is not straight ahead slides diagonally
         toward it. The step is not clamped to the goal (it may overshoot);
-        arrival is handled afterwards by ``goal_step``. Stopped / respawned agents
-        are frozen, matching ``step_dynamics``.
+        arrival is handled afterwards by ``goal_step``. Stopped / respawned /
+        crashed agents are frozen, matching ``step_dynamics``.
         """
-        idx = self.controlled[~self.stopped[self.controlled]]
+        idx = self.controlled[~(self.stopped | self.crashed)[self.controlled]]
         idx = idx[~self.respawned[idx]]
         if len(idx) == 0:
             return
@@ -487,6 +492,47 @@ class SimScene:
             cand = cand[(dx * dx + dy * dy) <= COLLISION_DIST2_GATE]
             if len(cand) and _sat_overlap(boxes[i], boxes[cand]).any():
                 self.collision_state[i] = 2  # VEHICLE_COLLISION
+
+    def latch_ego_crash(self) -> None:
+        """Collision response for the ego: freeze it and any car it drives into.
+
+        The numpy sim integrates dynamics without contact forces, so boxes pass
+        straight through each other. A DDPO policy exploits this by sending an
+        adversary through the ego from behind: it overlaps the ego, re-emerges in
+        front, and farms a near-zero ego time-to-collision. To remove the
+        exploit at its source, once the ego box overlaps another active vehicle
+        we latch both as ``crashed`` - frozen in place (zero velocity, never
+        re-integrated by ``step_dynamics`` / ``step_goal_seek``) and excluded
+        from TTC / min-distance scoring. A contacting adversary therefore can
+        never reach the ego's forward path. The collision event itself is still
+        observed by ``EgoCollisionHook`` (the overlap persists while frozen).
+
+        Called once per step by the rollout loop after ``update_metrics``; a
+        no-op once the ego has already crashed, is inactive, or has respawned.
+        """
+        if self.n <= 1 or self.crashed[0] or self.respawned[0]:
+            return
+        if 0 not in self.controlled:
+            return
+        others = self.slot_order[(self.slot_order != 0) & (~self.respawned[self.slot_order])]
+        others = others[(self.ptype[others] != TYPE_PEDESTRIAN) & (~self.crashed[others])]
+        if not len(others):
+            return
+        # Broad phase: only test boxes within the collision gate (matches
+        # update_metrics), then the oriented-box SAT narrow phase.
+        dx = self.x[others] - self.x[0]
+        dy = self.y[others] - self.y[0]
+        others = others[(dx * dx + dy * dy) <= COLLISION_DIST2_GATE]
+        if not len(others):
+            return
+        boxes = _corners(self.x, self.y, self.heading, self.length, self.width)
+        hit = others[_sat_overlap(boxes[0], boxes[others])]
+        if not len(hit):
+            return
+        crashed_now = np.concatenate(([0], hit)).astype(np.int64)
+        self.crashed[crashed_now] = True
+        self.vx[crashed_now] = 0.0
+        self.vy[crashed_now] = 0.0
 
     def _remove_agent(self, i: int) -> None:
         """Deactivate an agent after goal arrival for goal_behavior='remove'."""
@@ -590,43 +636,62 @@ class SimScene:
         return bool(_sat_overlap(boxes[0], boxes[others]).any())
 
     def ego_min_ttc_now(self) -> float:
-        """Box-aware TTC for the ego driving into another active agent.
+        """Relative-velocity TTC for the ego converging with another active agent.
 
-        This deliberately uses ego-only motion: the ego box is swept forward with
-        its current velocity and heading, while other boxes stay at their current
-        poses. That matches the reward intent of scoring "ego would hit another
-        car" and avoids rewarding cases where another actor is merely closing on
-        the ego.
+        A pure ego-forward sweep (move only the ego, freeze the others) reports
+        TTC->0 for *any* car sitting in the ego's forward path, even one that is
+        pulling away - which a DDPO policy farms by parking/driving an adversary
+        just ahead of a moving ego. Instead each other box is swept along the
+        *relative* velocity ``v_other - v_ego`` in the ego frame (headings held
+        constant, same constant-velocity assumption as before):
+
+          * a car the ego is genuinely closing on -> small TTC (as before);
+          * a car drawing away (e.g. an adversary that overtook and is now
+            accelerating ahead of the ego) -> diverging, so no overlap and
+            TTC=+inf, removing the "ran ahead of the ego" hacking frames;
+          * a car bearing down on a stopped ego -> finite TTC (the old
+            ego-only sweep returned +inf here because the ego was not moving).
+
+        Pairs whose relative velocity is ~0 (moving together, or both at rest)
+        can never close and are skipped.
         """
-        if self.n <= 1 or self.respawned[0]:
+        if self.n <= 1 or self.respawned[0] or self.crashed[0]:
             return float(np.inf)
         others = self.slot_order[(self.slot_order != 0) & (~self.respawned[self.slot_order])]
-        others = others[self.ptype[others] != TYPE_PEDESTRIAN]
+        others = others[(self.ptype[others] != TYPE_PEDESTRIAN) & (~self.crashed[others])]
         if not len(others):
             return float(np.inf)
-        ego_vx = float(self.vx[0])
-        ego_vy = float(self.vy[0])
-        if ego_vx * ego_vx + ego_vy * ego_vy < 1e-6:
-            return float(np.inf)
 
-        other_boxes = _corners(
+        # Relative velocity of each other agent in the ego's (translating) frame.
+        rvx = self.vx[others] - self.vx[0]
+        rvy = self.vy[others] - self.vy[0]
+        closing = (rvx * rvx + rvy * rvy) >= 1e-6
+        if not closing.any():
+            return float(np.inf)
+        others, rvx, rvy = others[closing], rvx[closing], rvy[closing]
+
+        ego_box = _corners(
+            np.asarray([self.x[0]]),
+            np.asarray([self.y[0]]),
+            np.asarray([self.heading[0]]),
+            np.asarray([self.length[0]]),
+            np.asarray([self.width[0]]),
+        )[0]
+        # Other boxes at t=0; only their position translates over the sweep, so
+        # precompute the corners once and add the relative displacement.
+        base_boxes = _corners(
             self.x[others],
             self.y[others],
             self.heading[others],
             self.length[others],
             self.width[others],
         )
+        rv = np.stack([rvx, rvy], axis=1).astype(np.float64)  # [M, 2]
         steps = int(np.ceil(TTC_SWEEP_HORIZON / max(self.dt, 1e-3)))
         for step in range(0, steps + 1):
             t = step * self.dt
-            ego_box = _corners(
-                np.asarray([self.x[0] + ego_vx * t]),
-                np.asarray([self.y[0] + ego_vy * t]),
-                np.asarray([self.heading[0]]),
-                np.asarray([self.length[0]]),
-                np.asarray([self.width[0]]),
-            )[0]
-            if _sat_overlap(ego_box, other_boxes).any():
+            moved = base_boxes + (rv * t)[:, None, :]
+            if _sat_overlap(ego_box, moved).any():
                 return float(t)
         return float(np.inf)
 

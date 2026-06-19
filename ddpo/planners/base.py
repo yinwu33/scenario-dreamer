@@ -191,6 +191,10 @@ class NumpyPlanner(RolloutPlanner):
 
             for s in active:
                 sims[s].update_metrics()
+                # Collision response: freeze the ego + any car it drove into so
+                # boxes cannot pass through each other (kills the "rear-end and
+                # re-emerge in front" TTC exploit at its source).
+                sims[s].latch_ego_crash()
                 ego_reached, _ = sims[s].goal_step()
                 # goal_behavior='continue' lets non-ego agents drive past their
                 # goal; retire them once their centre leaves the map square.

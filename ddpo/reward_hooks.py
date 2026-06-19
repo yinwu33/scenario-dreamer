@@ -96,10 +96,15 @@ class EgoCollisionHook(RewardHook):
         )
 
     def before_step_scene(self, ctx: RolloutContext, scene_idx: int, sim: SimScene) -> None:
+        collided = bool(sim.crashed[0]) or sim.ego_collides_now()
+        if collided:
+            ctx.finished[scene_idx] = True
+            if ctx.trajectories is not None:
+                ctx.trajectories[scene_idx]["done"].append(True)
         if not self.enabled:
             ctx.metrics["ego_collision"][scene_idx] = 0.0
             return
-        if sim.ego_collides_now():
+        if collided:
             ctx.metrics["ego_collision"][scene_idx] = 1.0
             t = float(ctx.t * sim.dt)
             if t < ctx.metrics["ego_collision_time"][scene_idx]:
@@ -140,6 +145,8 @@ class ReachedGoalHook(RewardHook):
                 ctx.finished[s] = True
 
     def before_step_scene(self, ctx: RolloutContext, scene_idx: int, sim: SimScene) -> None:
+        if ctx.finished[scene_idx]:
+            return
         # State-based fallback, including ego spawned near its goal.
         d = float(np.hypot(sim.goal[0, 0] - sim.x[0], sim.goal[0, 1] - sim.y[0]))
         if d < self.goal_radius:
@@ -347,9 +354,12 @@ class EgoAdvMinDistHook(RewardHook):
 
     def before_step_scene(self, ctx: RolloutContext, scene_idx: int, sim: SimScene) -> None:
         adv = self._adv[scene_idx]
-        if len(adv) == 0 or sim.respawned[0]:
+        if len(adv) == 0 or sim.respawned[0] or sim.crashed[0]:
             return
-        adv = adv[~sim.respawned[adv]]  # drop removed / respawned adversaries
+        # drop removed / respawned / crashed adversaries (a crashed adversary is
+        # frozen against the ego by the collision response; it must not keep
+        # pinning the min distance after contact)
+        adv = adv[~sim.respawned[adv] & ~sim.crashed[adv]]
         if len(adv) == 0:
             return
         dx = sim.x[adv] - sim.x[0]
