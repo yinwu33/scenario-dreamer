@@ -1,0 +1,9 @@
+defaults:
+- /datamodule/base@_here_
+- _self_
+
+_target_: datamodules.waymo.waymo_datamodule_dm_adv.WaymoDataModuleDMAdv
+
+train_batch_size: 256
+val_batch_size: 256
+dataset_cfg: null

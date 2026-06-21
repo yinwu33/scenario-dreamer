@@ -5,6 +5,7 @@ from models.scenario_dreamer_autoencoder_bezier import ScenarioDreamerAutoEncode
 from models.scenario_dreamer_ldm import ScenarioDreamerLDM
 from models.scenario_dreamer_dm import ScenarioDreamerDM
 from models.scenario_dreamer_dm_goal import ScenarioDreamerDMGoal
+from models.scenario_dreamer_dm_adv import ScenarioDreamerDMAdv
 from models.scenario_dreamer_dm_fixed_map_agent_goal import ScenarioDreamerDMFixedMapAgentGoal
 from models.scenario_dreamer_cldm import ScenarioDreamerCLDM
 from models.ctrl_sim import CtRLSim

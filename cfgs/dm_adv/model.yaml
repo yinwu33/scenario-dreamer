@@ -1,0 +1,12 @@
+defaults:
+- /model/dm@_here_
+- _self_
+
+# Mirrors the plain waymo_dm model dims. The adversary shares the agent latent
+# layout, so it uses agent_latent_dim (state_dim + num_agent_types = 7 + 3).
+state_dim: 7
+lane_attr: 2
+num_points_per_lane: ${dm_adv.dataset.num_points_per_lane}
+agent_latent_dim: 10
+lane_latent_dim: 40
+lane_conn_hidden_dim: 64

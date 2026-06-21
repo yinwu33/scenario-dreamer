@@ -1,0 +1,24 @@
+# dm_adv diffusion model training on Waymo (normal agents + one adversarial
+# agent per scene).
+#
+# Usage:
+#   python train.py --config-name config_dm_adv_train
+
+model_name: dm_adv
+
+defaults:
+  - _base
+  - dataset_name: waymo
+  - dm_adv/dataset@dm_adv.dataset
+  - dm_adv/train@dm_adv.train
+  - dm_adv/eval@dm_adv.eval
+  - dm_adv/model@dm_adv.model
+  - dm_adv/datamodule@dm_adv.datamodule
+  - sim: base
+  - _self_
+
+dm_adv:
+  train:
+    devices: 1
+    track: True
+    run_name: scenario_dreamer_dm_adv_train
