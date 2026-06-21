@@ -53,7 +53,7 @@ def _rate(values) -> float:
 def _compose_cfg(config_name: str, planner: str, overrides: list[str] | None = None):
     hydra_overrides = list(overrides or [])
     hydra_overrides.append(f"planner@ddpo.planner={planner}")
-    with initialize_config_dir(config_dir=CONFIG_PATH, version_base=None):
+    with initialize_config_dir(config_dir=str(Path(CONFIG_PATH).resolve()), version_base=None):
         return compose(config_name=config_name, overrides=hydra_overrides)
 
 
@@ -72,6 +72,19 @@ def _build_reward(cfg_root):
         min_dist_coef=cfg.get("min_dist_coef", 0.0),
         min_dist_dmax=cfg.get("min_dist_dmax", 20.0),
         controlled_parking_penalty=cfg.get("controlled_parking_penalty", 0.0),
+        risk_coef=cfg.get("risk_coef", 1.0),
+        approach_d_safe=cfg.get("approach_d_safe", 6.0),
+        approach_d_scale=cfg.get("approach_d_scale", 2.0),
+        approach_close_delta=cfg.get("approach_close_delta", 2.0),
+        approach_close_scale=cfg.get("approach_close_scale", 1.0),
+        approach_warmup_time=cfg.get("approach_warmup_time", 0.5),
+        lane_soft=cfg.get("lane_soft", 0.5),
+        collision_enabled=cfg.get("collision_enabled", False),
+        collision_coef=cfg.get("collision_coef", 0.0),
+        collision_warmup=cfg.get("collision_warmup", 0.75),
+        collision_window=cfg.get("collision_window", 0.5),
+        trivial_collision_t=cfg.get("trivial_collision_t", 0.75),
+        trivial_collision_penalty=cfg.get("trivial_collision_penalty", 0.5),
         seed=cfg.get("seed", 0),
         backend=cfg.get("reward_backend", "numpy"),
         pufferdrive_root=cfg.get("pufferdrive_root", None),

@@ -69,6 +69,9 @@ MAX_CONTROLLED_AGENTS = 32         # config/pacific/selfplay_drive.ini max_contr
 PARTNER_DIST2_GATE = 4096.0        # 64 m
 COLLISION_DIST2_GATE = 225.0       # 15 m
 TTC_SWEEP_HORIZON = 10.0           # seconds; reward clips all values >= ttc_tau to 0
+EGO_AGGRESSOR_MIN_SPEED = 0.5      # m/s; ego counts as the aggressor only when its
+                                   # velocity projected onto the ego->other direction
+                                   # exceeds this (a passive/slow ego is never at fault)
 CONFIG_SIM_PATH = Path(__file__).with_name("config_sim.yaml")
 
 TYPE_VEHICLE, TYPE_PEDESTRIAN, TYPE_CYCLIST = 1, 2, 3
@@ -212,6 +215,10 @@ class SimScene:
         # drives into are latched here and frozen, so boxes can no longer pass
         # through each other. Crashed agents are excluded from TTC / min-dist.
         self.crashed = np.zeros(n, dtype=bool)
+        # Sticky fault flag: set by latch_ego_crash when the ego drove *into*
+        # another car. Decouples the rewarded ego collision from the general
+        # crashed[0] freeze (which fires on any overlap to stop pass-through).
+        self.ego_caused_collision = False
         self.collision_state = np.zeros(n, dtype=np.int64)
 
         # Per-agent conditioning inputs fed into the trailing ego observation slots.
@@ -494,18 +501,22 @@ class SimScene:
                 self.collision_state[i] = 2  # VEHICLE_COLLISION
 
     def latch_ego_crash(self) -> None:
-        """Collision response for the ego: freeze it and any car it drives into.
+        """General collision response: freeze the ego and any car it contacts.
 
         The numpy sim integrates dynamics without contact forces, so boxes pass
         straight through each other. A DDPO policy exploits this by sending an
         adversary through the ego from behind: it overlaps the ego, re-emerges in
-        front, and farms a near-zero ego time-to-collision. To remove the
-        exploit at its source, once the ego box overlaps another active vehicle
-        we latch both as ``crashed`` - frozen in place (zero velocity, never
-        re-integrated by ``step_dynamics`` / ``step_goal_seek``) and excluded
-        from TTC / min-distance scoring. A contacting adversary therefore can
-        never reach the ego's forward path. The collision event itself is still
-        observed by ``EgoCollisionHook`` (the overlap persists while frozen).
+        front, and farms a near-zero ego time-to-collision. To remove the exploit
+        at its source, *any* ego<->vehicle overlap (regardless of fault) latches
+        both as ``crashed`` - frozen in place (zero velocity, never re-integrated
+        by ``step_dynamics`` / ``step_goal_seek``) and excluded from TTC /
+        min-distance scoring. A contacting adversary therefore can never pass
+        through to the ego's forward path, so it cannot spoof min-TTC.
+
+        Fault is recorded separately: ``ego_caused_collision`` is set only when the
+        ego was driving *into* the contacted car (``_ego_aggressor_mask``), so the
+        general freeze/stop and the rewarded ego-collision event are decoupled - a
+        car ramming a passive ego stops the scene but is not the ego's collision.
 
         Called once per step by the rollout loop after ``update_metrics``; a
         no-op once the ego has already crashed, is inactive, or has respawned.
@@ -526,9 +537,13 @@ class SimScene:
         if not len(others):
             return
         boxes = _corners(self.x, self.y, self.heading, self.length, self.width)
-        hit = others[_sat_overlap(boxes[0], boxes[others])]
+        overlap = _sat_overlap(boxes[0], boxes[others])
+        hit = others[overlap]
         if not len(hit):
             return
+        # Fault attribution must read the ego velocity *before* it is zeroed below.
+        if self._ego_aggressor_mask(hit).any():
+            self.ego_caused_collision = True
         crashed_now = np.concatenate(([0], hit)).astype(np.int64)
         self.crashed[crashed_now] = True
         self.vx[crashed_now] = 0.0
@@ -625,15 +640,41 @@ class SimScene:
         d = points[:, None, :] - proj
         return np.sqrt((d * d).sum(-1)).min(axis=1)
 
+    def _ego_aggressor_mask(self, others: np.ndarray) -> np.ndarray:
+        """Per-``others`` mask: True where the ego is driving *toward* that agent.
+
+        Credits only ego-caused contact / closing. The ego is the aggressor w.r.t.
+        an agent when its own velocity has a positive component along the
+        ego->other direction above ``EGO_AGGRESSOR_MIN_SPEED``; a stopped/slow ego,
+        or one moving across or away from the other, is never at fault. Shared by
+        the TTC, collision and crash-latch checks so a car ramming a passive ego is
+        ignored by all three (only the ego closing in is scored).
+        """
+        dx = self.x[others] - self.x[0]
+        dy = self.y[others] - self.y[0]
+        dist = np.sqrt(dx * dx + dy * dy)
+        ego_closing = np.zeros(len(others), dtype=np.float64)
+        safe = dist > 1e-6
+        ego_closing[safe] = (self.vx[0] * dx[safe] + self.vy[0] * dy[safe]) / dist[safe]
+        return ego_closing > EGO_AGGRESSOR_MIN_SPEED
+
     def ego_collides_now(self) -> bool:
-        """Oriented-box overlap of the ego (agent 0) with any active agent."""
+        """Oriented-box overlap of the ego (agent 0) with a car it is driving into.
+
+        Only overlaps where the ego is the aggressor (see ``_ego_aggressor_mask``)
+        are reported, so another car ramming a passive ego is not counted as an ego
+        collision.
+        """
         if self.n <= 1 or self.respawned[0]:
             return False
         others = self.slot_order[(self.slot_order != 0) & (~self.respawned[self.slot_order])]
         if not len(others):
             return False
         boxes = _corners(self.x, self.y, self.heading, self.length, self.width)
-        return bool(_sat_overlap(boxes[0], boxes[others]).any())
+        overlap = _sat_overlap(boxes[0], boxes[others])
+        if not overlap.any():
+            return False
+        return bool((overlap & self._ego_aggressor_mask(others)).any())
 
     def ego_min_ttc_now(self) -> float:
         """Relative-velocity TTC for the ego converging with another active agent.
@@ -649,16 +690,25 @@ class SimScene:
           * a car drawing away (e.g. an adversary that overtook and is now
             accelerating ahead of the ego) -> diverging, so no overlap and
             TTC=+inf, removing the "ran ahead of the ego" hacking frames;
-          * a car bearing down on a stopped ego -> finite TTC (the old
-            ego-only sweep returned +inf here because the ego was not moving).
+          * a car bearing down on a passive (stopped/slow) ego -> +inf: the ego
+            is not driving toward it, so it fails the aggressor gate below and is
+            not scored as an ego near-miss (the other car is at fault).
 
         Pairs whose relative velocity is ~0 (moving together, or both at rest)
-        can never close and are skipped.
+        can never close and are skipped, as are agents the ego is not actively
+        closing on (``_ego_aggressor_mask``).
         """
         if self.n <= 1 or self.respawned[0] or self.crashed[0]:
             return float(np.inf)
         others = self.slot_order[(self.slot_order != 0) & (~self.respawned[self.slot_order])]
         others = others[(self.ptype[others] != TYPE_PEDESTRIAN) & (~self.crashed[others])]
+        if not len(others):
+            return float(np.inf)
+
+        # Only score agents the ego is actively driving toward (ego the aggressor);
+        # a car bearing down on a passive ego is the other car's fault, not a near
+        # miss the ego caused, so it is excluded from min-TTC.
+        others = others[self._ego_aggressor_mask(others)]
         if not len(others):
             return float(np.inf)
 

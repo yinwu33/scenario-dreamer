@@ -78,6 +78,14 @@ class InitOverlapHook(RewardHook):
 class EgoCollisionHook(RewardHook):
     """Track ego collisions and the time of the first collision over the rollout.
 
+    Two collision notions are kept distinct:
+      * a *general* collision (``crashed[0]`` from any ego<->vehicle overlap)
+        stops the scene so a pass-through adversary cannot re-emerge ahead of the
+        ego and spoof min-TTC - this never enters the reward;
+      * an *ego* collision (the ego drove into the other car, recorded by
+        ``ego_caused_collision`` / ``ego_collides_now``) is the rewarded
+        ``ego_collision`` event, so a car ramming a passive ego is not credited.
+
     Collision was previously disabled outright (it rewarded the policy for
     teleporting an adversary into the ego at t=0). It is now ``enabled``-gated
     and, crucially, time-stamped: ``ego_collision_time`` lets the reward reward
@@ -96,15 +104,21 @@ class EgoCollisionHook(RewardHook):
         )
 
     def before_step_scene(self, ctx: RolloutContext, scene_idx: int, sim: SimScene) -> None:
-        collided = bool(sim.crashed[0]) or sim.ego_collides_now()
-        if collided:
+        # General collision: any ego<->vehicle overlap latches crashed[0] (see
+        # latch_ego_crash). It stops the scene so a pass-through adversary cannot
+        # re-emerge ahead of the ego and spoof min-TTC - regardless of fault.
+        general_collided = bool(sim.crashed[0])
+        # Ego collision: the ego drove *into* the other car. Only this counts as
+        # the rewarded collision; a car ramming a passive ego does not.
+        ego_collided = sim.ego_caused_collision or sim.ego_collides_now()
+        if general_collided or ego_collided:
             ctx.finished[scene_idx] = True
             if ctx.trajectories is not None:
                 ctx.trajectories[scene_idx]["done"].append(True)
         if not self.enabled:
             ctx.metrics["ego_collision"][scene_idx] = 0.0
             return
-        if collided:
+        if ego_collided:
             ctx.metrics["ego_collision"][scene_idx] = 1.0
             t = float(ctx.t * sim.dt)
             if t < ctx.metrics["ego_collision_time"][scene_idx]:

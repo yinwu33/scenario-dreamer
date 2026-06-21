@@ -23,6 +23,7 @@ diag_gt_to_bezier_out/
 data_selfplay/
 wandb
 data_analysis/rollout_compare
+PufferDrive/
 test_scripts/
 
 # critical_scene benchmark outputs: keep small summaries (summary.json /

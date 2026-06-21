@@ -12,11 +12,10 @@ from omegaconf import OmegaConf
 from torch_geometric.data import Batch
 
 from cfgs.config import CONFIG_PATH
-from ddpo.conditioning import ConditioningPool, LDMGoalConditioningPool
-from ddpo.policy import DMGoalDDPOPolicy
+from ddpo.conditioning import ConditioningPool, LDMGoalConditioningPool, prune_agents
+from ddpo.policy import DMFixedMapAgentGoalDDPOPolicy, DMGoalDDPOPolicy
 from ddpo.policy_ldm import LDMGoalDDPOPolicy
 from datasets.waymo.dataset_dm_fixed_map_agent_goal_waymo import WaymoDatasetDMFixedMapAgentGoal
-from models.scenario_dreamer_dm_fixed_map_agent_goal import ScenarioDreamerDMFixedMapAgentGoal
 from utils.train_helpers import cache_latent_stats, set_latent_stats
 
 from .schema import (
@@ -46,7 +45,7 @@ def _set_dataset_name(cfg_node, dataset_name: str) -> None:
 
 
 def compose_cfg(config_name: str, overrides: list[str] | None = None):
-    with initialize_config_dir(config_dir=CONFIG_PATH, version_base=None):
+    with initialize_config_dir(config_dir=str(Path(CONFIG_PATH).resolve()), version_base=None):
         return compose(config_name=config_name, overrides=overrides or [])
 
 
@@ -118,7 +117,7 @@ def _batch_from_pool(pool, scene_ids: list[int]):
     return pool.batch_from_indices(list(range(len(scene_ids))))
 
 
-def _dm_fixed_map_batch(cfg_root, split: str, scene_ids: list[int]):
+def _dm_fixed_map_batch(cfg_root, split: str, scene_ids: list[int], *, control_agent_num: int | None = None):
     _set_dataset_name(cfg_root.dm_fixed_map_agent_goal, cfg_root.dataset_name.name)
     dataset = WaymoDatasetDMFixedMapAgentGoal(
         cfg_root.dm_fixed_map_agent_goal.dataset,
@@ -131,21 +130,72 @@ def _dm_fixed_map_batch(cfg_root, split: str, scene_ids: list[int]):
         data = dataset.get(int(scene_id))
         if data is None:
             raise RuntimeError(f"invalid fixed-map scene id {scene_id}: dataset returned None")
+        if control_agent_num is not None:
+            data = prune_agents(data, int(control_agent_num))
         data_list.append(data)
         valid_scene_ids.append(int(scene_id))
     return Batch.from_data_list(data_list), valid_scene_ids
 
 
-def _load_dm_fixed_map_model(cfg_root, ckpt: str | None, device: str):
-    cfg = cfg_root.dm_fixed_map_agent_goal
-    if ckpt is None:
-        ckpt = str(Path(cfg.train.save_dir) / cfg.train.run_name / "last.ckpt")
-    return ScenarioDreamerDMFixedMapAgentGoal.load_from_checkpoint(ckpt, cfg=cfg).to(device), ckpt
+def _dm_fixed_map_policy(
+    cfg_root,
+    cfg,
+    ckpt: str,
+    device: str,
+    *,
+    control_agent_num: int,
+    control_ego: bool = False,
+):
+    return DMFixedMapAgentGoalDDPOPolicy(
+        cfg_root.dm_fixed_map_agent_goal,
+        ckpt_path=ckpt,
+        mode="agent_only",
+        device=device,
+        use_ema_weights=cfg.get("use_ema_weights", True),
+        inpaint_noised=cfg.get("inpaint_noised", True),
+        control_ego=control_ego,
+        control_agent_num=control_agent_num,
+        sampler="ddpm",
+        ddim_steps=None,
+        ddim_eta=cfg.get("ddim_eta", 1.0),
+        force_driving=cfg.get("force_driving", True),
+    )
 
 
 @torch.no_grad()
-def _generate_dm_fixed_map(cfg_root, source: str, split: str, scene_ids: list[int], ckpt: str | None, device: str):
-    batch, scene_ids = _dm_fixed_map_batch(cfg_root, split, scene_ids)
+def _generate_dm_fixed_map(
+    cfg_root,
+    source: str,
+    split: str,
+    scene_ids: list[int],
+    ckpt: str | None,
+    device: str,
+    seed: int,
+    options: dict[str, Any],
+):
+    cfg = cfg_root.ddpo if "ddpo" in cfg_root else None
+    raw_batch, scene_ids = _dm_fixed_map_batch(cfg_root, split, scene_ids)
+    batch = raw_batch
+    if source != "original" and cfg is None:
+        raise ValueError(
+            "generator=dm_fixed_map_agent_goal with diffusion sources "
+            "requires a ddpo config, e.g. config_name=config_critical_scene_map_conditioned_dm_goal"
+        )
+    if source == "base_diffusion_one":
+        control_agent_num = int(options.get("base_one_control_agent_num", options.get("base_control_agent_num", 1)))
+        batch, scene_ids = _dm_fixed_map_batch(
+            cfg_root, split, scene_ids, control_agent_num=control_agent_num
+        )
+    elif source == "ddpo_diffusion":
+        control_agent_num = int(options.get("ddpo_control_agent_num", cfg.get("control_agent_num", 1)))
+        batch, scene_ids = _dm_fixed_map_batch(
+            cfg_root, split, scene_ids, control_agent_num=control_agent_num
+        )
+    elif source in {"base_diffusion", "base_diffusion_full"}:
+        control_agent_num = int(options.get("base_control_agent_num", -1))
+    else:
+        control_agent_num = -1
+
     reference = batch_to_generated_scenes(batch, cfg_root.dm_fixed_map_agent_goal.dataset)
     reference_meta = {
         "scene_ids": scene_ids,
@@ -155,17 +205,30 @@ def _generate_dm_fixed_map(cfg_root, source: str, split: str, scene_ids: list[in
     if source == "original":
         return reference, reference_meta, None
 
-    model, resolved_ckpt = _load_dm_fixed_map_model(cfg_root, ckpt, device)
-    batch = batch.to(device)
-    generated_batch, _ = model.forward(batch, mode="lane_conditioned", batch_idx=0)
-    scenes = batch_to_generated_scenes(
-        generated_batch.detach().cpu() if hasattr(generated_batch, "detach") else generated_batch,
-        cfg_root.dm_fixed_map_agent_goal.dataset,
-        already_unnormalized=True,
+    if source in {"base_diffusion", "base_diffusion_full", "base_diffusion_one"}:
+        resolved_ckpt = ckpt or cfg.model_ckpt
+    elif ckpt is None:
+        raise ValueError(
+            "source=ddpo_diffusion for generator=dm_fixed_map_agent_goal requires ckpt=<ddpo checkpoint>"
+        )
+    else:
+        resolved_ckpt = ckpt
+
+    policy = _dm_fixed_map_policy(
+        cfg_root,
+        cfg,
+        str(resolved_ckpt),
+        device,
+        control_agent_num=control_agent_num,
+        control_ego=False,
     )
+    torch.manual_seed(seed)
+    if str(device).startswith("cuda"):
+        torch.cuda.manual_seed_all(seed)
+    scenes, _ = policy.sample(batch)
     candidate_meta = {
         "scene_ids": scene_ids,
-        "map_ids": batch_map_ids(generated_batch),
+        "map_ids": batch_map_ids(batch),
         "lane_hashes": lane_hashes(scenes),
     }
     assert_same_map(reference_meta, candidate_meta)
@@ -256,8 +319,9 @@ def save_manifest(path: Path, metadata: dict[str, Any]) -> None:
 
 def generate_artifact(options: dict[str, Any]) -> dict[str, Any]:
     source = options.get("source", "original")
-    if source not in {"original", "base_diffusion", "ddpo_diffusion"}:
-        raise ValueError(f"source must be original, base_diffusion, or ddpo_diffusion; got {source!r}")
+    valid_sources = {"original", "base_diffusion", "base_diffusion_full", "base_diffusion_one", "ddpo_diffusion"}
+    if source not in valid_sources:
+        raise ValueError(f"source must be one of {sorted(valid_sources)}; got {source!r}")
 
     config_name = options.get("config_name", "config_critical_scene_dm_goal_ddpm")
     cfg_root = compose_cfg(config_name, options.get("overrides", []))
@@ -280,13 +344,8 @@ def generate_artifact(options: dict[str, Any]) -> dict[str, Any]:
             generator = "dm_fixed_map_agent_goal" if config_name.endswith("fixed_map_agent_goal_train") else "dm_goal"
 
     if generator == "dm_fixed_map_agent_goal":
-        if source == "ddpo_diffusion":
-            raise ValueError(
-                "source=ddpo_diffusion is not implemented for generator=dm_fixed_map_agent_goal; "
-                "use generator=dm_goal or generator=ldm_goal for DDPO checkpoints"
-            )
         scenes, scene_meta, resolved_ckpt = _generate_dm_fixed_map(
-            cfg_root, source, split, scene_ids, ckpt, device
+            cfg_root, source, split, scene_ids, ckpt, device, seed, options
         )
     else:
         model_type = cfg_root.ddpo.get("model_type", "dm_goal")

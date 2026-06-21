@@ -77,7 +77,7 @@ min_dist_dmax: 10.0
 sampler: ddpm                 # keep DDPM only for fixed-map; ddim is rejected below
 ddim_steps: 25
 ddim_eta: 1.0
-batch_size: 32
+batch_size: 16
 # Phase 1: per-context (GRPO) grouping. Each batch is (batch_size / group_size)
 # distinct contexts, each sampled group_size times; advantages are whitened
 # within group. batch_size must be divisible by group_size. group_size=1 ->
