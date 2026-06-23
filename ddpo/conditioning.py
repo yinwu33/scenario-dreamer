@@ -22,6 +22,7 @@ from torch_geometric.data import Batch
 from cfgs.config import NON_PARTITIONED, PARTITIONED
 from datasets.waymo.dataset_dm_goal_waymo import WaymoDatasetDMGoal
 from datasets.waymo.dataset_ldm_waymo import WaymoDatasetLDM
+from datasets.waymo.dataset_ldm_adv_waymo import WaymoDatasetLDMAdv
 from utils.data_helpers import reorder_indices
 from utils.pyg_helpers import get_edge_index_bipartite, get_edge_index_complete_graph
 
@@ -295,6 +296,158 @@ class LDMGoalConditioningPool:
         d["lane"].road_points = self._sorted_road_points(raw)
         self._cache[pool_idx] = d
         return d
+
+    def batch_from_indices(self, indices) -> Batch:
+        return Batch.from_data_list([self._get(int(i)) for i in indices]).to(self.device)
+
+    def sample_batch(self, batch_size: int) -> Batch:
+        idx = self.rng.integers(0, len(self.pool_indices), size=batch_size)
+        return self.batch_from_indices(idx)
+
+    def sample_group_batch(self, num_groups: int, group_size: int):
+        """See ``ConditioningPool.sample_group_batch``."""
+        pool_n = len(self.pool_indices)
+        replace = int(num_groups) > pool_n
+        groups = self.rng.choice(pool_n, size=int(num_groups), replace=replace)
+        idx = np.repeat(groups, int(group_size))
+        group_ids = torch.repeat_interleave(
+            torch.arange(int(num_groups)), int(group_size)
+        )
+        return self.batch_from_indices(idx), group_ids
+
+
+class LDMAdvConditioningPool:
+    """Conditioning pool for ldm_adv DDPO (init_adv flow).
+
+    Each graph carries the real ego + the real normal agents + lane latents (all
+    held fixed by the policy as conditioning) plus one ``adv`` node that the
+    policy regenerates from noise. Two knobs adapt it for the criticality reward
+    (copied from the map-conditioned dm flow):
+
+      * **prune_base_to_ego** (default ``False``) -- when ``True`` only the ego is
+        kept among the real base agents (the rest dropped, graphs rebuilt), so the
+        decoded scene is ``ego + adv`` and the reward's ego-vs-all TTC / collision
+        unambiguously measures the adversary. When ``False`` (the default) the
+        full real normal scene is kept: ldm_adv's intended setting, where the
+        adversary is generated in the context of all real neighbours and the
+        criticality credit is de-biased by GRPO per-context whitening (the normal
+        scene is identical across a group, so its constant contribution is
+        baselined out). ``controlled_mask`` still flags only the adv, so the
+        approach / lane / parking terms and the green viz highlight stay
+        adv-specific either way.
+      * **near-stationary egos filtered out** -- a scene whose real ego barely
+        drives (GT goal within ``min_ego_drive`` metres of spawn) gives the
+        criticality reward no signal, so it is skipped at pool-build time (the
+        data-side analogue of the dm flow's ego-goal override, which we do not
+        do here: the ego keeps its real, on-road goal).
+
+    Like ``LDMGoalConditioningPool`` it attaches sorted physical lane polylines
+    (needed by the reward) from the latent-cache pickle.
+    """
+
+    def __init__(
+        self,
+        dataset_cfg,
+        *,
+        split_name: str = "train",
+        pool_size: int = 2048,
+        device: str = "cuda",
+        seed: int = 0,
+        min_ego_drive: float = 10.0,
+        prune_base_to_ego: bool = False,
+    ):
+        self.dataset = WaymoDatasetLDMAdv(dataset_cfg, split_name=split_name, mode="eval")
+        if len(self.dataset) == 0:
+            raise RuntimeError(f"empty ldm_adv dataset for split '{split_name}' "
+                               f"({dataset_cfg.dataset_path})")
+        self.dataset_cfg = dataset_cfg
+        self.device = device
+        self.rng = np.random.default_rng(seed)
+        self.min_ego_drive = float(min_ego_drive)
+        self.prune_base_to_ego = bool(prune_base_to_ego)
+        self.fov = float(dataset_cfg.fov)
+        n = min(int(pool_size), len(self.dataset))
+        self.pool_indices = self.rng.permutation(len(self.dataset))[:n]
+        self._cache: dict[int, object] = {}
+
+    def __len__(self) -> int:
+        return len(self.pool_indices)
+
+    # ------------------------------------------------------------- helpers
+    def _ego_drives_enough(self, raw) -> bool:
+        """True if the real ego's GT goal is >= ``min_ego_drive`` metres from its
+        spawn. ``agent_states`` is stored min-max normalised to [-1, 1] over the
+        FOV frame, so a difference of two positions scales to metres by fov/2; the
+        ego is always raw row 0 (reorder_indices never moves it)."""
+        a = np.asarray(raw["agent_states"], dtype=np.float64)
+        if a.shape[0] < 2 or a.shape[1] < 9:
+            return False
+        norm_dist = float(np.linalg.norm(a[0, 7:9] - a[0, 0:2]))
+        return norm_dist * (self.fov / 2.0) >= self.min_ego_drive
+
+    def _prune_base_to_ego(self, d):
+        """Keep only the ego (local index 0) among the real base agents; the adv
+        node is untouched. Agent-agent / lane-agent graphs are rebuilt for a
+        single base agent, matching ``prune_agents`` in the dm flow."""
+        num_lanes = int(d["num_lanes"])
+        d["agent"].x = d["agent"].x[:1]
+        d["agent"].latents = d["agent"].latents[:1]
+        if "log_var" in d["agent"]:
+            d["agent"].log_var = d["agent"].log_var[:1]
+        if "partition_mask" in d["agent"]:
+            d["agent"].partition_mask = d["agent"].partition_mask[:1]
+        d["num_agents"] = 1
+        d["agent", "to", "agent"].edge_index = get_edge_index_complete_graph(1)
+        d["lane", "to", "agent"].edge_index = get_edge_index_bipartite(num_lanes, 1)
+        return d
+
+    def _unnormalize_lane_polylines(self, road_points):
+        rp = torch.as_tensor(road_points, dtype=torch.float32).clone()
+        rp[:, :, 0] = ((torch.clip(rp[:, :, 0], -1, 1) + 1) / 2) * (
+            self.dataset_cfg.max_lane_x - self.dataset_cfg.min_lane_x
+        ) + self.dataset_cfg.min_lane_x
+        rp[:, :, 1] = ((torch.clip(rp[:, :, 1], -1, 1) + 1) / 2) * (
+            self.dataset_cfg.max_lane_y - self.dataset_cfg.min_lane_y
+        ) + self.dataset_cfg.min_lane_y
+        return rp
+
+    def _sorted_road_points(self, raw):
+        _, _, road_points, _, _, _, _ = reorder_indices(
+            raw["agent_mu"],
+            raw["agent_log_var"],
+            raw["road_points"],
+            raw["road_points"],
+            raw["edge_index_lane_to_lane"],
+            raw["agent_states"],
+            raw["road_points"],
+            raw.get("scene_type", raw.get("lg_type", 0)),
+            dataset="waymo",
+        )
+        return self._unnormalize_lane_polylines(road_points)
+
+    def _get(self, pool_idx: int):
+        """Graph for pool slot ``pool_idx``. Scenes with no non-ego agent or a
+        near-stationary ego are skipped by probing subsequent dataset indices
+        (deterministic per slot, cached)."""
+        if pool_idx in self._cache:
+            return self._cache[pool_idx]
+        ds_idx = int(self.pool_indices[pool_idx])
+        for probe in range(len(self.dataset)):
+            scene_idx = (ds_idx + probe) % len(self.dataset)
+            with open(self.dataset.files[scene_idx], "rb") as f:
+                raw = pickle.load(f)
+            # Cheap filters on the raw pickle before building the graph.
+            if not self._ego_drives_enough(raw):
+                continue
+            d = self.dataset.get(scene_idx)
+            if d is None:
+                continue
+            d["lane"].road_points = self._sorted_road_points(raw)
+            if self.prune_base_to_ego:
+                d = self._prune_base_to_ego(d)
+            self._cache[pool_idx] = d
+            return d
+        raise RuntimeError("no valid (driving-ego) conditioning graphs in dataset")
 
     def batch_from_indices(self, indices) -> Batch:
         return Batch.from_data_list([self._get(int(i)) for i in indices]).to(self.device)

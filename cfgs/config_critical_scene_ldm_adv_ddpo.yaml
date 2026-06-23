@@ -1,0 +1,47 @@
+# Critical-scene Stage 2: DDPO fine-tuning of ldm_adv (latent-space single
+# adversary, DDPM sampler) against a frozen planner. Adapts the map-conditioned
+# dm flow (config_critical_scene_map_conditioned_dm_goal) to ldm_adv: the base
+# scene is pruned to the ego, only the adversary latent is generated/trained, and
+# the SAME Phase-2 reward + GRPO settings are reused (see cfgs/ddpo/ldm_adv.yaml).
+#
+# Uses the pretrained ldm_adv checkpoint plus the frozen goal autoencoder:
+#   ${scratch_root}/checkpoints/scenario_dreamer_ldm_adv_train/last.ckpt
+#   ${scratch_root}/checkpoints/scenario_dreamer_ae_goal_waymo/last.ckpt
+#
+# Usage:
+#   python train.py --config-name config_critical_scene_ldm_adv_ddpo
+
+model_name: ddpo
+
+defaults:
+  - _base
+  - dataset_name: waymo
+  - ldm_adv/dataset@ldm_adv.dataset
+  - ldm_adv/train@ldm_adv.train
+  - ldm_adv/eval@ldm_adv.eval
+  - ldm_adv/model@ldm_adv.model
+  - ldm_adv/datamodule@ldm_adv.datamodule
+  # the (frozen) goal autoencoder cfg, loaded by the LDMAdv policy
+  - dataset@ae_goal.dataset: waymo_ae_goal
+  - train@ae_goal.train: waymo_ae_goal
+  - eval@ae_goal.eval: waymo_ae_goal
+  - model@ae_goal.model: waymo_ae_goal
+  - datamodule@ae_goal.datamodule: waymo_ae_goal
+  - ddpo/ldm_adv@ddpo
+  - planner@ddpo.planner: selfplay_drive
+  - sim: base
+  - _self_
+
+# DDPO only fine-tunes the adversary branch; freeze the base scene streams.
+ldm_adv:
+  train:
+    train_mode: adv_only
+
+experiment:
+  project: critical_scene
+  stage: ddpo
+  generator: ldm_adv
+  sampler: ${ddpo.sampler}
+  planner_name: ${oc.select:ddpo.planner.name,none}
+  run_name: critical_scene_${experiment.stage}_${experiment.generator}_${experiment.sampler}_${experiment.planner_name}
+  output_dir: ${scratch_root}/critical_scene/${experiment.run_name}

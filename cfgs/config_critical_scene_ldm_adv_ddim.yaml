@@ -1,0 +1,45 @@
+# Critical-scene Stage 2: DDPO fine-tuning of ldm_adv with stochastic DDIM
+# timestep sub-sampling (fewer, faster sampling steps per rollout). Same flow and
+# reward as the DDPM variant (see config_critical_scene_ldm_adv_ddpo).
+#
+# Usage:
+#   python train.py --config-name config_critical_scene_ldm_adv_ddim
+#   python train.py --config-name config_critical_scene_ldm_adv_ddim ddpo.ddim_steps=25
+
+model_name: ddpo
+
+defaults:
+  - _base
+  - dataset_name: waymo
+  - ldm_adv/dataset@ldm_adv.dataset
+  - ldm_adv/train@ldm_adv.train
+  - ldm_adv/eval@ldm_adv.eval
+  - ldm_adv/model@ldm_adv.model
+  - ldm_adv/datamodule@ldm_adv.datamodule
+  - dataset@ae_goal.dataset: waymo_ae_goal
+  - train@ae_goal.train: waymo_ae_goal
+  - eval@ae_goal.eval: waymo_ae_goal
+  - model@ae_goal.model: waymo_ae_goal
+  - datamodule@ae_goal.datamodule: waymo_ae_goal
+  - ddpo/ldm_adv@ddpo
+  - planner@ddpo.planner: selfplay_drive
+  - sim: base
+  - _self_
+
+ldm_adv:
+  train:
+    train_mode: adv_only
+
+ddpo:
+  sampler: ddim
+  ddim_steps: 50
+  ddim_eta: 1.0
+
+experiment:
+  project: critical_scene
+  stage: ddpo
+  generator: ldm_adv
+  sampler: ${ddpo.sampler}
+  planner_name: ${oc.select:ddpo.planner.name,none}
+  run_name: critical_scene_${experiment.stage}_${experiment.generator}_${experiment.sampler}${ddpo.ddim_steps}_eta${ddpo.ddim_eta}_${experiment.planner_name}
+  output_dir: ${scratch_root}/critical_scene/${experiment.run_name}

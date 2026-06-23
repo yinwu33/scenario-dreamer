@@ -20,10 +20,11 @@ import numpy as np
 import torch
 from omegaconf import OmegaConf
 
-from ddpo.conditioning import ConditioningPool, LDMGoalConditioningPool
+from ddpo.conditioning import ConditioningPool, LDMAdvConditioningPool, LDMGoalConditioningPool
 from ddpo.ddpo_loss import DDPOConfig, compute_advantages, ddpo_loss
 from ddpo.policy import DMFixedMapAgentGoalDDPOPolicy, DMGoalDDPOPolicy
 from ddpo.policy_ldm import LDMGoalDDPOPolicy
+from ddpo.policy_ldm_adv import LDMAdvDDPOPolicy
 from ddpo.reward import PufferDriveReward
 from datasets.waymo.dataset_dm_fixed_map_agent_goal_waymo import WaymoDatasetDMFixedMapAgentGoal
 from utils.train_helpers import cache_latent_stats, set_latent_stats
@@ -86,6 +87,34 @@ def _build_policy_and_pool(cfg_root, cfg, device: str):
             seed=cfg.seed,
         )
         eval_dataset_cfg = ldm_cfg.dataset
+    elif model_type == "ldm_adv":
+        _set_dataset_name(cfg_root.ldm_adv, dataset_name)
+        _set_dataset_name(cfg_root.ae_goal, dataset_name)
+        if not Path(cfg_root.ldm_adv.dataset.latent_stats_path).exists():
+            cache_latent_stats(cfg_root.ldm_adv)
+        ldm_cfg = set_latent_stats(cfg_root.ldm_adv)
+        policy = LDMAdvDDPOPolicy(
+            ldm_cfg,
+            cfg_root.ae_goal,
+            ldm_ckpt=cfg.ldm_adv_ckpt,
+            ae_ckpt=cfg.ae_ckpt,
+            device=device,
+            use_ema_weights=cfg.get("use_ema_weights", True),
+            sampler=cfg.get("sampler", "ddpm"),
+            ddim_steps=cfg.get("ddim_steps", None),
+            ddim_eta=cfg.get("ddim_eta", 1.0),
+            force_adv_vehicle=cfg.get("force_adv_vehicle", True),
+        )
+        pool = LDMAdvConditioningPool(
+            ldm_cfg.dataset,
+            split_name=cfg.train_split,
+            pool_size=cfg.pool_size,
+            device=device,
+            seed=cfg.seed,
+            min_ego_drive=cfg.get("min_ego_drive", 10.0),
+            prune_base_to_ego=cfg.get("prune_base_to_ego", False),
+        )
+        eval_dataset_cfg = ldm_cfg.dataset
     elif model_type == "dm_fixed_map_agent_goal":
         _set_dataset_name(cfg_root.dm_fixed_map_agent_goal, dataset_name)
         policy = DMFixedMapAgentGoalDDPOPolicy(
@@ -126,6 +155,10 @@ def _default_run_name(cfg, model_type: str) -> str:
         return f"ddpo_dm_goal_{cfg.mode}"
     if model_type == "dm_fixed_map_agent_goal":
         return f"ddpo_dm_fixed_map_agent_goal_{cfg.mode}"
+    if model_type == "ldm_adv":
+        if cfg.get("sampler", "ddpm") == "ddim":
+            return f"ddpo_ldm_adv_ddim{cfg.ddim_steps}_eta{cfg.ddim_eta}"
+        return "ddpo_ldm_adv"
     return f"ddpo_{model_type}"
 
 
@@ -300,6 +333,13 @@ def run_ddpo(cfg_root):
             pool_cls = LDMGoalConditioningPool
             prune_kwargs = {}
             pool_kwargs = {}
+        elif model_type == "ldm_adv":
+            pool_cls = LDMAdvConditioningPool
+            prune_kwargs = {}
+            pool_kwargs = {
+                "min_ego_drive": cfg.get("min_ego_drive", 10.0),
+                "prune_base_to_ego": cfg.get("prune_base_to_ego", False),
+            }
         else:
             pool_cls = ConditioningPool
             prune_kwargs = {

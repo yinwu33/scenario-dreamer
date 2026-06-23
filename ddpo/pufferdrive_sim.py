@@ -658,16 +658,22 @@ class SimScene:
         ego_closing[safe] = (self.vx[0] * dx[safe] + self.vy[0] * dy[safe]) / dist[safe]
         return ego_closing > EGO_AGGRESSOR_MIN_SPEED
 
-    def ego_collides_now(self) -> bool:
+    def ego_collides_now(self, others=None) -> bool:
         """Oriented-box overlap of the ego (agent 0) with a car it is driving into.
 
         Only overlaps where the ego is the aggressor (see ``_ego_aggressor_mask``)
         are reported, so another car ramming a passive ego is not counted as an ego
-        collision.
+        collision. ``others`` optionally restricts the check to a subset of agent
+        indices (e.g. the adversary), so the rewarded ego collision is specific to
+        the generated adversary rather than any vehicle.
         """
         if self.n <= 1 or self.respawned[0]:
             return False
-        others = self.slot_order[(self.slot_order != 0) & (~self.respawned[self.slot_order])]
+        if others is None:
+            others = self.slot_order[(self.slot_order != 0) & (~self.respawned[self.slot_order])]
+        else:
+            others = np.asarray(others, dtype=np.int64)
+            others = others[(others != 0) & (~self.respawned[others])]
         if not len(others):
             return False
         boxes = _corners(self.x, self.y, self.heading, self.length, self.width)
@@ -676,8 +682,12 @@ class SimScene:
             return False
         return bool((overlap & self._ego_aggressor_mask(others)).any())
 
-    def ego_min_ttc_now(self) -> float:
+    def ego_min_ttc_now(self, others=None) -> float:
         """Relative-velocity TTC for the ego converging with another active agent.
+
+        ``others`` optionally restricts the sweep to a subset of agent indices
+        (e.g. the adversary), so the criticality TTC measures only the generated
+        adversary rather than any vehicle in the scene.
 
         A pure ego-forward sweep (move only the ego, freeze the others) reports
         TTC->0 for *any* car sitting in the ego's forward path, even one that is
@@ -700,7 +710,11 @@ class SimScene:
         """
         if self.n <= 1 or self.respawned[0] or self.crashed[0]:
             return float(np.inf)
-        others = self.slot_order[(self.slot_order != 0) & (~self.respawned[self.slot_order])]
+        if others is None:
+            others = self.slot_order[(self.slot_order != 0) & (~self.respawned[self.slot_order])]
+        else:
+            others = np.asarray(others, dtype=np.int64)
+            others = others[(others != 0) & (~self.respawned[others])]
         others = others[(self.ptype[others] != TYPE_PEDESTRIAN) & (~self.crashed[others])]
         if not len(others):
             return float(np.inf)
@@ -768,5 +782,38 @@ class SimScene:
             dy = self.y[active[k + 1:]] - self.y[active[k]]
             gate = (dx * dx + dy * dy) <= COLLISION_DIST2_GATE
             if gate.any() and _sat_overlap(boxes[k], boxes[k + 1:][gate]).any():
+                return True
+        return False
+
+    def adv_overlap(self, adv_idx, margin: float = 0.0) -> bool:
+        """True if an adversary box overlaps any other active agent box.
+
+        Adversary-only analogue of ``any_vehicle_overlap``: only overlaps that
+        involve a generated adversary (vs the ego or any real neighbour) flag the
+        init as degenerate, so a degenerate init is always the adversary's fault
+        and real Waymo neighbours never floor the reward.
+        """
+        adv_idx = np.asarray(adv_idx, dtype=np.int64)
+        adv_idx = adv_idx[~self.respawned[adv_idx]] if len(adv_idx) else adv_idx
+        if len(adv_idx) == 0:
+            return False
+        others = self.slot_order[~self.respawned[self.slot_order]]
+        others = others[self.ptype[others] != TYPE_PEDESTRIAN]
+        for a in adv_idx:
+            rest = others[others != a]
+            if len(rest) == 0:
+                continue
+            a_box = _corners(
+                self.x[a:a + 1], self.y[a:a + 1], self.heading[a:a + 1],
+                self.length[a:a + 1] + 2.0 * margin, self.width[a:a + 1] + 2.0 * margin,
+            )[0]
+            rest_box = _corners(
+                self.x[rest], self.y[rest], self.heading[rest],
+                self.length[rest] + 2.0 * margin, self.width[rest] + 2.0 * margin,
+            )
+            dx = self.x[rest] - self.x[a]
+            dy = self.y[rest] - self.y[a]
+            gate = (dx * dx + dy * dy) <= COLLISION_DIST2_GATE
+            if gate.any() and _sat_overlap(a_box, rest_box[gate]).any():
                 return True
         return False

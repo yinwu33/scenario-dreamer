@@ -1,0 +1,117 @@
+# DDPO fine-tuning of ldm_adv against a frozen PufferDrive planner.
+#
+# Latent-space single-adversary policy: nn_modules.ldm_adv.LDMAdv runs init_adv
+# (the real ego + lane latents are held fixed; only the one adversary latent is
+# denoised and trained), and a frozen goal AutoEncoder decodes the ego+adv scene.
+#
+# Mirrors the map-conditioned dm flow (config_critical_scene_map_conditioned_dm_goal):
+#   * the conditioning pool prunes the base scene to the ego (LDMAdvConditioningPool),
+#     so the criticality reward's ego-vs-all TTC/collision measures the adversary;
+#   * the SAME Phase-2 reward + GRPO settings are used verbatim (see below);
+#   * instead of the dm flow's ego-goal override we filter out near-stationary egos
+#     (min_ego_drive), keeping each ego's real on-road goal.
+
+model_type: ldm_adv
+device: cuda
+seed: 0
+
+# --- conditioning / pruning ------------------------------------------------
+# Drop scenes whose real ego barely drives (GT goal within this many metres of
+# spawn): a near-stationary ego gives the criticality reward no signal.
+min_ego_drive: 10.0          # metres (map is 64x64 / fov=64)
+# Keep the full real normal scene (ldm_adv's intended setting): the adversary is
+# generated in the context of all real neighbours and decoded alongside them.
+# Set true to instead prune the base to ego+adv (cleanest criticality credit, but
+# loses the full scene). GRPO per-context whitening baselines out the constant
+# normal-scene contribution, so the default keeps credit attributable to the adv.
+prune_base_to_ego: false
+# Force the decoded adversary to an ego-sized vehicle (type + length/width), the
+# latent-space analogue of the dm flow's vehicle projection of controlled agents.
+force_adv_vehicle: true
+
+# --- artifacts -------------------------------------------------------------
+ldm_adv_ckpt: ${scratch_root}/checkpoints/scenario_dreamer_ldm_adv_train/last.ckpt
+ae_ckpt: ${scratch_root}/checkpoints/scenario_dreamer_ae_goal_waymo/last.ckpt
+use_ema_weights: true
+
+# --- conditioning pools (native ldm_adv latent cache; no dump step) ---------
+train_split: train
+eval_split: val
+pool_size: 40000
+
+# --- rollout / reward (copied verbatim from dm_fixed_map_agent_goal) --------
+reward_backend: numpy
+pufferdrive_root: ${project_root}/PufferDrive
+sim_steps: 91
+planner_deterministic: true
+ttc_tau: 3.0
+init_overlap_margin: 0.0
+goal_offlane_threshold: 2.75     # = hard end of the continuous lane penalty (m)
+goal_onroad_threshold: 2.75
+# criticality = risk_coef * noisy_OR(R_ttc, R_approach) + collision_coef*R_coll
+risk_coef: 1.0
+approach_d_safe: 6.0             # adversary "close" scale for the proximity gate (m)
+approach_d_scale: 2.0
+approach_close_delta: 2.0        # min (d0 - dmin) closed-in distance to score (m)
+approach_close_scale: 1.0        # closing-gate sharpness (smaller = crisper gate)
+approach_warmup_time: 0.5        # ignore first N s when measuring closing
+# constraints (subtracted, each >= 0)
+goal_offlane_penalty: 1.0        # weight on the continuous lane-distance penalty
+lane_soft: 1.75                  # lane penalty starts ramping here (m)
+parking_mismatch_penalty: 0.5    # inert here (no gt_parking_mask in init_adv)
+controlled_parking_penalty: 0.5  # penalise a parked adversary -> force it to drive
+# collision: time-gated bonus (not a +1 override).
+collision_enabled: true
+collision_coef: 0.3
+collision_warmup: 0.75
+collision_window: 0.5
+trivial_collision_t: 0.75
+trivial_collision_penalty: 0.5
+# deprecated linear proximity bonus (superseded by the gated approach bonus)
+min_dist_coef: 0.0
+min_dist_dmax: 10.0
+
+# --- DDPO ------------------------------------------------------------------
+sampler: ddpm                 # ddim variant overrides this in its entrypoint
+ddim_steps: 50
+ddim_eta: 1.0
+batch_size: 64
+# Per-context (GRPO) grouping: batch_size/group_size distinct contexts, each
+# sampled group_size times; advantages whitened within group.
+group_size: 16
+num_iterations: 20000
+inner_epochs: 2
+k_steps: 8
+min_diffusion_t: 20
+bf16: false
+logprob_bf16: false
+lr: 1e-5
+weight_decay: 1e-4
+grad_clip: 1.0
+save_every: 100
+output_dir: ${experiment.output_dir}
+
+ddpo:
+  estimator: is
+  clip_range: 1.0e-4
+  kl_coef: 0.01
+  adv_clip: 5.0
+  adv_eps: 1.0e-6
+  logratio_clip: 20.0
+  adv_mode: zscore
+  per_context: true
+  group_skip_std: 1.0e-4
+
+# --- logging / eval --------------------------------------------------------
+wandb:
+  enabled: true
+  project: ${experiment.project}
+  entity: null
+  run_name: ${experiment.run_name}
+eval_every: 50
+eval_num_scenes: 8
+eval_visualize_reference: true
+eval_visualize_conditioning: true
+save_gif: true
+gif_fps: 10
+gif_max_frames: 90

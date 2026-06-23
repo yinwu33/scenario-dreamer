@@ -58,20 +58,23 @@ class RewardHook:
 
 
 class InitOverlapHook(RewardHook):
-    """Flag degenerate generated init states with overlapping vehicles.
+    """Flag degenerate generated init states where the adversary overlaps a vehicle.
 
-    Replaces the old ego-only t=0 overlap check: any two active vehicle boxes
-    overlapping at spawn (within ``margin``) marks the scene init_invalid, which
-    the reward floors to -1. ``margin=0`` allows bumper-to-bumper traffic-jam
-    spawns (the planner is expected to brake), only rejecting true overlap.
+    Adversary-only: a generated adversary box overlapping the ego or any real
+    neighbour at spawn (within ``margin``) marks the scene init_invalid, which the
+    reward floors to -1. Restricting it to the adversary keeps the reward about the
+    adversary -- real Waymo neighbours are valid spawns and must not floor it.
+    ``margin=0`` allows bumper-to-bumper spawns (the planner is expected to brake),
+    only rejecting true overlap.
     """
 
     def __init__(self, margin: float = 0.0):
         self.margin = float(margin)
 
     def before_rollout(self, ctx: RolloutContext) -> None:
+        adv = controlled_nonego_local_indices(ctx.scenes, ctx.num_scenes)
         for s, sim in enumerate(ctx.sims):
-            if sim.any_vehicle_overlap(self.margin):
+            if sim.adv_overlap(adv[s], self.margin):
                 ctx.metrics["init_invalid"][s] = 1.0
 
 
@@ -80,11 +83,12 @@ class EgoCollisionHook(RewardHook):
 
     Two collision notions are kept distinct:
       * a *general* collision (``crashed[0]`` from any ego<->vehicle overlap)
-        stops the scene so a pass-through adversary cannot re-emerge ahead of the
-        ego and spoof min-TTC - this never enters the reward;
-      * an *ego* collision (the ego drove into the other car, recorded by
-        ``ego_caused_collision`` / ``ego_collides_now``) is the rewarded
-        ``ego_collision`` event, so a car ramming a passive ego is not credited.
+        stops the scene (physical realism + anti pass-through spoof) - this never
+        enters the reward;
+      * an *ego* collision (the ego drove into the ADVERSARY) is the rewarded
+        ``ego_collision`` event. It is restricted to the adversary so the reward is
+        about the adversary; the ego ramming a real neighbour is not credited (and
+        a car ramming a passive ego never was, via the aggressor gate).
 
     Collision was previously disabled outright (it rewarded the policy for
     teleporting an adversary into the ego at t=0). It is now ``enabled``-gated
@@ -102,15 +106,19 @@ class EgoCollisionHook(RewardHook):
         ctx.metrics["ego_collision_time"] = np.full(
             ctx.num_scenes, np.inf, dtype=np.float32
         )
+        # Per-scene sim-local indices of the generated adversary (the only agent
+        # the rewarded collision is scored against).
+        self._adv = controlled_nonego_local_indices(ctx.scenes, ctx.num_scenes)
 
     def before_step_scene(self, ctx: RolloutContext, scene_idx: int, sim: SimScene) -> None:
         # General collision: any ego<->vehicle overlap latches crashed[0] (see
         # latch_ego_crash). It stops the scene so a pass-through adversary cannot
         # re-emerge ahead of the ego and spoof min-TTC - regardless of fault.
         general_collided = bool(sim.crashed[0])
-        # Ego collision: the ego drove *into* the other car. Only this counts as
-        # the rewarded collision; a car ramming a passive ego does not.
-        ego_collided = sim.ego_caused_collision or sim.ego_collides_now()
+        # Ego collision (rewarded): the ego drove *into the adversary*. Restricted
+        # to the adversary so a real neighbour the ego hits is not credited.
+        adv = self._adv[scene_idx]
+        ego_collided = bool(len(adv)) and sim.ego_collides_now(others=adv)
         if general_collided or ego_collided:
             ctx.finished[scene_idx] = True
             if ctx.trajectories is not None:
@@ -126,13 +134,21 @@ class EgoCollisionHook(RewardHook):
 
 
 class EgoMinTTCHook(RewardHook):
-    """Dense criticality feature: min ego time-to-collision over the rollout."""
+    """Dense criticality feature: min ego time-to-collision over the rollout.
+
+    Restricted to the generated adversary, so the criticality TTC measures only
+    the adversary closing on the ego (not any real neighbour in the scene).
+    """
 
     def before_rollout(self, ctx: RolloutContext) -> None:
         ctx.metrics["ego_min_ttc"] = np.full(ctx.num_scenes, np.inf, dtype=np.float32)
+        self._adv = controlled_nonego_local_indices(ctx.scenes, ctx.num_scenes)
 
     def before_step_scene(self, ctx: RolloutContext, scene_idx: int, sim: SimScene) -> None:
-        ttc = sim.ego_min_ttc_now()
+        adv = self._adv[scene_idx]
+        if len(adv) == 0:
+            return
+        ttc = sim.ego_min_ttc_now(others=adv)
         if ttc < ctx.metrics["ego_min_ttc"][scene_idx]:
             ctx.metrics["ego_min_ttc"][scene_idx] = ttc
 
