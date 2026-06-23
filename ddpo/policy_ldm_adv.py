@@ -76,9 +76,12 @@ class LDMAdvDDPOPolicy:
         self.net = LDMAdv(ldm_cfg).to(device)
         if ldm_ckpt is not None:
             self._load_ldm_checkpoint(ldm_ckpt, use_ema_weights)
-        # DDPO only ever optimises the adversary branch; freeze the base scene
-        # streams regardless of the checkpoint's train_mode.
-        self.net.model.freeze_non_adv_parameters()
+        # DDPO only ever optimises the adversary LATENT denoiser; freeze the base
+        # scene streams. The adv conditioning embedders are also frozen: the
+        # condition is fixed to a constant target (see LDMAdvConditioningPool), so
+        # the embedders just supply the supervised conditional prior and carry no
+        # policy gradient.
+        self.net.model.freeze_non_adv_parameters(freeze_cond_embedders=True)
         self.net.eval()
 
         self.ref = copy.deepcopy(self.net).to(device).eval()
@@ -122,6 +125,18 @@ class LDMAdvDDPOPolicy:
             print(f"[ddpo ldm_adv] {len(missing)} missing keys on LDMAdv load (e.g. {missing[:3]})")
         if unexpected:
             print(f"[ddpo ldm_adv] {len(unexpected)} unexpected keys on LDMAdv load (e.g. {unexpected[:3]})")
+        # The conditioning embedders only exist on a checkpoint trained with
+        # use_adv_conditioning=true. If they are missing the base model was NOT
+        # conditioned, so feeding it a fixed adv_cond_target injects an UNTRAINED
+        # constant bias into the adv stream (degrades generation) -- warn loudly.
+        if getattr(self.net.model, "use_adv_conditioning", False):
+            cond_missing = [k for k in missing if "_embedder" in k and "adv_" in k]
+            if cond_missing:
+                print(
+                    f"[ddpo ldm_adv] WARNING: {len(cond_missing)} adv-conditioning embedder "
+                    f"weights missing from checkpoint -- the base model was not trained with "
+                    f"conditioning; the fixed adv_cond_target will inject an untrained bias."
+                )
         if use_ema_weights:
             shadow = ckpt.get("ema_state_dict", {}).get("shadow_params", [])
             params = list(self.net.parameters())

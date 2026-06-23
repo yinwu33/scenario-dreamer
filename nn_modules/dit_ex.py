@@ -27,11 +27,20 @@ class DiT(nn.Module):
         self.downsample_c = nn.Linear(self.cfg_model.hidden_dim, self.cfg_model.agent_hidden_dim)
 
         self.adv_latent_dim = self.cfg_model.agent_latent_dim
-        
+
         # Embed agent, lane, and adversarial-agent latents
         self.lane_embedder = TwoLayerResMLP(self.cfg_model.lane_latent_dim, self.cfg_model.hidden_dim)
         self.agent_embedder = TwoLayerResMLP(self.cfg_model.agent_latent_dim, self.cfg_model.agent_hidden_dim)
         self.adv_embedder = TwoLayerResMLP(self.adv_latent_dim, self.cfg_model.agent_hidden_dim)
+
+        # Optional adv-only conditioning: discretized type / motion / distance
+        # labels embedded and added onto the adv stream's conditioning vector.
+        # Plain conditioning (dropout_prob=0, no classifier-free guidance).
+        self.use_adv_conditioning = bool(self.cfg_model.get("use_adv_conditioning", False))
+        if self.use_adv_conditioning:
+            self.adv_type_embedder = LabelEmbedder(self.cfg_model.adv_cond_num_types, self.cfg_model.hidden_dim, 0)
+            self.adv_motion_embedder = LabelEmbedder(self.cfg_model.adv_cond_num_motion, self.cfg_model.hidden_dim, 0)
+            self.adv_dist_embedder = LabelEmbedder(self.cfg_model.adv_cond_num_dist, self.cfg_model.hidden_dim, 0)
         
         # These will be overwritten by sin/cos positional encodings
         self.pos_emb_lane = nn.Parameter(torch.zeros(self.cfg_dataset.max_num_lanes, self.cfg_model.hidden_dim), requires_grad=False)
@@ -77,6 +86,12 @@ class DiT(nn.Module):
         nn.init.normal_(self.num_agents_embedder.embedding_table.weight, std=0.02)
         nn.init.normal_(self.num_lanes_embedder.embedding_table.weight, std=0.02)
 
+        # Initialize adv conditioning embedding tables:
+        if self.use_adv_conditioning:
+            nn.init.normal_(self.adv_type_embedder.embedding_table.weight, std=0.02)
+            nn.init.normal_(self.adv_motion_embedder.embedding_table.weight, std=0.02)
+            nn.init.normal_(self.adv_dist_embedder.embedding_table.weight, std=0.02)
+
         # Initialize timestep embedding MLP:
         nn.init.normal_(self.t_embedder.mlp[0].weight, std=0.02)
         nn.init.normal_(self.t_embedder.mlp[2].weight, std=0.02)
@@ -110,11 +125,23 @@ class DiT(nn.Module):
         nn.init.constant_(self.pred_adv_noise.linear.bias, 0)
 
 
-    def freeze_non_adv_parameters(self):
+    def freeze_non_adv_parameters(self, freeze_cond_embedders=False):
+        """Freeze everything except the adversary branch. When
+        ``freeze_cond_embedders`` is True the adv conditioning embedders are ALSO
+        kept frozen (used by DDPO, which fixes the condition to a constant target
+        and only reshapes the adv latent denoiser, preserving the supervised
+        conditional prior). The default keeps them trainable for adv_only base
+        training, where the conditioning is still being learned."""
         for parameter in self.parameters():
             parameter.requires_grad_(False)
 
         adv_modules = [self.adv_embedder, self.pred_adv_noise]
+        if self.use_adv_conditioning and not freeze_cond_embedders:
+            adv_modules.extend([
+                self.adv_type_embedder,
+                self.adv_motion_embedder,
+                self.adv_dist_embedder,
+            ])
         for block in self.blocks:
             adv_modules.extend([
                 block.downsample_x_lane_to_adv,
@@ -161,7 +188,21 @@ class DiT(nn.Module):
         num_agents_emb_per_agent = num_agents_emb[agent_batch]
         num_lanes_emb_per_lane = num_lanes_emb[lane_batch]
         num_context_emb_per_adv = num_agents_emb + num_lanes_emb
-        
+
+        # Adv-only conditioning: add the embedded [type, motion, dist] labels onto
+        # the adv stream's context embedding (one adv token per scene, so this is
+        # per-scene). Only feeds num_context_emb_per_adv -> c_adv, so the lane and
+        # normal-agent streams are untouched. Skipped when labels are absent (e.g.
+        # an un-conditioned DDPO rollout) so the model still runs.
+        if self.use_adv_conditioning and ("cond" in data["adv"]):
+            cond = data["adv"].cond.long()
+            num_context_emb_per_adv = (
+                num_context_emb_per_adv
+                + self.adv_type_embedder(cond[:, 0], train=self.training)
+                + self.adv_motion_embedder(cond[:, 1], train=self.training)
+                + self.adv_dist_embedder(cond[:, 2], train=self.training)
+            )
+
         # embedding of timestep
         t = self.t_embedder(torch.cat([lane_timestep, agent_timestep, adv_timestep], dim=-1))
         # embedding of number of agents and lanes

@@ -13,6 +13,7 @@ np.set_printoptions(suppress=True, threshold=sys.maxsize)
 torch.set_printoptions(threshold=100000)
 
 from cfgs.config import CONFIG_PATH
+from ddpo.goal_schema import MIN_DISTANCE_TO_GOAL
 from utils.data_container import ScenarioDreamerData
 from utils.data_helpers import reorder_indices, reparameterize, sample_latents
 from utils.pyg_helpers import get_edge_index_bipartite, get_edge_index_complete_graph
@@ -57,12 +58,41 @@ class WaymoDatasetLDMAdv(Dataset):
             return int(np.random.choice(non_ego))
         return int(non_ego[0])
 
+    def _adv_condition(self, agent_states, agent_types, adv_idx):
+        """Discretize the adversary's own (normalized) state into the
+        ``[type, motion, dist]`` label triple consumed by the conditioned DiT adv
+        stream. ``agent_states``/``agent_types`` must already be reordered with the
+        same permutation as the latents (ego at index 0). Returns a ``LongTensor``
+        of shape ``(1, 3)`` so it batches to ``(batch_size, 3)``."""
+        # agent type: one-hot [N, num_agent_types] -> class id (0=veh, 1=ped, 2=cyc)
+        adv_type = int(np.argmax(agent_types[adv_idx]))
+
+        adv_xy = agent_states[adv_idx, :2]
+        # parked / moving: match visualization/DDPO semantics. Normalized xy and
+        # goal xy are scaled by fov/2 per unit -> metres.
+        adv_goal_xy = agent_states[adv_idx, 7:9]
+        phys_goal_dist = float(np.linalg.norm(adv_goal_xy - adv_xy)) * (self.cfg.fov / 2.0)
+        adv_motion = 0 if phys_goal_dist < MIN_DISTANCE_TO_GOAL else 1
+
+        # distance bucket: adversary distance from ego in metres
+        ego_xy = agent_states[0, :2]
+        phys_dist = float(np.linalg.norm(adv_xy - ego_xy)) * (self.cfg.fov / 2.0)
+        if phys_dist < self.cfg.adv_cond_dist_near_threshold:
+            adv_dist = 0
+        elif phys_dist < self.cfg.adv_cond_dist_far_threshold:
+            adv_dist = 1
+        else:
+            adv_dist = 2
+
+        return torch.tensor([[adv_type, adv_motion, adv_dist]], dtype=torch.long)
+
     def get_data(self, data, idx):
         agent_mu = data["agent_mu"]
         agent_log_var = data["agent_log_var"]
         lane_mu = data["lane_mu"]
         lane_log_var = data["lane_log_var"]
         agent_states = data["agent_states"]
+        agent_types = data["agent_types"]
         road_points = data["road_points"]
         edge_index_lane_to_lane = data["edge_index_lane_to_lane"]
         scene_type = data["scene_type"]
@@ -74,6 +104,25 @@ class WaymoDatasetLDMAdv(Dataset):
 
         idx = data["idx"]
         num_lanes = lane_mu.shape[0]
+
+        # Reorder the raw adv-conditioning state + type with the SAME deterministic
+        # permutation the latents get below (reorder_indices sorts on agent_states),
+        # so the condition labels stay aligned with the reordered latent rows. We
+        # reuse the generic permutation machinery by passing states/types in the
+        # agent slots -- identical idiom to dataset_dm_adv_waymo.py /
+        # verify_adv_overlap.py. Done before the latent reorder so the original
+        # (un-reordered) lane inputs are still available. Lane outputs are dropped.
+        agent_states_r, agent_types_r = reorder_indices(
+            agent_states,
+            agent_types,
+            lane_mu,
+            lane_log_var,
+            edge_index_lane_to_lane,
+            agent_states,
+            road_points,
+            scene_type,
+            dataset="waymo",
+        )[:2]
 
         # Deterministic ego-first ordering (identical to the base LDM dataset) so
         # the positional encodings are meaningful and ego stays at index 0.
@@ -128,6 +177,9 @@ class WaymoDatasetLDMAdv(Dataset):
         d["adv"].x = from_numpy(adv_mu)
         d["adv"].log_var = from_numpy(adv_log_var)
         d["adv"].partition_mask = torch.zeros(1).bool()
+        # Discretized adv-only conditioning labels [type, motion, dist] (shape (1, 3))
+        # aligned with the reordered adv row, batches to (batch_size, 3).
+        d["adv"].cond = self._adv_condition(agent_states_r, agent_types_r, adv_idx)
 
         # Sample (and normalize) the normal-agent and lane latents for diffusion.
         d["agent"].latents, d["lane"].latents = sample_latents(

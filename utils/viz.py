@@ -19,6 +19,22 @@ def _tensor_to_numpy_for_viz(tensor):
     return tensor.numpy()
 
 
+# Human-readable names for the adversary's discretized conditioning labels
+# (matches dataset_ldm_adv_waymo._adv_condition: [type, motion, dist]).
+_ADV_COND_TYPE_NAMES = {0: 'vehicle', 1: 'pedestrian', 2: 'cyclist'}
+_ADV_COND_MOTION_NAMES = {0: 'parked', 1: 'moving'}
+_ADV_COND_DIST_NAMES = {0: 'near', 1: 'middle', 2: 'far'}
+
+
+def _format_adv_condition_text(cond):
+    """Format a single adversary's ``[type, motion, dist]`` label triple as a
+    readable overlay string, e.g. ``adv: cyclist | parked | far``."""
+    t = _ADV_COND_TYPE_NAMES.get(int(cond[0]), f"type{int(cond[0])}")
+    m = _ADV_COND_MOTION_NAMES.get(int(cond[1]), f"motion{int(cond[1])}")
+    d = _ADV_COND_DIST_NAMES.get(int(cond[2]), f"dist{int(cond[2])}")
+    return f"adv: {t} | {m} | {d}"
+
+
 def _draw_agent_box(ax, state, color, bbox_linewidth, heading_linewidth,
                     plot_heading_line, alpha=1.0, edgecolor='black', zorder=4):
     """Draw a single rounded agent bounding box (and optional heading line).
@@ -363,7 +379,8 @@ def visualize_batch(num_samples,
                     tag='scene_plot',
                     adv_samples=None,
                     adv_batch=None,
-                    adv_types=None):
+                    adv_types=None,
+                    adv_cond=None):
     """ Visualize samples from the batch.
 
     ``tag`` namespaces the saved filenames and W&B panel keys so multiple calls
@@ -371,6 +388,9 @@ def visualize_batch(num_samples,
 
     ``adv_samples`` (optional, with per-node ``adv_batch`` scene indices and
     ``adv_types``) are adversarial agents drawn in green on each scene plot.
+
+    ``adv_cond`` (optional, ``[batch_size, 3]`` of discretized [type, motion,
+    dist] labels) is written as a text overlay on each scene plot.
     """
 
     if lane_conn_samples.shape[-1] == 4:
@@ -389,7 +409,9 @@ def visualize_batch(num_samples,
         adv_batch = _tensor_to_numpy_for_viz(adv_batch)
         if adv_types is not None:
             adv_types = _tensor_to_numpy_for_viz(adv_types)
-    
+    if adv_cond is not None:
+        adv_cond = _tensor_to_numpy_for_viz(adv_cond)
+
     # pyg data structures for indexing
     lane_batch = data['lane'].batch
     lane_row = data['lane', 'to', 'lane'].edge_index[0]
@@ -428,6 +450,16 @@ def visualize_batch(num_samples,
         else:
             scene_i_adv = None
             scene_i_adv_types = None
+
+        # Compose the per-scene condition overlay text: existing map condition (if
+        # any) plus the adversary's discretized [type, motion, dist] labels.
+        scene_condition_text = condition_texts[i] if condition_texts is not None else None
+        if adv_cond is not None and adv_batch is not None:
+            scene_i_adv_cond = adv_cond[adv_batch == i]
+            if len(scene_i_adv_cond) > 0:
+                adv_text = _format_adv_condition_text(scene_i_adv_cond[0])
+                scene_condition_text = adv_text if scene_condition_text is None else f"{scene_condition_text}\n{adv_text}"
+
         fig = plot_scene(
             scene_i_agents,
             scene_i_lanes,
@@ -436,7 +468,7 @@ def visualize_batch(num_samples,
             name=f'{tag}_epoch_{epoch}_batch_{batch_idx}_sample_{i}.png',
             save_dir=save_dir,
             return_fig=save_wandb,
-            condition_text=condition_texts[i] if condition_texts is not None else None,
+            condition_text=scene_condition_text,
             adv_states=scene_i_adv,
             adv_types=scene_i_adv_types)
         if save_wandb:

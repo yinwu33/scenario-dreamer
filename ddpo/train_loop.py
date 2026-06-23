@@ -113,6 +113,7 @@ def _build_policy_and_pool(cfg_root, cfg, device: str):
             seed=cfg.seed,
             min_ego_drive=cfg.get("min_ego_drive", 10.0),
             prune_base_to_ego=cfg.get("prune_base_to_ego", False),
+            adv_cond_target=cfg.get("adv_cond_target", None),
         )
         eval_dataset_cfg = ldm_cfg.dataset
     elif model_type == "dm_fixed_map_agent_goal":
@@ -339,6 +340,7 @@ def run_ddpo(cfg_root):
             pool_kwargs = {
                 "min_ego_drive": cfg.get("min_ego_drive", 10.0),
                 "prune_base_to_ego": cfg.get("prune_base_to_ego", False),
+                "adv_cond_target": cfg.get("adv_cond_target", None),
             }
         else:
             pool_cls = ConditioningPool

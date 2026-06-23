@@ -355,6 +355,7 @@ class LDMAdvConditioningPool:
         seed: int = 0,
         min_ego_drive: float = 10.0,
         prune_base_to_ego: bool = False,
+        adv_cond_target=None,
     ):
         self.dataset = WaymoDatasetLDMAdv(dataset_cfg, split_name=split_name, mode="eval")
         if len(self.dataset) == 0:
@@ -366,6 +367,12 @@ class LDMAdvConditioningPool:
         self.min_ego_drive = float(min_ego_drive)
         self.prune_base_to_ego = bool(prune_base_to_ego)
         self.fov = float(dataset_cfg.fov)
+        # Fixed adversary conditioning target (type/motion/dist label triple). The
+        # adv is generated from noise, so the real adv's labels are irrelevant --
+        # override them with the desired target so the conditioned base model
+        # samples the requested adversary category (e.g. car / moving / near).
+        # None (or enabled=false) keeps each scene's real adv labels.
+        self.adv_cond_target = self._parse_adv_cond_target(adv_cond_target)
         n = min(int(pool_size), len(self.dataset))
         self.pool_indices = self.rng.permutation(len(self.dataset))[:n]
         self._cache: dict[int, object] = {}
@@ -374,6 +381,27 @@ class LDMAdvConditioningPool:
         return len(self.pool_indices)
 
     # ------------------------------------------------------------- helpers
+    @staticmethod
+    def _parse_adv_cond_target(spec):
+        """Parse the fixed adv conditioning target into a LongTensor ``[1, 3]``
+        ([type, motion, dist]), or ``None`` to keep each scene's real adv labels.
+        Accepts an OmegaConf/dict node with ``enabled`` plus ``type/motion/dist``."""
+        if spec is None:
+            return None
+        get = spec.get if hasattr(spec, "get") else (lambda k, d=None: getattr(spec, k, d))
+        if not bool(get("enabled", False)):
+            return None
+        return torch.tensor(
+            [[int(get("type", 0)), int(get("motion", 1)), int(get("dist", 0))]],
+            dtype=torch.long,
+        )
+
+    def _apply_target_cond(self, d):
+        """Override the adv node's conditioning labels with the fixed target."""
+        if self.adv_cond_target is not None:
+            d["adv"].cond = self.adv_cond_target.clone()
+        return d
+
     def _ego_drives_enough(self, raw) -> bool:
         """True if the real ego's GT goal is >= ``min_ego_drive`` metres from its
         spawn. ``agent_states`` is stored min-max normalised to [-1, 1] over the
@@ -445,6 +473,7 @@ class LDMAdvConditioningPool:
             d["lane"].road_points = self._sorted_road_points(raw)
             if self.prune_base_to_ego:
                 d = self._prune_base_to_ego(d)
+            d = self._apply_target_cond(d)
             self._cache[pool_idx] = d
             return d
         raise RuntimeError("no valid (driving-ego) conditioning graphs in dataset")

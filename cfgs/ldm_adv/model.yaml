@@ -7,3 +7,13 @@ defaults:
 # agent latent layout (dit_ex sets adv_latent_dim = agent_latent_dim).
 autoencoder_run_name: scenario_dreamer_ae_goal_waymo # the goal autoencoder run
 autoencoder_path: ${scratch_root}/checkpoints/${ldm_adv.model.autoencoder_run_name}/last.ckpt
+
+# Adversary conditioning (adv-only): embed the discretized type/motion/distance
+# labels (see ldm_adv.dataset.adv_cond_*) and add them onto the adv stream's
+# conditioning vector inside the DiT. Plain conditioning (no classifier-free
+# guidance); the embeddings live in the adv-only trainable set so adv_only / DDPO
+# finetuning keeps them learnable. Toggle off to recover the unconditioned model.
+use_adv_conditioning: true
+adv_cond_num_types: 3  # vehicle / pedestrian / cyclist (matches dataset.num_agent_types)
+adv_cond_num_motion: 2 # parked / moving
+adv_cond_num_dist: 3   # near / middle / far

@@ -136,6 +136,7 @@ class ScenarioDreamerAutoEncoder(pl.LightningModule):
         scene_type = data['lg_type'].cpu().int()
         road_points = data['lane'].x.cpu().numpy()
         agent_states = data['agent'].x.cpu().numpy()
+        agent_types = data['agent'].type.cpu().numpy()
         agent_batch = data['agent'].batch.cpu().numpy()
         lane_batch = data['lane'].batch.cpu().numpy()
         if self.cfg.dataset_name == 'nuplan':
@@ -152,6 +153,7 @@ class ScenarioDreamerAutoEncoder(pl.LightningModule):
             scene_type_i = scene_type[i].item()
             road_points_i = road_points[lane_batch == i]
             agent_states_i = agent_states[agent_batch == i]
+            agent_types_i = agent_types[agent_batch == i]
             if self.cfg.dataset_name == 'nuplan':
                 map_id_i = int(map_id[i].item())
 
@@ -176,7 +178,8 @@ class ScenarioDreamerAutoEncoder(pl.LightningModule):
                 'edge_index_lane_to_agent': edge_index_i_l2a,
                 'scene_type': scene_type_i,
                 'road_points': road_points_i,
-                'agent_states': agent_states_i
+                'agent_states': agent_states_i,
+                'agent_types': agent_types_i
             }
             
             if self.cfg.dataset_name == 'waymo':

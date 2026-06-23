@@ -29,6 +29,20 @@ prune_base_to_ego: false
 # latent-space analogue of the dm flow's vehicle projection of controlled agents.
 force_adv_vehicle: true
 
+# Fixed adversary conditioning target (requires a base ldm_adv ckpt trained with
+# model.use_adv_conditioning=true). The adversary is generated from noise, so the
+# real adv's labels are overridden with this target: the conditioned base model
+# then samples the requested adversary category. The init version uses a
+# training-favorable adversary -- car / moving / near -- which is aligned with the
+# reward (force_adv_vehicle -> car, controlled_parking_penalty -> moving, approach
+# bonus -> near), so it biases generation toward the region the reward already
+# wants. Set enabled=false to instead condition on each scene's real adv labels.
+adv_cond_target:
+  enabled: true
+  type: 0    # 0=vehicle(car), 1=pedestrian, 2=cyclist
+  motion: 1  # 0=parked, 1=moving
+  dist: 0    # 0=near, 1=middle, 2=far
+
 # --- artifacts -------------------------------------------------------------
 ldm_adv_ckpt: ${scratch_root}/checkpoints/scenario_dreamer_ldm_adv_train/last.ckpt
 ae_ckpt: ${scratch_root}/checkpoints/scenario_dreamer_ae_goal_waymo/last.ckpt

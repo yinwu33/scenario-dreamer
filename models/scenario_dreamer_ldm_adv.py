@@ -127,6 +127,9 @@ class ScenarioDreamerLDMAdv(ScenarioDreamerLDM):
         else:
             adv_batch = torch.arange(data.batch_size, device=self.device, dtype=torch.long)
 
+        # Adversary conditioning labels (if present) to overlay on the scene plots.
+        adv_cond = data["adv"].cond if "cond" in data["adv"] else None
+
         # Snapshot the ground-truth (normalized) latents before diffusion runs so
         # we can decode and render them next to the generated samples.
         if visualize:
@@ -164,6 +167,7 @@ class ScenarioDreamerLDMAdv(ScenarioDreamerLDM):
                 adv_samples=adv_samples,
                 adv_batch=adv_batch,
                 adv_types=adv_types,
+                adv_cond=adv_cond,
             )
 
             # Decode + render the ground-truth latents under a separate tag.
@@ -192,6 +196,7 @@ class ScenarioDreamerLDMAdv(ScenarioDreamerLDM):
                 adv_samples=gt_adv,
                 adv_batch=adv_batch,
                 adv_types=gt_adv_types,
+                adv_cond=adv_cond,
             )
             if save_wandb and images_to_log_batch is not None and gt_images is not None:
                 images_to_log_batch.update(gt_images)
