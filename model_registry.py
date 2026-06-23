@@ -18,6 +18,7 @@ from omegaconf import OmegaConf
 from models.scenario_dreamer_autoencoder import ScenarioDreamerAutoEncoder
 from models.scenario_dreamer_autoencoder_bezier import ScenarioDreamerAutoEncoderBezier
 from models.scenario_dreamer_ldm import ScenarioDreamerLDM
+from models.scenario_dreamer_ldm_adv import ScenarioDreamerLDMAdv
 from models.scenario_dreamer_dm import ScenarioDreamerDM
 from models.scenario_dreamer_dm_goal import ScenarioDreamerDMGoal
 from models.scenario_dreamer_dm_adv import ScenarioDreamerDMAdv
@@ -49,6 +50,7 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
     "autoencoder_bezier": ModelSpec("ae", "autoencoder", ScenarioDreamerAutoEncoderBezier),
     "ldm": ModelSpec("ldm", "ldm", ScenarioDreamerLDM, ae_attr="ae"),
     "ldm_goal": ModelSpec("ldm_goal", "ldm", ScenarioDreamerLDM, ae_attr="ae_goal"),
+    "ldm_adv": ModelSpec("ldm_adv", "ldm", ScenarioDreamerLDMAdv, ae_attr="ae_goal"),
     "cldm": ModelSpec("ldm", "ldm", ScenarioDreamerCLDM, ae_attr="ae"),
     "dm": ModelSpec("dm", "dm", ScenarioDreamerDM),
     "dm_goal": ModelSpec("dm_goal", "dm", ScenarioDreamerDMGoal),

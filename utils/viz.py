@@ -7,6 +7,7 @@ from utils.geometry import *
 import math
 from cfgs.config import LANE_CONNECTION_TYPES_WAYMO, LANE_CONNECTION_TYPES_NUPLAN
 from ddpo.goal_schema import MIN_DISTANCE_TO_GOAL
+from ddpo.viz import CONTROL_COLOR  # vivid green for adversarial/controlled agents
 from moviepy.editor import ImageSequenceClip
 import wandb
 
@@ -16,6 +17,84 @@ def _tensor_to_numpy_for_viz(tensor):
     if tensor.is_floating_point():
         tensor = tensor.float()
     return tensor.numpy()
+
+
+def _draw_agent_box(ax, state, color, bbox_linewidth, heading_linewidth,
+                    plot_heading_line, alpha=1.0, edgecolor='black', zorder=4):
+    """Draw a single rounded agent bounding box (and optional heading line).
+
+    ``state`` is the ``[x, y, speed, cosθ, sinθ, length, width]`` agent layout.
+    The heading line is drawn one zorder above the box. Shared by the normal
+    agents and the adversarial agent so both render identically (only the colour
+    and zorder differ)."""
+    length = state[5]
+    width = state[6]
+    bbox_x_min = state[0] - width / 2
+    bbox_y_min = state[1] - length / 2
+    rectangle = mpatches.FancyBboxPatch(
+        (bbox_x_min, bbox_y_min),
+        width, length,
+        ec=edgecolor, fc=color,
+        linewidth=bbox_linewidth, alpha=alpha,
+        boxstyle=mpatches.BoxStyle("Round", pad=0.3),
+        zorder=zorder
+    )
+
+    cos_theta = state[3]
+    sin_theta = state[4]
+    theta = np.arctan2(sin_theta, cos_theta)
+    rotation = transforms.Affine2D().rotate_deg_around(
+        state[0], state[1], np.degrees(theta) - 90
+    ) + ax.transData
+    rectangle.set_transform(rotation)
+    ax.add_patch(rectangle)
+
+    if plot_heading_line:
+        heading_length = length / 2 + 1.5
+        vehicle_center = state[:2]
+        line_end_x = vehicle_center[0] + heading_length * math.cos(theta)
+        line_end_y = vehicle_center[1] + heading_length * math.sin(theta)
+        ax.plot(
+            [vehicle_center[0], line_end_x],
+            [vehicle_center[1], line_end_y],
+            color='black',
+            alpha=0.5,
+            linewidth=heading_linewidth,
+            zorder=zorder + 1
+        )
+
+
+def _draw_agent_goal(ax, state, color, goal_marker_size, goal_linewidth,
+                     line_zorder=6, marker_zorder=7, center_zorder=8):
+    """Draw a single agent's goal: a dotted line from the agent to its goal and
+    an ``x`` marker at the goal, both in the agent's colour. ``state`` is the
+    ``[..., goal_x, goal_y]`` (>=9 col) agent layout. When the goal coincides
+    with the agent (within ``MIN_DISTANCE_TO_GOAL``) only a black ``x`` is drawn
+    at the agent centre. Shared by the normal agents and the adversarial agent so
+    both render their goal identically (only the colour and zorders differ)."""
+    if state.shape[0] < 9:
+        return
+    goal = state[7:9]
+    if not np.all(np.isfinite(goal)):
+        return
+    vehicle_center = state[:2]
+    if np.linalg.norm(goal - vehicle_center) < MIN_DISTANCE_TO_GOAL:
+        ax.scatter(
+            vehicle_center[0], vehicle_center[1],
+            marker='x', color='black', s=goal_marker_size,
+            linewidths=max(goal_linewidth * 2.0, 1.2), zorder=center_zorder,
+        )
+        return
+    ax.plot(
+        [state[0], goal[0]], [state[1], goal[1]],
+        color=color, linestyle=':', alpha=0.8,
+        linewidth=goal_linewidth, zorder=line_zorder,
+    )
+    ax.scatter(
+        goal[0], goal[1],
+        marker='x', color=color, s=goal_marker_size,
+        linewidths=max(goal_linewidth, 0.5), zorder=marker_zorder,
+    )
 
 
 def plot_scene(
@@ -29,8 +108,14 @@ def plot_scene(
         tile_occupancy=None,
         adaptive_limits=False,
         route=None,
-        condition_text=None):
-    """Plots a scene with lanes and agents."""
+        condition_text=None,
+        adv_states=None,
+        adv_types=None):
+    """Plots a scene with lanes and agents.
+
+    ``adv_states`` (optional, same layout as ``agent_states``) are adversarial
+    agents drawn in vivid green on top of the normal agents, matching the DDPO
+    rollout convention (``ddpo.viz.CONTROL_COLOR``)."""
 
     # Create a figure and axes
     fig, ax = plt.subplots()
@@ -135,86 +220,33 @@ def plot_scene(
         else:
             color = 'grey'  # Default color if agent type is unrecognized
         
-        # Draw bounding boxes
-        length = agent_states[a, 5]
-        width = agent_states[a, 6]
-        bbox_x_min = agent_states[a, 0] - width / 2
-        bbox_y_min = agent_states[a, 1] - length / 2
-        rectangle = mpatches.FancyBboxPatch(
-            (bbox_x_min, bbox_y_min),
-            width, length,
-            ec=edgecolor, fc=color,
-            linewidth=bbox_linewidth, alpha=alpha,
-            boxstyle=mpatches.BoxStyle("Round", pad=0.3),
-            zorder=4
-        )
-
-        # Calculate rotation angle
-        cos_theta = agent_states[a, 3]
-        sin_theta = agent_states[a, 4]
-        theta = np.arctan2(sin_theta, cos_theta)
-        rotation = transforms.Affine2D().rotate_deg_around(
-            agent_states[a, 0], agent_states[a, 1], np.degrees(theta) - 90
-        ) + ax.transData
-
-        # Apply rotation to the rectangle
-        rectangle.set_transform(rotation)
-        ax.add_patch(rectangle)
-
         if lane_types is None:
             plot_heading_line = True # plot heading ling for vehicles, pedestrians, and cyclists
         else:
             plot_heading_line = agent_types[a] in [0, 1]  # Only plot heading line for vehicles and pedestrians, but not static objects
-        
-        
-        if plot_heading_line:
-            # Draw heading line
-            heading_length = length / 2 + 1.5
-            vehicle_center = agent_states[a, :2]
-            line_end_x = vehicle_center[0] + heading_length * math.cos(theta)
-            line_end_y = vehicle_center[1] + heading_length * math.sin(theta)
-            ax.plot(
-                [vehicle_center[0], line_end_x],
-                [vehicle_center[1], line_end_y],
-                color='black',
-                alpha=0.5,
-                linewidth=heading_linewidth,
-                zorder=5
-            )
 
-        if agent_states.shape[1] >= 9:
-            goal = agent_states[a, 7:9]
-            if np.all(np.isfinite(goal)):
-                vehicle_center = agent_states[a, :2]
-                if np.linalg.norm(goal - vehicle_center) < MIN_DISTANCE_TO_GOAL:
-                    ax.scatter(
-                        vehicle_center[0],
-                        vehicle_center[1],
-                        marker='x',
-                        color='black',
-                        s=goal_marker_size,
-                        linewidths=max(goal_linewidth * 2.0, 1.2),
-                        zorder=8,
-                    )
-                    continue
-                ax.plot(
-                    [agent_states[a, 0], goal[0]],
-                    [agent_states[a, 1], goal[1]],
-                    color=color,
-                    linestyle=':',
-                    alpha=0.8,
-                    linewidth=goal_linewidth,
-                    zorder=6,
-                )
-                ax.scatter(
-                    goal[0],
-                    goal[1],
-                    marker='x',
-                    color=color,
-                    s=goal_marker_size,
-                    linewidths=max(goal_linewidth, 0.5),
-                    zorder=7,
-                )
+        # Draw bounding box and heading line
+        _draw_agent_box(
+            ax, agent_states[a], color, bbox_linewidth, heading_linewidth,
+            plot_heading_line, alpha=alpha, edgecolor=edgecolor, zorder=4
+        )
+
+        _draw_agent_goal(ax, agent_states[a], color, goal_marker_size, goal_linewidth)
+
+    # Draw adversarial agents in vivid green, on top of the normal agents.
+    if adv_states is not None:
+        for a in range(len(adv_states)):
+            plot_heading_line = True if lane_types is None else (adv_types is None or adv_types[a] in [0, 1])
+            _draw_agent_box(
+                ax, adv_states[a], CONTROL_COLOR, bbox_linewidth, heading_linewidth,
+                plot_heading_line, alpha=alpha, edgecolor=edgecolor, zorder=9
+            )
+            # Draw the adversary's goal on top of everything, matching the normal
+            # agents' dotted-line + 'x' goal marker (in the adversary's green).
+            _draw_agent_goal(
+                ax, adv_states[a], CONTROL_COLOR, goal_marker_size, goal_linewidth,
+                line_zorder=10, marker_zorder=11, center_zorder=11,
+            )
 
     # Create the save directory if it doesn't exist
     if not os.path.exists(save_dir):
@@ -328,11 +360,17 @@ def visualize_batch(num_samples,
                     batch_idx,
                     save_wandb=False,
                     visualize_lane_graph=False,
-                    tag='scene_plot'):
+                    tag='scene_plot',
+                    adv_samples=None,
+                    adv_batch=None,
+                    adv_types=None):
     """ Visualize samples from the batch.
 
     ``tag`` namespaces the saved filenames and W&B panel keys so multiple calls
     (e.g. generated samples vs. ground truth) don't overwrite each other.
+
+    ``adv_samples`` (optional, with per-node ``adv_batch`` scene indices and
+    ``adv_types``) are adversarial agents drawn in green on each scene plot.
     """
 
     if lane_conn_samples.shape[-1] == 4:
@@ -346,6 +384,11 @@ def visualize_batch(num_samples,
     if lane_types is not None:
         lane_types = _tensor_to_numpy_for_viz(lane_types)
     lane_conn_samples = _tensor_to_numpy_for_viz(lane_conn_samples)
+    if adv_samples is not None:
+        adv_samples = _tensor_to_numpy_for_viz(adv_samples)
+        adv_batch = _tensor_to_numpy_for_viz(adv_batch)
+        if adv_types is not None:
+            adv_types = _tensor_to_numpy_for_viz(adv_types)
     
     # pyg data structures for indexing
     lane_batch = data['lane'].batch
@@ -379,15 +422,23 @@ def visualize_batch(num_samples,
             scene_i_lane_types = lane_types[lane_batch == i]
         else:
             scene_i_lane_types = None
+        if adv_samples is not None:
+            scene_i_adv = adv_samples[adv_batch == i]
+            scene_i_adv_types = adv_types[adv_batch == i] if adv_types is not None else None
+        else:
+            scene_i_adv = None
+            scene_i_adv_types = None
         fig = plot_scene(
-            scene_i_agents, 
-            scene_i_lanes, 
-            scene_i_agent_types, 
+            scene_i_agents,
+            scene_i_lanes,
+            scene_i_agent_types,
             scene_i_lane_types,
             name=f'{tag}_epoch_{epoch}_batch_{batch_idx}_sample_{i}.png',
             save_dir=save_dir,
             return_fig=save_wandb,
-            condition_text=condition_texts[i] if condition_texts is not None else None)
+            condition_text=condition_texts[i] if condition_texts is not None else None,
+            adv_states=scene_i_adv,
+            adv_types=scene_i_adv_types)
         if save_wandb:
             images_to_log[f'{tag}/batch_{batch_idx}_sample_{i}'] = wandb.Image(fig)
             plt.close(fig)

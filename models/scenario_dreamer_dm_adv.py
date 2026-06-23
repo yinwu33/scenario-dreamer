@@ -54,6 +54,16 @@ class ScenarioDreamerDMAdv(ScenarioDreamerDM):
         num_samples_to_visualize=None,
     ):
         data = data.to(self.device)
+        # Snapshot the (normalized) ground-truth scene before diffusion overwrites it,
+        # so we can render it alongside the generated samples for comparison. The
+        # adversary is included so the GT vs. generated adv can be compared directly.
+        if visualize:
+            gt_agent = data["agent"].x.clone().float()
+            gt_lane = data["lane"].x.clone().float()
+            gt_agent_types = torch.argmax(data["agent"].type, dim=-1)
+            gt_adv = data["adv"].x.clone().float()
+            gt_adv_types = torch.argmax(data["adv"].type, dim=-1)
+
         (
             agent_samples,
             lane_samples,
@@ -72,6 +82,13 @@ class ScenarioDreamerDMAdv(ScenarioDreamerDM):
         if visualize:
             if num_samples_to_visualize is None:
                 num_samples_to_visualize = data.batch_size
+            # Per-node scene indices for the adversary so visualize_batch can slice
+            # it per scene (mirrors DMAdv._adv_batch: one adv per scene unless the
+            # data already carries an explicit ``adv`` batch vector).
+            if "batch" in data["adv"]:
+                adv_batch = data["adv"].batch
+            else:
+                adv_batch = torch.arange(data.batch_size, device=adv_samples.device, dtype=torch.long)
             images_to_log_batch = visualize_batch(
                 num_samples_to_visualize,
                 agent_samples,
@@ -84,7 +101,34 @@ class ScenarioDreamerDMAdv(ScenarioDreamerDM):
                 epoch=self.current_epoch,
                 batch_idx=batch_idx,
                 save_wandb=save_wandb,
+                tag="scene_plot",
+                adv_samples=adv_samples,
+                adv_batch=adv_batch,
+                adv_types=adv_types,
             )
+
+            # Render the ground-truth scene (adv included) under a separate tag.
+            gt_adv, _ = _unnormalize_agent_like(gt_adv, gt_lane.clone(), self.cfg_dataset)
+            gt_agent, gt_lane = _unnormalize_agent_like(gt_agent, gt_lane, self.cfg_dataset)
+            gt_images = visualize_batch(
+                num_samples_to_visualize,
+                gt_agent,
+                gt_lane,
+                gt_agent_types,
+                lane_types,
+                lane_conn_samples,
+                data,
+                viz_dir,
+                epoch=self.current_epoch,
+                batch_idx=batch_idx,
+                save_wandb=save_wandb,
+                tag="scene_plot_gt",
+                adv_samples=gt_adv,
+                adv_batch=adv_batch,
+                adv_types=gt_adv_types,
+            )
+            if save_wandb and images_to_log_batch is not None and gt_images is not None:
+                images_to_log_batch.update(gt_images)
         else:
             images_to_log_batch = None
 

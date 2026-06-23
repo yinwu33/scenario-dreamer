@@ -1,0 +1,34 @@
+# ldm_adv latent-diffusion training on Waymo (normal-agent + one adversarial
+# agent per scene), diffusing the goal-autoencoder latents.
+#
+# Usage:
+#   python train.py --config-name config_ldm_adv_train
+#
+# Reuses the pre-trained goal autoencoder (scenario_dreamer_ae_goal_waymo) and
+# its exported latent cache (scenario_dreamer_ae_goal_latents_waymo) -- the
+# autoencoder is unaware of the adversary, the adv is split off at load time.
+
+model_name: ldm_adv
+
+defaults:
+  - _base
+  - dataset_name: waymo
+  - ldm_adv/dataset@ldm_adv.dataset
+  - ldm_adv/train@ldm_adv.train
+  - ldm_adv/eval@ldm_adv.eval
+  - ldm_adv/model@ldm_adv.model
+  - ldm_adv/datamodule@ldm_adv.datamodule
+  # the (frozen) goal autoencoder cfg, loaded by the LDM lightning module
+  - dataset@ae_goal.dataset: waymo_ae_goal
+  - train@ae_goal.train: waymo_ae_goal
+  - eval@ae_goal.eval: waymo_ae_goal
+  - model@ae_goal.model: waymo_ae_goal
+  - datamodule@ae_goal.datamodule: waymo_ae_goal
+  - sim: base
+  - _self_
+
+ldm_adv:
+  train:
+    devices: 1
+    track: True
+    run_name: scenario_dreamer_ldm_adv_train

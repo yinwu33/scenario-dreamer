@@ -171,13 +171,17 @@ class DiT(nn.Module):
         a2a_edge_index = data['agent', 'to', 'agent'].edge_index
         l2a_edge_index = data['lane', 'to', 'agent'].edge_index.clone()
         l2a_edge_index[1] = l2a_edge_index[1] + x_lane.shape[0]
+        # Bipartite lane+agent -> adv edges for the la2adv cross-attention block.
+        # Sources index into the concatenated [lane; agent] key/value tensor;
+        # destinations are the per-scene adv tokens (one per scene), so dst is
+        # simply the scene index (lane_batch / agent_batch).
         lane_to_adv_edge_index = torch.stack([
             torch.arange(x_lane.shape[0], device=x_lane.device),
-            lane_batch + x_lane.shape[0] + x_agent.shape[0],
+            lane_batch,
         ], dim=0)
         agent_to_adv_edge_index = torch.stack([
             torch.arange(x_agent.shape[0], device=x_agent.device) + x_lane.shape[0],
-            agent_batch + x_lane.shape[0] + x_agent.shape[0],
+            agent_batch,
         ], dim=0)
         la2adv_edge_index = torch.cat([lane_to_adv_edge_index, agent_to_adv_edge_index], dim=1)
         

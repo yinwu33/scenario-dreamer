@@ -5,28 +5,33 @@ from typing import Any
 
 import hydra
 import numpy as np
-import torch
 from torch_geometric.data import Dataset
 
 from cfgs.config import CONFIG_PATH, NON_PARTITIONED
 from utils.data_container import ScenarioDreamerData
-from utils.data_helpers import normalize_scene, randomize_indices, reorder_indices
+from utils.data_helpers import modify_agent_states, normalize_scene, randomize_indices, reorder_indices
+from utils.pyg_helpers import get_edge_index_bipartite, get_edge_index_complete_graph
 from utils.torch_helpers import from_numpy
 
 
 class WaymoDatasetDMAdv(Dataset):
-    """Waymo vectorized scene dataset for direct diffusion training with one
-    adversarial agent per scene.
+    """Waymo direct-diffusion dataset that generates the current scene **and**
+    per-agent goals, with one adversarial agent split off per scene.
 
-    Reuses the exact preprocessed pkls of the plain ``dm`` dataset and, on the
-    fly, splits off a single non-ego agent into a separate ``adv`` node type
-    (removing it from the normal ``agent`` set). The remaining agents are the
-    context the adversary is conditioned on. Partitioning is ignored.
+    Mirrors ``WaymoDatasetDMGoal``: it reads the goal-augmented preprocessed pkls
+    (``scene_goal_preprocess_waymo``), keeps only agents with a valid clipped
+    goal, and builds a ``state_dim == 9`` agent layout
+    ``[x, y, speed, cosθ, sinθ, length, width, goal_x, goal_y]``. After the
+    deterministic ego-first ordering it splits a single non-ego agent off into a
+    separate ``adv`` node type (which therefore also carries a goal); the
+    remaining agents are the context the adversary is conditioned on. The
+    agent-to-agent and lane-to-agent graphs are rebuilt fresh over the reduced
+    agent set (exactly like the goal dataset rebuilds them from scratch).
 
-    Scenes with fewer than two agents (i.e. no non-ego agent to act as the
-    adversary) are dropped by returning ``None`` -- the same convention used by
-    the goal dataset -- so the adversary distribution stays pure (only real
-    non-ego agents) and every retained scene has exactly one ``adv`` node.
+    Scenes with fewer than two valid-goal agents (i.e. no non-ego agent to act as
+    the adversary) are dropped by returning ``None`` so the adversary
+    distribution stays pure (only real non-ego agents) and every retained scene
+    has exactly one ``adv`` node.
     """
 
     def __init__(self, cfg: Any, split_name: str = "train", mode: str = "train") -> None:
@@ -38,23 +43,6 @@ class WaymoDatasetDMAdv(Dataset):
         self.files = sorted(glob.glob(os.path.join(self.dataset_dir, "*.pkl")))
         self.dset_len = len(self.files)
 
-        self.nocturne_compatible_filenames = set()
-        if hasattr(self.cfg, "nocturne_train_filenames_path") and os.path.exists(self.cfg.nocturne_train_filenames_path):
-            with open(self.cfg.nocturne_train_filenames_path, "rb") as f:
-                self.nocturne_compatible_filenames.update(pickle.load(f))
-        if hasattr(self.cfg, "nocturne_val_filenames_path") and os.path.exists(self.cfg.nocturne_val_filenames_path):
-            with open(self.cfg.nocturne_val_filenames_path, "rb") as f:
-                self.nocturne_compatible_filenames.update(pickle.load(f))
-
-    def _get_map_id(self, path):
-        filename = os.path.basename(path)
-        parts = filename.split(".")
-        if len(parts) > 1:
-            scene_key = "_".join(parts[1].split("_")[:2])
-        else:
-            scene_key = "_".join(os.path.splitext(filename)[0].split("_")[:2])
-        return int(scene_key in self.nocturne_compatible_filenames)
-
     def _select_adv_index(self, num_agents):
         """Pick the index of the single adversarial agent: a random non-ego
         agent (ego is index 0 and never selected). Deterministic outside of
@@ -64,47 +52,34 @@ class WaymoDatasetDMAdv(Dataset):
             return int(np.random.choice(non_ego))
         return int(non_ego[0])
 
-    def _remove_agent(self, remove_idx, agent_states, agent_types, a2a_edge_index, l2a_edge_index):
-        """Drop ``remove_idx`` from the agent set and reindex the (complete)
-        a2a / l2a graphs so the remaining agents are contiguous 0..N-2."""
-        num_agents = agent_states.shape[0]
-        keep = np.ones(num_agents, dtype=bool)
-        keep[remove_idx] = False
-        # old agent index -> new agent index (removed node maps to -1, never used).
-        old_to_new = np.cumsum(keep) - 1
-        old_to_new[remove_idx] = -1
-
-        agent_states = agent_states[keep]
-        agent_types = agent_types[keep]
-
-        a2a = np.asarray(a2a_edge_index)
-        if a2a.shape[1] > 0:
-            a2a_keep = (a2a[0] != remove_idx) & (a2a[1] != remove_idx)
-            a2a = old_to_new[a2a[:, a2a_keep]]
-
-        l2a = np.asarray(l2a_edge_index)
-        if l2a.shape[1] > 0:
-            l2a_keep = l2a[1] != remove_idx
-            l2a = l2a[:, l2a_keep]
-            l2a = np.stack([l2a[0], old_to_new[l2a[1]]], axis=0)
-
-        return agent_states, agent_types, a2a, l2a
-
     def get_data(self, data, idx, path=None):
-        num_agents = int(data["num_agents"])
-        # Need the ego plus at least one non-ego agent to act as the adversary.
-        if num_agents < 2:
+        valid_goal_mask = data["clipped_final_valid"].astype(bool)
+        # Need the ego plus at least one non-ego agent to act as the adversary,
+        # and every retained agent must have a valid goal.
+        if valid_goal_mask.sum() < 2:
             return None
 
-        agent_states = data["agent_states"]
-        agent_types = data["agent_types"]
+        # Preprocessed states are raw [x, y, vx, vy, yaw, length, width]; convert
+        # to the [x, y, speed, cosθ, sinθ, length, width] convention and append
+        # the clipped goal position -> [..., goal_x, goal_y] (state_dim == 9).
+        agent_states = modify_agent_states(data["agent_states"][valid_goal_mask])
+        agent_goal_xy = data["clipped_final_states"][valid_goal_mask, :2]
+        agent_states = np.concatenate([agent_states, agent_goal_xy], axis=-1)
+        agent_types = data["agent_types"][valid_goal_mask]
+
+        # Cap the agent count (closest-to-origin agents); the ego sits at the
+        # origin so it always survives and stays at index 0.
+        if len(agent_states) > self.cfg.max_num_agents:
+            dist_to_origin = np.linalg.norm(agent_states[:, :2], axis=-1)
+            closest_agent_ids = np.argsort(dist_to_origin)[: self.cfg.max_num_agents]
+            agent_states = agent_states[closest_agent_ids]
+            agent_types = agent_types[closest_agent_ids]
+
         road_points = data["road_points"]
+        num_lanes = int(data["num_lanes"])
         edge_index_lane_to_lane = data["edge_index_lane_to_lane"]
-        edge_index_lane_to_agent = data["edge_index_lane_to_agent"]
-        edge_index_agent_to_agent = data["edge_index_agent_to_agent"]
         road_connection_types = data["road_connection_types"]
         lg_type = int(data.get("lg_type", NON_PARTITIONED))
-        num_lanes = int(data["num_lanes"])
 
         agent_states, road_points = normalize_scene(
             agent_states,
@@ -144,38 +119,33 @@ class WaymoDatasetDMAdv(Dataset):
             dataset="waymo",
         )
 
-        # Split off the single adversarial agent from the normal agent set.
+        # Split off the single adversarial agent (with its goal) from the normal
+        # agent set, then rebuild the agent graphs over the reduced agent set.
         adv_idx = self._select_adv_index(agent_states.shape[0])
         adv_states = agent_states[adv_idx:adv_idx + 1]
         adv_types = agent_types[adv_idx:adv_idx + 1]
-        (
-            agent_states,
-            agent_types,
-            edge_index_agent_to_agent,
-            edge_index_lane_to_agent,
-        ) = self._remove_agent(
-            adv_idx,
-            agent_states,
-            agent_types,
-            edge_index_agent_to_agent,
-            edge_index_lane_to_agent,
-        )
+        keep = np.ones(agent_states.shape[0], dtype=bool)
+        keep[adv_idx] = False
+        agent_states = agent_states[keep]
+        agent_types = agent_types[keep]
 
-        num_agents = agent_states.shape[0]
+        num_agents = int(agent_states.shape[0])
+        edge_index_lane_to_agent = get_edge_index_bipartite(num_lanes, num_agents).numpy()
+        edge_index_agent_to_agent = get_edge_index_complete_graph(num_agents).numpy()
 
         d = ScenarioDreamerData()
         d["idx"] = data.get("idx", idx)
         d["num_lanes"] = int(num_lanes)
         d["num_agents"] = int(num_agents)
         d["lg_type"] = int(lg_type)
-        d["map_id"] = self._get_map_id(path) if path is not None else 0
-        d["agent"].x = from_numpy(agent_states)
-        d["agent"].type = from_numpy(agent_types)
-        d["lane"].x = from_numpy(road_points)
-        d["adv"].x = from_numpy(adv_states)
-        d["adv"].type = from_numpy(adv_types)
+        d["map_id"] = int(data.get("map_id", 0))
+        d["agent"].x = from_numpy(agent_states.astype(np.float32))
+        d["agent"].type = from_numpy(agent_types.astype(np.float32))
+        d["lane"].x = from_numpy(road_points.astype(np.float32))
+        d["adv"].x = from_numpy(adv_states.astype(np.float32))
+        d["adv"].type = from_numpy(adv_types.astype(np.float32))
         d["lane", "to", "lane"].edge_index = from_numpy(edge_index_lane_to_lane)
-        d["lane", "to", "lane"].type = from_numpy(road_connection_types)
+        d["lane", "to", "lane"].type = from_numpy(road_connection_types.astype(np.float32))
         d["agent", "to", "agent"].edge_index = from_numpy(edge_index_agent_to_agent)
         d["lane", "to", "agent"].edge_index = from_numpy(edge_index_lane_to_agent)
 
@@ -193,8 +163,8 @@ class WaymoDatasetDMAdv(Dataset):
 
 @hydra.main(version_base=None, config_path=CONFIG_PATH, config_name="config")
 def main(cfg):
-    dset = WaymoDatasetDMAdv(cfg.dm.dataset, split_name="train")
-    print(cfg.dm.dataset.preprocess_dir)
+    dset = WaymoDatasetDMAdv(cfg.dm_adv.dataset, split_name="train")
+    print(cfg.dm_adv.dataset.preprocess_dir)
     print(len(dset))
     if len(dset) > 0:
         print(dset.get(0))

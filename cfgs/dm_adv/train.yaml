@@ -12,9 +12,9 @@ weight_decay: 1e-5
 check_val_every_n_epoch: 2
 ema_decay: 0.9999
 devices: 1
-# Viz of the adversary is disabled by default (the base scene viz does not draw
-# the separate adv node); set > 0 to render the normal agents + lanes.
-num_samples_to_visualize: 0
+# Number of validation scenes to render each viz epoch: lanes + normal agents,
+# with the adversarial agent overlaid in green (matches dm/ldm scene plots).
+num_samples_to_visualize: 8
 viz_dir: ${project_root}/viz_val_${dm_adv.train.run_name}
 
 lane_weight: 10

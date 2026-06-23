@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from itertools import repeat
 import collections.abc
 from torch_geometric.nn.conv import MessagePassing
@@ -89,21 +90,28 @@ class AttentionLayerDiT(MessagePassing):
         inputs = inputs.view(-1, self.num_heads * self.head_dim)
         return inputs
 
-    def _attn_block(self, x_src, x_dst, edge_index):
+    def _attn_block(self, x_src, x_dst, edge_index, size=None):
         q = self.to_q(x_dst).view(-1, self.num_heads, self.head_dim)
         k = self.to_k(x_src).view(-1, self.num_heads, self.head_dim)
         v = self.to_v(x_src).view(-1, self.num_heads, self.head_dim)
 
         q, k = self.q_norm(q), self.k_norm(k)
-        x_dst =  self.propagate(edge_index=edge_index, q=q, k=k, v=v)
+        x_dst =  self.propagate(edge_index=edge_index, q=q, k=k, v=v, size=size)
 
         x_dst = self.proj(x_dst)
         x_dst = self.proj_drop(x_dst)
         return x_dst
-    
+
     def forward(self, x, edge_index):
         x_src = x_dst = x
         return self._attn_block(x_src, x_dst, edge_index)
+
+    def forward_cross(self, x_src, x_dst, edge_index):
+        """Bipartite cross-attention: queries come from ``x_dst``, keys/values
+        from ``x_src`` (both already normalized/modulated). ``edge_index`` rows
+        index into ``x_src`` (sources) and ``x_dst`` (destinations) respectively.
+        Only the ``len(x_dst)`` destination outputs are computed."""
+        return self._attn_block(x_src, x_dst, edge_index, size=(x_src.shape[0], x_dst.shape[0]))
 
 
 class Mlp(nn.Module):
@@ -238,12 +246,40 @@ class DiTBlock(nn.Module):
 
     def forward(self, x, c, edge_index):
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(c).chunk(6, dim=1)
-        
+
         x = x + gate_msa * self.attn(modulate(self.norm1(x), shift_msa, scale_msa), edge_index)
         x = x + gate_mlp * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
 
         return x
-    
+
+    def forward_cross(self, x_dst, x_src, c_dst, c_src, edge_index):
+        """Cross-attention variant of ``forward``.
+
+        Only ``x_dst`` nodes are queried and updated; ``x_src`` nodes act purely
+        as keys/values. This is numerically identical to concatenating
+        ``[x_src, x_dst]``, calling ``forward`` with ``edge_index`` pointing
+        src -> dst, and keeping the ``x_dst`` slice -- but it avoids running the
+        attention output-projection and MLP over the ``x_src`` tokens whose
+        outputs would be discarded.
+        """
+        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(c_dst).chunk(6, dim=1)
+
+        # Source tokens only feed norm1 -> keys/values, so they need just the
+        # msa shift/scale. Slice the (shared) adaLN linear to compute the first
+        # 2*hidden outputs only, skipping the unused gate/mlp modulation params.
+        lin = self.adaLN_modulation[-1]
+        msa_dim = 2 * lin.in_features
+        shift_msa_src, scale_msa_src = F.linear(
+            self.adaLN_modulation[0](c_src), lin.weight[:msa_dim], lin.bias[:msa_dim]
+        ).chunk(2, dim=1)
+
+        x_dst_norm = modulate(self.norm1(x_dst), shift_msa, scale_msa)
+        x_src_norm = modulate(self.norm1(x_src), shift_msa_src, scale_msa_src)
+
+        x_dst = x_dst + gate_msa * self.attn.forward_cross(x_src_norm, x_dst_norm, edge_index)
+        x_dst = x_dst + gate_mlp * self.mlp(modulate(self.norm2(x_dst), shift_mlp, scale_mlp))
+        return x_dst
+
 
 class FactorizedDiTBlock(nn.Module):
     """
@@ -310,13 +346,15 @@ class FactorizedDiTBlock(nn.Module):
         c_agent = c_small[num_lanes:num_lanes + num_agents]
         x_agent = self.a2a_block(x_agent, c_agent, a2a_edge_index)
         
-        # lane-agent-to-adv
+        # lane-agent-to-adv (cross-attention: the per-scene adv tokens are the
+        # only queries; lanes+agents are keys/values only. The attn-projection
+        # and MLP run on the adv tokens alone, instead of on every lane+agent
+        # token whose output was previously discarded.)
         c_lane_small = c_small[:num_lanes]
         c_adv = c_small[num_lanes + num_agents:]
-        x_lane_agent_adv = torch.cat([self.downsample_x_lane_to_adv(x_lane), x_agent, x_adv], dim=0)
-        c_la2adv = torch.cat([c_lane_small, c_agent, c_adv], dim=0)
-        x_lane_agent_adv = self.la2adv_block(x_lane_agent_adv, c_la2adv, la2adv_edge_index)
-        x_adv = x_lane_agent_adv[num_lanes + num_agents:]
+        x_src = torch.cat([self.downsample_x_lane_to_adv(x_lane), x_agent], dim=0)
+        c_src = torch.cat([c_lane_small, c_agent], dim=0)
+        x_adv = self.la2adv_block.forward_cross(x_adv, x_src, c_adv, c_src, la2adv_edge_index)
 
         return x_lane, x_agent, x_adv
     

@@ -2,11 +2,10 @@ defaults:
 - /dataset/waymo_base@_here_
 - _self_
 
-# dm_adv reuses the exact preprocessed pkls of the plain dm dataset; the single
-# adversarial agent is split off on the fly from the existing agents.
+# dm_adv reuses the exact goal-augmented preprocessed pkls of the dm_goal
+# dataset (per-agent goals); the single adversarial agent is split off on the
+# fly from the existing agents and therefore also carries a goal.
 dataset_path: ${dataset_root}/scenario_dreamer_waymo
-preprocess_dir: ${dataset_root}/scenario_dreamer_ae_preprocess_waymo
+preprocess_dir: ${dataset_root}/scene_goal_preprocess_waymo
 generate_only_vehicles: False
 remove_left_right_connections: False
-nocturne_train_filenames_path: ${project_root}/metadata/nocturne_train_filenames.pkl
-nocturne_val_filenames_path: ${project_root}/metadata/nocturne_val_filenames.pkl

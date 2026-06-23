@@ -4,7 +4,7 @@ import pytorch_lightning as pl
 from torch.utils.data import DataLoader
 from torch_geometric.loader.dataloader import Collater
 
-from datasets.waymo.dataset_dm_adv_waymo import WaymoDatasetDMAdv
+from datasets.waymo.dataset_ldm_adv_waymo import WaymoDatasetLDMAdv
 
 
 def worker_init_fn(worker_id):
@@ -14,12 +14,12 @@ def worker_init_fn(worker_id):
 class _FilterNoneCollater(Collater):
     """PyG collater that drops samples the dataset returned as ``None``.
 
-    ``WaymoDatasetDMAdv`` returns ``None`` for scenes with fewer than two agents
-    (no non-ego agent to act as the adversary), which is common in Waymo. Those
-    entries must be removed before collating -- the default PyG ``Collater``
-    crashes on ``None`` (``'NoneType' object has no attribute 'stores'``). We use
-    a plain ``torch`` ``DataLoader`` with this collater because PyG's own
-    ``DataLoader`` discards any ``collate_fn`` it is given.
+    ``WaymoDatasetLDMAdv`` returns ``None`` for scenes with fewer than two agents
+    (no non-ego agent to act as the adversary). Those entries must be removed
+    before collating -- the default PyG ``Collater`` crashes on ``None``
+    (``'NoneType' object has no attribute 'stores'``). We use a plain ``torch``
+    ``DataLoader`` with this collater because PyG's own ``DataLoader`` discards
+    any ``collate_fn`` it is given.
     """
 
     def __call__(self, batch):
@@ -27,7 +27,7 @@ class _FilterNoneCollater(Collater):
         return super().__call__(batch)
 
 
-class WaymoDataModuleDMAdv(pl.LightningDataModule):
+class WaymoDataModuleLDMAdv(pl.LightningDataModule):
     def __init__(
         self,
         train_batch_size,
@@ -37,7 +37,7 @@ class WaymoDataModuleDMAdv(pl.LightningDataModule):
         persistent_workers,
         dataset_cfg,
     ):
-        super(WaymoDataModuleDMAdv, self).__init__()
+        super(WaymoDataModuleLDMAdv, self).__init__()
         self.train_batch_size = train_batch_size
         self.val_batch_size = val_batch_size
         self.num_workers = num_workers
@@ -46,8 +46,8 @@ class WaymoDataModuleDMAdv(pl.LightningDataModule):
         self.cfg_dataset = dataset_cfg
 
     def setup(self, stage):
-        self.train_dataset = WaymoDatasetDMAdv(self.cfg_dataset, split_name="train", mode="train")
-        self.val_dataset = WaymoDatasetDMAdv(self.cfg_dataset, split_name="val", mode="eval")
+        self.train_dataset = WaymoDatasetLDMAdv(self.cfg_dataset, split_name="train", mode="train")
+        self.val_dataset = WaymoDatasetLDMAdv(self.cfg_dataset, split_name="val", mode="eval")
 
     def train_dataloader(self):
         return DataLoader(
