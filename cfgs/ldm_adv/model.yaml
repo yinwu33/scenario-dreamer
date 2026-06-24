@@ -8,12 +8,20 @@ defaults:
 autoencoder_run_name: scenario_dreamer_ae_goal_waymo # the goal autoencoder run
 autoencoder_path: ${scratch_root}/checkpoints/${ldm_adv.model.autoencoder_run_name}/last.ckpt
 
-# Adversary conditioning (adv-only): embed the discretized type/motion/distance
-# labels (see ldm_adv.dataset.adv_cond_*) and add them onto the adv stream's
-# conditioning vector inside the DiT. Plain conditioning (no classifier-free
-# guidance); the embeddings live in the adv-only trainable set so adv_only / DDPO
-# finetuning keeps them learnable. Toggle off to recover the unconditioned model.
+# Conditioning: embed the discretized labels (see ldm_adv.dataset.cond_*) and add
+# them onto the agent / adv streams' conditioning vectors inside the DiT.
+#   normal agent: [type, motion, goal_dist]
+#   adversary:    [type, motion, goal_dist, ego_dist]
+# cond_dropout_prob (> 0) gives each embedder a null index used for the per-agent
+# unconditional dropout, so uncontrolled agents can be left unconditioned at
+# inference (set data["agent"].cond_drop = 1 for them). No classifier-free
+# guidance scaling. The adv embedders live in the adv-only trainable set so
+# adv_only / DDPO finetuning keeps them learnable; the agent embedders are part
+# of the frozen base. Toggle either flag off to recover an unconditioned stream.
+use_agent_conditioning: true
 use_adv_conditioning: true
-adv_cond_num_types: 3  # vehicle / pedestrian / cyclist (matches dataset.num_agent_types)
-adv_cond_num_motion: 2 # parked / moving
-adv_cond_num_dist: 3   # near / middle / far
+cond_dropout_prob: 0.2  # per-agent unconditional dropout (must be > 0 when conditioning)
+cond_num_types: 3       # vehicle / pedestrian / cyclist (matches dataset.num_agent_types)
+cond_num_motion: 2      # parked / moving
+cond_num_goaldist: 3    # near / middle / far (goal-spawn travel distance)
+cond_num_egodist: 3     # near / middle / far (adversary distance to ego; adv only)

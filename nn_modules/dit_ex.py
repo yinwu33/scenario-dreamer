@@ -33,14 +33,33 @@ class DiT(nn.Module):
         self.agent_embedder = TwoLayerResMLP(self.cfg_model.agent_latent_dim, self.cfg_model.agent_hidden_dim)
         self.adv_embedder = TwoLayerResMLP(self.adv_latent_dim, self.cfg_model.agent_hidden_dim)
 
-        # Optional adv-only conditioning: discretized type / motion / distance
-        # labels embedded and added onto the adv stream's conditioning vector.
-        # Plain conditioning (dropout_prob=0, no classifier-free guidance).
+        # Optional conditioning: discretized labels embedded and added onto the
+        # agent / adv streams' conditioning vectors. ``cond_dropout_prob`` (> 0)
+        # gives every embedder a null index, used for the per-agent unconditional
+        # dropout -- so uncontrolled agents (whose conditions we don't care about
+        # at inference) can be left unconditioned. No classifier-free guidance
+        # scaling; conditioning is either the real label or the null token.
+        #   normal agent: [type, motion, goal_dist]
+        #   adversary:    [type, motion, goal_dist, ego_dist]
         self.use_adv_conditioning = bool(self.cfg_model.get("use_adv_conditioning", False))
+        self.use_agent_conditioning = bool(self.cfg_model.get("use_agent_conditioning", False))
+        self.cond_dropout_prob = float(self.cfg_model.get("cond_dropout_prob", 0.0))
+        if (self.use_adv_conditioning or self.use_agent_conditioning) and self.cond_dropout_prob <= 0:
+            raise ValueError(
+                "cond_dropout_prob must be > 0 when conditioning is enabled "
+                "(needed for the null/unconditional token)."
+            )
+
+        if self.use_agent_conditioning:
+            self.agent_type_embedder = LabelEmbedder(self.cfg_model.cond_num_types, self.cfg_model.hidden_dim, self.cond_dropout_prob)
+            self.agent_motion_embedder = LabelEmbedder(self.cfg_model.cond_num_motion, self.cfg_model.hidden_dim, self.cond_dropout_prob)
+            self.agent_goaldist_embedder = LabelEmbedder(self.cfg_model.cond_num_goaldist, self.cfg_model.hidden_dim, self.cond_dropout_prob)
+
         if self.use_adv_conditioning:
-            self.adv_type_embedder = LabelEmbedder(self.cfg_model.adv_cond_num_types, self.cfg_model.hidden_dim, 0)
-            self.adv_motion_embedder = LabelEmbedder(self.cfg_model.adv_cond_num_motion, self.cfg_model.hidden_dim, 0)
-            self.adv_dist_embedder = LabelEmbedder(self.cfg_model.adv_cond_num_dist, self.cfg_model.hidden_dim, 0)
+            self.adv_type_embedder = LabelEmbedder(self.cfg_model.cond_num_types, self.cfg_model.hidden_dim, self.cond_dropout_prob)
+            self.adv_motion_embedder = LabelEmbedder(self.cfg_model.cond_num_motion, self.cfg_model.hidden_dim, self.cond_dropout_prob)
+            self.adv_goaldist_embedder = LabelEmbedder(self.cfg_model.cond_num_goaldist, self.cfg_model.hidden_dim, self.cond_dropout_prob)
+            self.adv_egodist_embedder = LabelEmbedder(self.cfg_model.cond_num_egodist, self.cfg_model.hidden_dim, self.cond_dropout_prob)
         
         # These will be overwritten by sin/cos positional encodings
         self.pos_emb_lane = nn.Parameter(torch.zeros(self.cfg_dataset.max_num_lanes, self.cfg_model.hidden_dim), requires_grad=False)
@@ -86,11 +105,16 @@ class DiT(nn.Module):
         nn.init.normal_(self.num_agents_embedder.embedding_table.weight, std=0.02)
         nn.init.normal_(self.num_lanes_embedder.embedding_table.weight, std=0.02)
 
-        # Initialize adv conditioning embedding tables:
+        # Initialize conditioning embedding tables (null row included):
+        if self.use_agent_conditioning:
+            nn.init.normal_(self.agent_type_embedder.embedding_table.weight, std=0.02)
+            nn.init.normal_(self.agent_motion_embedder.embedding_table.weight, std=0.02)
+            nn.init.normal_(self.agent_goaldist_embedder.embedding_table.weight, std=0.02)
         if self.use_adv_conditioning:
             nn.init.normal_(self.adv_type_embedder.embedding_table.weight, std=0.02)
             nn.init.normal_(self.adv_motion_embedder.embedding_table.weight, std=0.02)
-            nn.init.normal_(self.adv_dist_embedder.embedding_table.weight, std=0.02)
+            nn.init.normal_(self.adv_goaldist_embedder.embedding_table.weight, std=0.02)
+            nn.init.normal_(self.adv_egodist_embedder.embedding_table.weight, std=0.02)
 
         # Initialize timestep embedding MLP:
         nn.init.normal_(self.t_embedder.mlp[0].weight, std=0.02)
@@ -140,7 +164,8 @@ class DiT(nn.Module):
             adv_modules.extend([
                 self.adv_type_embedder,
                 self.adv_motion_embedder,
-                self.adv_dist_embedder,
+                self.adv_goaldist_embedder,
+                self.adv_egodist_embedder,
             ])
         for block in self.blocks:
             adv_modules.extend([
@@ -153,13 +178,25 @@ class DiT(nn.Module):
                 parameter.requires_grad_(True)
 
 
-    def forward(self, 
-                x_lane, 
+    def _cond_drop_mask(self, num_tokens, store, device):
+        """Per-token (per-agent / per-adv) dropout mask, shared across all of a
+        token's labels so each token is conditioned all-or-nothing (never on a
+        partial label subset). Random while training; otherwise an explicit
+        ``cond_drop`` mask if the caller provides one (inference: drop the agents
+        whose conditions are irrelevant); else ``None`` (use the labels as given)."""
+        if self.training and self.cond_dropout_prob > 0:
+            return (torch.rand(num_tokens, device=device) < self.cond_dropout_prob).long()
+        if "cond_drop" in store:
+            return store.cond_drop.long().to(device)
+        return None
+
+    def forward(self,
+                x_lane,
                 x_agent,
                 x_adv,
-                data, 
-                agent_timestep, 
-                lane_timestep, 
+                data,
+                agent_timestep,
+                lane_timestep,
                 adv_timestep):
         """ Forward pass of the DiT model."""
         if x_adv.shape[0] != data.batch_size:
@@ -189,18 +226,48 @@ class DiT(nn.Module):
         num_lanes_emb_per_lane = num_lanes_emb[lane_batch]
         num_context_emb_per_adv = num_agents_emb + num_lanes_emb
 
-        # Adv-only conditioning: add the embedded [type, motion, dist] labels onto
-        # the adv stream's context embedding (one adv token per scene, so this is
-        # per-scene). Only feeds num_context_emb_per_adv -> c_adv, so the lane and
-        # normal-agent streams are untouched. Skipped when labels are absent (e.g.
-        # an un-conditioned DDPO rollout) so the model still runs.
-        if self.use_adv_conditioning and ("cond" in data["adv"]):
-            cond = data["adv"].cond.long()
+        # Per-agent conditioning: add the embedded [type, motion, goal_dist] labels
+        # onto each normal-agent token's context embedding. One drop mask per agent
+        # is shared across its three labels (all-or-nothing). When labels are absent
+        # (e.g. init_adv / a DDPO rollout where the agents are given) every agent is
+        # treated as the trained null state -- the same distribution training saw
+        # for a fully-dropped agent -- rather than dropping the term entirely.
+        if self.use_agent_conditioning:
+            device = num_agents_emb_per_agent.device
+            n_agent = num_agents_emb_per_agent.shape[0]
+            if "cond" in data["agent"]:
+                agent_cond = data["agent"].cond.long()
+                drop = self._cond_drop_mask(n_agent, data["agent"], device)
+            else:
+                agent_cond = torch.zeros((n_agent, 3), dtype=torch.long, device=device)
+                drop = torch.ones(n_agent, dtype=torch.long, device=device)
+            num_agents_emb_per_agent = (
+                num_agents_emb_per_agent
+                + self.agent_type_embedder(agent_cond[:, 0], train=self.training, force_drop_ids=drop)
+                + self.agent_motion_embedder(agent_cond[:, 1], train=self.training, force_drop_ids=drop)
+                + self.agent_goaldist_embedder(agent_cond[:, 2], train=self.training, force_drop_ids=drop)
+            )
+
+        # Adv conditioning: add the embedded [type, motion, goal_dist, ego_dist]
+        # labels onto the adv stream's context embedding (one adv token per scene,
+        # so this is per-scene). Only feeds num_context_emb_per_adv -> c_adv, so the
+        # lane and normal-agent streams are untouched by the adv labels. Cond-absent
+        # is treated as the trained null state (see the agent branch above).
+        if self.use_adv_conditioning:
+            device = num_context_emb_per_adv.device
+            n_adv = num_context_emb_per_adv.shape[0]
+            if "cond" in data["adv"]:
+                adv_cond = data["adv"].cond.long()
+                drop = self._cond_drop_mask(n_adv, data["adv"], device)
+            else:
+                adv_cond = torch.zeros((n_adv, 4), dtype=torch.long, device=device)
+                drop = torch.ones(n_adv, dtype=torch.long, device=device)
             num_context_emb_per_adv = (
                 num_context_emb_per_adv
-                + self.adv_type_embedder(cond[:, 0], train=self.training)
-                + self.adv_motion_embedder(cond[:, 1], train=self.training)
-                + self.adv_dist_embedder(cond[:, 2], train=self.training)
+                + self.adv_type_embedder(adv_cond[:, 0], train=self.training, force_drop_ids=drop)
+                + self.adv_motion_embedder(adv_cond[:, 1], train=self.training, force_drop_ids=drop)
+                + self.adv_goaldist_embedder(adv_cond[:, 2], train=self.training, force_drop_ids=drop)
+                + self.adv_egodist_embedder(adv_cond[:, 3], train=self.training, force_drop_ids=drop)
             )
 
         # embedding of timestep

@@ -17,6 +17,7 @@ from dataclasses import dataclass
 
 import numpy as np
 import torch
+from omegaconf import OmegaConf
 from torch_geometric.data import Batch
 
 from cfgs.config import NON_PARTITIONED, PARTITIONED
@@ -316,6 +317,52 @@ class LDMGoalConditioningPool:
         return self.batch_from_indices(idx), group_ids
 
 
+# --- adv-conditioning target vocabulary ------------------------------------
+# Symbolic name -> bucket id, and the number of buckets per field. These match
+# the discretization in WaymoDatasetLDMAdv._adv_condition (type one-hot argmax;
+# motion binary parked/moving; goal_dist / ego_dist near/middle/far buckets).
+_ADV_COND_FIELDS = ("type", "motion", "goal_dist", "ego_dist")
+_ADV_COND_VOCAB = {
+    "type": {"vehicle": 0, "car": 0, "veh": 0, "pedestrian": 1, "ped": 1, "cyclist": 2, "cyc": 2},
+    "motion": {"parked": 0, "static": 0, "stationary": 0, "moving": 1},
+    "goal_dist": {"near": 0, "middle": 1, "mid": 1, "far": 2},
+    "ego_dist": {"near": 0, "middle": 1, "mid": 1, "far": 2},
+}
+_ADV_COND_NUM = {"type": 3, "motion": 2, "goal_dist": 3, "ego_dist": 3}
+
+
+def _resolve_adv_label(field: str, value) -> int:
+    """Map one adv-cond value (int bucket id or symbolic name) to its bucket id."""
+    if isinstance(value, str):
+        key = value.strip().lower()
+        vocab = _ADV_COND_VOCAB[field]
+        if key not in vocab:
+            raise ValueError(
+                f"unknown {field} label {value!r}; expected one of "
+                f"{sorted(set(vocab))} or an int in [0, {_ADV_COND_NUM[field] - 1}]"
+            )
+        return vocab[key]
+    v = int(value)
+    if not 0 <= v < _ADV_COND_NUM[field]:
+        raise ValueError(
+            f"{field} bucket {v} out of range [0, {_ADV_COND_NUM[field] - 1}]"
+        )
+    return v
+
+
+def _parse_adv_field(field: str, spec) -> list:
+    """One field's config value -> list of candidate bucket ids that the per-scene
+    draw samples from. ``None`` (or an empty list) -> every bucket (unconstrained);
+    a list/tuple -> that explicit set; a scalar -> a single fixed value."""
+    if spec is None:
+        return list(range(_ADV_COND_NUM[field]))
+    if isinstance(spec, (list, tuple)):
+        if len(spec) == 0:
+            return list(range(_ADV_COND_NUM[field]))
+        return [_resolve_adv_label(field, v) for v in spec]
+    return [_resolve_adv_label(field, spec)]
+
+
 class LDMAdvConditioningPool:
     """Conditioning pool for ldm_adv DDPO (init_adv flow).
 
@@ -364,14 +411,21 @@ class LDMAdvConditioningPool:
         self.dataset_cfg = dataset_cfg
         self.device = device
         self.rng = np.random.default_rng(seed)
+        # Base seed for the per-scene (deterministic) adv-cond draw; kept separate
+        # from self.rng so the sampled target depends only on (seed, scene_idx),
+        # not on pool draw order -> constant within a GRPO group and across epochs.
+        self.adv_cond_seed = int(seed)
         self.min_ego_drive = float(min_ego_drive)
         self.prune_base_to_ego = bool(prune_base_to_ego)
         self.fov = float(dataset_cfg.fov)
-        # Fixed adversary conditioning target (type/motion/dist label triple). The
-        # adv is generated from noise, so the real adv's labels are irrelevant --
-        # override them with the desired target so the conditioned base model
-        # samples the requested adversary category (e.g. car / moving / near).
-        # None (or enabled=false) keeps each scene's real adv labels.
+        # Adversary conditioning target as per-field candidate bucket lists
+        # ({type, motion, goal_dist, ego_dist} -> [int, ...]). The adv is generated
+        # from noise, so the real adv's labels are irrelevant -- a per-scene draw
+        # from these candidates overrides them so the conditioned base model samples
+        # the requested adversary category. Each field can be fixed (a single
+        # value), randomized over a set (a list), or unconstrained (null -> all
+        # buckets); see _parse_adv_cond_target. None (or enabled=false) keeps each
+        # scene's real adv labels.
         self.adv_cond_target = self._parse_adv_cond_target(adv_cond_target)
         n = min(int(pool_size), len(self.dataset))
         self.pool_indices = self.rng.permutation(len(self.dataset))[:n]
@@ -383,23 +437,38 @@ class LDMAdvConditioningPool:
     # ------------------------------------------------------------- helpers
     @staticmethod
     def _parse_adv_cond_target(spec):
-        """Parse the fixed adv conditioning target into a LongTensor ``[1, 3]``
-        ([type, motion, dist]), or ``None`` to keep each scene's real adv labels.
-        Accepts an OmegaConf/dict node with ``enabled`` plus ``type/motion/dist``."""
+        """Parse the adv conditioning target into per-field candidate bucket lists
+        ``{type, motion, goal_dist, ego_dist} -> [int, ...]``, or ``None`` to keep
+        each scene's real adv labels.
+
+        Accepts an OmegaConf/dict node with ``enabled`` plus the four fields. Each
+        field may be a single value (fixed), a list (sampled uniformly per scene),
+        or null / omitted (sampled uniformly over all buckets). Values may be int
+        bucket ids or symbolic names -- type: vehicle/pedestrian/cyclist; motion:
+        parked/moving; goal_dist & ego_dist: near/middle/far. The per-scene draw
+        itself happens in ``_apply_target_cond`` so it stays constant within a GRPO
+        group. ``enabled=false`` keeps each scene's real adv labels (returns None).
+        """
         if spec is None:
             return None
+        if OmegaConf.is_config(spec):
+            spec = OmegaConf.to_container(spec, resolve=True)
         get = spec.get if hasattr(spec, "get") else (lambda k, d=None: getattr(spec, k, d))
         if not bool(get("enabled", False)):
             return None
-        return torch.tensor(
-            [[int(get("type", 0)), int(get("motion", 1)), int(get("dist", 0))]],
-            dtype=torch.long,
-        )
+        return {f: _parse_adv_field(f, get(f, None)) for f in _ADV_COND_FIELDS}
 
-    def _apply_target_cond(self, d):
-        """Override the adv node's conditioning labels with the fixed target."""
-        if self.adv_cond_target is not None:
-            d["adv"].cond = self.adv_cond_target.clone()
+    def _apply_target_cond(self, d, scene_idx):
+        """Override the adv node's conditioning labels with a per-scene sample from
+        the target candidates. The draw is deterministic in ``(seed, scene_idx)``,
+        so a scene's adv target is constant within a GRPO group (per-context
+        whitening compares samples that share the SAME conditioning) and stable
+        across epochs."""
+        if self.adv_cond_target is None:
+            return d
+        rng = np.random.default_rng((self.adv_cond_seed, int(scene_idx)))
+        labels = [int(rng.choice(self.adv_cond_target[f])) for f in _ADV_COND_FIELDS]
+        d["adv"].cond = torch.tensor([labels], dtype=torch.long)
         return d
 
     def _ego_drives_enough(self, raw) -> bool:
@@ -473,7 +542,7 @@ class LDMAdvConditioningPool:
             d["lane"].road_points = self._sorted_road_points(raw)
             if self.prune_base_to_ego:
                 d = self._prune_base_to_ego(d)
-            d = self._apply_target_cond(d)
+            d = self._apply_target_cond(d, scene_idx)
             self._cache[pool_idx] = d
             return d
         raise RuntimeError("no valid (driving-ego) conditioning graphs in dataset")

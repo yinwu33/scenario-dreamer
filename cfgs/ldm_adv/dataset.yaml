@@ -13,10 +13,14 @@ agent_latents_std: null # std of agent latents, loaded from cached latent stats
 lane_latents_mean: null # mean of lane latents, loaded from cached latent stats
 lane_latents_std: null # std of lane latents, loaded from cached latent stats
 
-# Adversary conditioning (adv-only). Three discretized labels are derived from the
-# adv's own (normalized) state in the latent cache and fed to the DiT adv stream:
-#   type   = argmax(agent_types) in [0=vehicle, 1=pedestrian, 2=cyclist]
-#   motion = 0 (parked) if ||goal_xy - current_xy|| < MIN_DISTANCE_TO_GOAL (2m)
-#   dist   = 0 (near) / 1 (middle) / 2 (far) bucketed on ||adv - ego|| in metres
-adv_cond_dist_near_threshold: 10.0   # m; ||adv - ego|| below this is "near"
-adv_cond_dist_far_threshold: 25.0    # m; above this is "far" (between -> "middle")
+# Conditioning labels are derived from each agent's own (normalized) state in the
+# latent cache and fed to the DiT. Every (normal) agent gets [type, motion,
+# goal_dist]; the adversary additionally gets ego_dist:
+#   type     = argmax(agent_types) in [0=vehicle, 1=pedestrian, 2=cyclist]
+#   motion   = 0 (parked) if ||goal_xy - current_xy|| < MIN_DISTANCE_TO_GOAL (2m)
+#   goal_dist= 0 (near) / 1 (middle) / 2 (far) bucketed on goal-spawn travel distance
+#   ego_dist = 0 (near) / 1 (middle) / 2 (far) bucketed on ||adv - ego|| (adv only)
+cond_goaldist_near_threshold: 10.0   # m; ||goal - spawn|| below this is "near"
+cond_goaldist_far_threshold: 25.0    # m; above this is "far" (between -> "middle")
+cond_egodist_near_threshold: 10.0    # m; ||adv - ego|| below this is "near"
+cond_egodist_far_threshold: 25.0     # m; above this is "far" (between -> "middle")

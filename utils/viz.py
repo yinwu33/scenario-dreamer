@@ -20,19 +20,24 @@ def _tensor_to_numpy_for_viz(tensor):
 
 
 # Human-readable names for the adversary's discretized conditioning labels
-# (matches dataset_ldm_adv_waymo._adv_condition: [type, motion, dist]).
+# (matches dataset_ldm_adv_waymo._adv_condition:
+# [type, motion, goal_dist, ego_dist]).
 _ADV_COND_TYPE_NAMES = {0: 'vehicle', 1: 'pedestrian', 2: 'cyclist'}
 _ADV_COND_MOTION_NAMES = {0: 'parked', 1: 'moving'}
 _ADV_COND_DIST_NAMES = {0: 'near', 1: 'middle', 2: 'far'}
 
 
 def _format_adv_condition_text(cond):
-    """Format a single adversary's ``[type, motion, dist]`` label triple as a
-    readable overlay string, e.g. ``adv: cyclist | parked | far``."""
+    """Format a single adversary's ``[type, motion, goal_dist, ego_dist]`` labels
+    as a readable overlay string, e.g. ``adv: cyclist | parked | goal:far |
+    ego:near``. Tolerates the legacy 3-label ``[type, motion, dist]`` form."""
     t = _ADV_COND_TYPE_NAMES.get(int(cond[0]), f"type{int(cond[0])}")
     m = _ADV_COND_MOTION_NAMES.get(int(cond[1]), f"motion{int(cond[1])}")
-    d = _ADV_COND_DIST_NAMES.get(int(cond[2]), f"dist{int(cond[2])}")
-    return f"adv: {t} | {m} | {d}"
+    goal_d = _ADV_COND_DIST_NAMES.get(int(cond[2]), f"dist{int(cond[2])}")
+    if len(cond) > 3:
+        ego_d = _ADV_COND_DIST_NAMES.get(int(cond[3]), f"dist{int(cond[3])}")
+        return f"adv: {t} | {m} | goal:{goal_d} | ego:{ego_d}"
+    return f"adv: {t} | {m} | {goal_d}"
 
 
 def _draw_agent_box(ax, state, color, bbox_linewidth, heading_linewidth,
@@ -389,8 +394,9 @@ def visualize_batch(num_samples,
     ``adv_samples`` (optional, with per-node ``adv_batch`` scene indices and
     ``adv_types``) are adversarial agents drawn in green on each scene plot.
 
-    ``adv_cond`` (optional, ``[batch_size, 3]`` of discretized [type, motion,
-    dist] labels) is written as a text overlay on each scene plot.
+    ``adv_cond`` (optional, ``[batch_size, 4]`` of discretized
+    [type, motion, goal_dist, ego_dist] labels) is written as a text overlay on
+    each scene plot.
     """
 
     if lane_conn_samples.shape[-1] == 4:

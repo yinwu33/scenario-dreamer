@@ -29,19 +29,33 @@ prune_base_to_ego: false
 # latent-space analogue of the dm flow's vehicle projection of controlled agents.
 force_adv_vehicle: true
 
-# Fixed adversary conditioning target (requires a base ldm_adv ckpt trained with
+# Adversary conditioning target (requires a base ldm_adv ckpt trained with
 # model.use_adv_conditioning=true). The adversary is generated from noise, so the
 # real adv's labels are overridden with this target: the conditioned base model
-# then samples the requested adversary category. The init version uses a
-# training-favorable adversary -- car / moving / near -- which is aligned with the
-# reward (force_adv_vehicle -> car, controlled_parking_penalty -> moving, approach
-# bonus -> near), so it biases generation toward the region the reward already
-# wants. Set enabled=false to instead condition on each scene's real adv labels.
+# then samples the requested adversary category.
+#
+# Each field can be:
+#   * a single value  -> fixed for every scene            (e.g. motion: moving)
+#   * a list          -> sampled uniformly per scene      (e.g. goal_dist: [middle, far])
+#   * null / omitted  -> sampled over ALL buckets         (e.g. ego_dist: null)
+# Values accept int bucket ids OR names:
+#   type:      vehicle(0) / pedestrian(1) / cyclist(2)
+#   motion:    parked(0)  / moving(1)
+#   goal_dist: near(0)    / middle(1) / far(2)   (goal-spawn travel distance)
+#   ego_dist:  near(0)    / middle(1) / far(2)   (adversary distance to ego)
+# The per-scene draw is DETERMINISTIC in (seed, scene_idx): an adv target is fixed
+# per scene, so it is constant within a GRPO group (per-context whitening stays
+# valid) and stable across epochs, while varying across the pool. Keeping the set
+# aligned with the reward (vehicle, moving, near/middle ego) biases generation
+# toward the region the reward already wants. enabled=false keeps each scene's
+# real adv labels instead. NOTE: combos that are rare in the real-data label
+# distribution are out-of-distribution for the frozen conditional prior.
 adv_cond_target:
   enabled: true
-  type: 0    # 0=vehicle(car), 1=pedestrian, 2=cyclist
-  motion: 1  # 0=parked, 1=moving
-  dist: 0    # 0=near, 1=middle, 2=far
+  type: vehicle            # fixed (force_adv_vehicle also pins vehicle geometry)
+  motion: moving           # fixed (reward penalises a parked adversary)
+  goal_dist: [middle, far] # sample per scene from {middle, far}
+  ego_dist: null           # sample per scene over {near, middle, far}
 
 # --- artifacts -------------------------------------------------------------
 ldm_adv_ckpt: ${scratch_root}/checkpoints/scenario_dreamer_ldm_adv_train/last.ckpt

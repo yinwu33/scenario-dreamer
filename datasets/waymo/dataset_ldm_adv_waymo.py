@@ -58,33 +58,73 @@ class WaymoDatasetLDMAdv(Dataset):
             return int(np.random.choice(non_ego))
         return int(non_ego[0])
 
+    @staticmethod
+    def _bucket(dist, near_thr, far_thr):
+        """Discretize a physical distance (metres) into near(0)/middle(1)/far(2).
+        Works on numpy arrays of any shape (used both per-agent and for the
+        single adversary)."""
+        b = np.full(np.shape(dist), 2, dtype=np.int64)  # far
+        b[dist < far_thr] = 1                            # middle
+        b[dist < near_thr] = 0                           # near
+        return b
+
+    def _agent_condition(self, agent_states, agent_types):
+        """Discretize EVERY (normal) agent's own (normalized) state into the
+        ``[type, motion, goal_dist]`` label triple consumed by the conditioned DiT
+        agent stream. ``agent_states``/``agent_types`` must already be reordered
+        AND adversary-removed so the rows align one-to-one with ``d["agent"]``.
+        Returns a ``LongTensor`` of shape ``(num_agents, 3)`` (a per-agent label,
+        batches by concatenation to ``(total_agents, 3)``)."""
+        # type: one-hot [N, num_agent_types] -> class id (0=veh, 1=ped, 2=cyc)
+        types = np.argmax(agent_types, axis=1).astype(np.int64)
+
+        # goal-spawn travel distance in metres (normalized xy/goal scale by fov/2).
+        xy = agent_states[:, :2]
+        goal_xy = agent_states[:, 7:9]
+        phys_goal_dist = np.linalg.norm(goal_xy - xy, axis=1) * (self.cfg.fov / 2.0)
+        # parked(0)/moving(1): the coarse binary at the bottom of the goal bucket.
+        motion = (phys_goal_dist >= MIN_DISTANCE_TO_GOAL).astype(np.int64)
+        goal_dist = self._bucket(
+            phys_goal_dist,
+            self.cfg.cond_goaldist_near_threshold,
+            self.cfg.cond_goaldist_far_threshold,
+        )
+
+        cond = np.stack([types, motion, goal_dist], axis=1)
+        return torch.from_numpy(cond).long()
+
     def _adv_condition(self, agent_states, agent_types, adv_idx):
         """Discretize the adversary's own (normalized) state into the
-        ``[type, motion, dist]`` label triple consumed by the conditioned DiT adv
-        stream. ``agent_states``/``agent_types`` must already be reordered with the
-        same permutation as the latents (ego at index 0). Returns a ``LongTensor``
-        of shape ``(1, 3)`` so it batches to ``(batch_size, 3)``."""
+        ``[type, motion, goal_dist, ego_dist]`` label tuple consumed by the
+        conditioned DiT adv stream. The first three labels match the normal-agent
+        scheme; the adversary additionally carries its distance-to-ego bucket.
+        ``agent_states``/``agent_types`` must already be reordered with the same
+        permutation as the latents (ego at index 0). Returns a ``LongTensor`` of
+        shape ``(1, 4)`` so it batches to ``(batch_size, 4)``."""
         # agent type: one-hot [N, num_agent_types] -> class id (0=veh, 1=ped, 2=cyc)
         adv_type = int(np.argmax(agent_types[adv_idx]))
 
         adv_xy = agent_states[adv_idx, :2]
-        # parked / moving: match visualization/DDPO semantics. Normalized xy and
-        # goal xy are scaled by fov/2 per unit -> metres.
+        # parked / moving + goal-spawn travel-distance bucket (same as agents).
         adv_goal_xy = agent_states[adv_idx, 7:9]
         phys_goal_dist = float(np.linalg.norm(adv_goal_xy - adv_xy)) * (self.cfg.fov / 2.0)
         adv_motion = 0 if phys_goal_dist < MIN_DISTANCE_TO_GOAL else 1
+        adv_goal_dist = int(self._bucket(
+            np.array(phys_goal_dist),
+            self.cfg.cond_goaldist_near_threshold,
+            self.cfg.cond_goaldist_far_threshold,
+        ))
 
-        # distance bucket: adversary distance from ego in metres
+        # adv-only label: adversary distance from ego in metres.
         ego_xy = agent_states[0, :2]
-        phys_dist = float(np.linalg.norm(adv_xy - ego_xy)) * (self.cfg.fov / 2.0)
-        if phys_dist < self.cfg.adv_cond_dist_near_threshold:
-            adv_dist = 0
-        elif phys_dist < self.cfg.adv_cond_dist_far_threshold:
-            adv_dist = 1
-        else:
-            adv_dist = 2
+        phys_ego_dist = float(np.linalg.norm(adv_xy - ego_xy)) * (self.cfg.fov / 2.0)
+        adv_ego_dist = int(self._bucket(
+            np.array(phys_ego_dist),
+            self.cfg.cond_egodist_near_threshold,
+            self.cfg.cond_egodist_far_threshold,
+        ))
 
-        return torch.tensor([[adv_type, adv_motion, adv_dist]], dtype=torch.long)
+        return torch.tensor([[adv_type, adv_motion, adv_goal_dist, adv_ego_dist]], dtype=torch.long)
 
     def get_data(self, data, idx):
         agent_mu = data["agent_mu"]
@@ -177,8 +217,11 @@ class WaymoDatasetLDMAdv(Dataset):
         d["adv"].x = from_numpy(adv_mu)
         d["adv"].log_var = from_numpy(adv_log_var)
         d["adv"].partition_mask = torch.zeros(1).bool()
-        # Discretized adv-only conditioning labels [type, motion, dist] (shape (1, 3))
-        # aligned with the reordered adv row, batches to (batch_size, 3).
+        # Per-agent conditioning labels [type, motion, goal_dist] (shape
+        # (num_agents, 3)) aligned with the reordered + adv-removed agent rows.
+        d["agent"].cond = self._agent_condition(agent_states_r[keep], agent_types_r[keep])
+        # Discretized adv conditioning labels [type, motion, goal_dist, ego_dist]
+        # (shape (1, 4)) aligned with the reordered adv row, batches to (B, 4).
         d["adv"].cond = self._adv_condition(agent_states_r, agent_types_r, adv_idx)
 
         # Sample (and normalize) the normal-agent and lane latents for diffusion.
