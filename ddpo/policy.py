@@ -11,13 +11,13 @@ stochastic DDIM sub-sampled chain (``eta > 0``) as a stochastic policy:
 
 Agent chain layout per node: [x, y, speed, cos, sin, length, width,
 goal_x, goal_y, type_onehot(3)]  (12 dims). Lane chain: 20*2 = 40 dims per node.
-For DDPO, controlled agents are projected to vehicle type with ego-sized
+For DDPO, generated agents are projected to vehicle type with ego-sized
 footprints; length, width, and type logits are not policy-gradient dimensions.
 
 Modes (``cfg.ddpo.mode``) - select WHICH dims are free:
   * "goal_only"  - map fixed, agent init states fixed (inpainted from the real
                    conditioning scene), only the per-agent goal dims [7:9] are
-                   generated/trained. Controlled agents still use the vehicle
+                   generated/trained. Generated agents still use the vehicle
                    projection for type and footprint.
   * "agent_only" - map fixed, agent kinematics and goals are generated/trained;
                    length, width, and type are fixed by the vehicle projection.
@@ -35,14 +35,14 @@ assignment for the (mostly ego-centric) reward and improves DDPO stability.
 
 NOTE: ``ConditioningPool.prune_agents`` already trims the conditioning graph to
 ``ego + control_agent_num`` agents (the rest are removed, not inpainted to GT),
-so the denoiser and reward sim see only the controlled agents. The node mask
+so the denoiser and reward sim see only the generated agents. The node mask
 below is then redundant-but-consistent (it marks every remaining non-ego node),
 and still does the right thing if an un-pruned graph is ever passed in.
 
 Fixed agent (node, dim) entries are inpainted at every step with the forward-
 diffused ground truth ``q_sample(x0, t)`` (standard replacement inpainting), or
 with the clean ``x0`` if ``inpaint_noised=False``. Log-probs (and the KL trust
-region) are accumulated over free dims of controlled nodes only, so fixed
+region) are accumulated over free dims of generated nodes only, so fixed
 entries never contribute policy gradient.
 """
 
@@ -66,7 +66,7 @@ from .goal_schema import (
     MIN_DISTANCE_TO_GOAL,
     fov_unnormalize,
 )
-from .interfaces import GeneratedScenes, SamplingTrajectory
+from .interfaces import GeneratedScenes, SamplingTrajectory, single_adv_local_idx
 
 _LOG_2PI = math.log(2.0 * math.pi)
 MODES = ("full", "agent_only", "goal_only")
@@ -129,6 +129,11 @@ class DMGoalDDPOPolicy:
             raise ValueError(f"control_agent_num must be >= -1, got {control_agent_num}")
         if not control_ego and int(control_agent_num) == 0:
             raise ValueError("control_ego=False and control_agent_num=0 leaves nothing to generate")
+        if int(control_agent_num) > 1:
+            raise ValueError(
+                "control_agent_num > 1 is no longer supported: the DDPO reward "
+                "assumes a single adversary (use control_agent_num=1)."
+            )
         self.cfg = cfg
         self.cfg_model = cfg.model
         self.cfg_dataset = cfg.dataset
@@ -276,8 +281,8 @@ class DMGoalDDPOPolicy:
     def load_state_dict(self, sd: dict) -> None:
         self.net.load_state_dict(sd)
 
-    # ------------------------------------------------------- node control
-    def _controlled_node_mask(self, agent_batch, num_scenes):
+    # --------------------------------------------------- generated-agent mask
+    def _gen_agent_node_mask(self, agent_batch, num_scenes):
         """[N_agents] bool: which agent nodes are generated (vs fixed to GT).
 
         Ego is local index 0 of each scene; the rest follow the dataset's
@@ -297,48 +302,53 @@ class DMGoalDDPOPolicy:
             nonego = (local_idx >= 1) & ((local_idx - 1) < self.control_agent_num)
         return nonego | (is_ego & self.control_ego)
 
-    def _agent_free_mask(self, controlled):
-        """[N_agents, 1, D] bool: free (node, dim) entries = controlled & free-dim."""
-        return controlled.view(-1, 1, 1) & self.agent_free_mask.view(1, 1, -1)
+    def _agent_free_mask(self, gen_agent_mask):
+        """[N_agents, 1, D] bool: generated node entries on free dims."""
+        return gen_agent_mask.view(-1, 1, 1) & self.agent_free_mask.view(1, 1, -1)
 
     def _project_target_vehicle_footprint(
-        self, target_agent, agent_batch, num_scenes, controlled
+        self, target_agent, agent_batch, num_scenes, gen_agent_mask
     ):
-        """Fix controlled agents to vehicle type and ego length/width in normalized space."""
-        if target_agent is None or not controlled.any():
+        """Fix generated agents to vehicle type and ego length/width."""
+        if target_agent is None or not gen_agent_mask.any():
             return target_agent
         target_agent = target_agent.clone()
         counts = torch.bincount(agent_batch, minlength=num_scenes)
         ego_idx = torch.cumsum(counts, 0) - counts
         size_slice = slice(self.agent_schema.size_dims[0], self.agent_schema.size_dims[-1] + 1)
         type_slice = slice(self.agent_schema.type_dims[0], self.agent_schema.type_dims[-1] + 1)
-        target_agent[controlled, :, size_slice] = target_agent[
-            ego_idx[agent_batch[controlled]], :, size_slice
+        target_agent[gen_agent_mask, :, size_slice] = target_agent[
+            ego_idx[agent_batch[gen_agent_mask]], :, size_slice
         ]
-        target_agent[controlled, :, type_slice] = 0.0
-        target_agent[controlled, :, type_slice.start + self.agent_schema.vehicle_type_id] = 1.0
+        target_agent[gen_agent_mask, :, type_slice] = 0.0
+        target_agent[
+            gen_agent_mask, :, type_slice.start + self.agent_schema.vehicle_type_id
+        ] = 1.0
         if self.force_driving and self.agent_schema.parking_dims is not None:
             parking_slice = slice(
                 self.agent_schema.parking_dims[0],
                 self.agent_schema.parking_dims[-1] + 1,
             )
-            target_agent[controlled, :, parking_slice] = 0.0
-            target_agent[controlled, :, self.agent_schema.parking_dims[0]] = 1.0
+            target_agent[gen_agent_mask, :, parking_slice] = 0.0
+            target_agent[gen_agent_mask, :, self.agent_schema.parking_dims[0]] = 1.0
         return target_agent
 
     def _project_decoded_vehicle_footprint(
-        self, agent_states, agent_types, agent_batch, num_scenes, controlled
+        self, agent_states, agent_types, agent_batch, num_scenes, gen_agent_mask
     ):
-        """Fix controlled agents to vehicle type and ego length/width in physical units."""
-        if not controlled.any():
+        """Fix generated agents to vehicle type and ego length/width."""
+        if not gen_agent_mask.any():
             return agent_states, agent_types
         counts = torch.bincount(agent_batch, minlength=num_scenes)
         ego_idx = torch.cumsum(counts, 0) - counts
         ego_size = agent_states[ego_idx, self.agent_schema.size_dims[0]:self.agent_schema.size_dims[-1] + 1]
-        agent_states[controlled, self.agent_schema.size_dims[0]:self.agent_schema.size_dims[-1] + 1] = ego_size[
-            agent_batch[controlled]
+        agent_states[
+            gen_agent_mask,
+            self.agent_schema.size_dims[0]:self.agent_schema.size_dims[-1] + 1,
+        ] = ego_size[
+            agent_batch[gen_agent_mask]
         ]
-        agent_types[controlled] = self.agent_schema.vehicle_type_id
+        agent_types[gen_agent_mask] = self.agent_schema.vehicle_type_id
         return agent_states, agent_types
 
     # -------------------------------------------------------------- inpainting
@@ -438,15 +448,15 @@ class DMGoalDDPOPolicy:
         lane_batch = data["lane"].batch
         num_scenes = int(data.batch_size)
 
-        controlled = self._controlled_node_mask(agent_batch, num_scenes)
-        controlled_f = controlled.to(torch.float32)
-        free_mask = self._agent_free_mask(controlled)
+        gen_agent_mask = self._gen_agent_node_mask(agent_batch, num_scenes)
+        gen_agent_f = gen_agent_mask.to(torch.float32)
+        free_mask = self._agent_free_mask(gen_agent_mask)
 
         n_agent = data["agent"].x.shape[0]
         x_agent = torch.randn((n_agent, 1, self.agent_latent_dim), device=self.device)
         target_agent = net._agent_target(data).to(self.device) if self.needs_inpaint else None
         target_agent = self._project_target_vehicle_footprint(
-            target_agent, agent_batch, num_scenes, controlled
+            target_agent, agent_batch, num_scenes, gen_agent_mask
         )
         target_lane = net._lane_target(data).to(self.device)
 
@@ -488,7 +498,7 @@ class DMGoalDDPOPolicy:
 
             if stochastic:
                 node_lp = _masked_gaussian_logprob(x_next_a, mean_a, logvar_a, self.agent_free_mask)
-                old_lp[:, j].index_add_(0, agent_batch, node_lp * controlled_f)
+                old_lp[:, j].index_add_(0, agent_batch, node_lp * gen_agent_f)
                 if self.lane_free:
                     lane_mask = torch.ones(x_lane.shape[-1], dtype=torch.bool, device=self.device)
                     lane_lp = _masked_gaussian_logprob(x_next_l, mean_l, logvar_l, lane_mask)
@@ -550,7 +560,7 @@ class DMGoalDDPOPolicy:
         lane_batch = trajectory.records["lane_batch"]
         num_scenes = trajectory.num_scenes
         target_lane = self.net._lane_target(data).to(self.device)
-        controlled_f = self._controlled_node_mask(agent_batch, num_scenes).to(torch.float32)
+        gen_agent_f = self._gen_agent_node_mask(agent_batch, num_scenes).to(torch.float32)
 
         out = torch.zeros((num_scenes, len(step_indices)), device=self.device)
         kl = torch.zeros((num_scenes, len(step_indices)), device=self.device) if with_kl else None
@@ -571,7 +581,7 @@ class DMGoalDDPOPolicy:
                     net, x_t_a, x_lane_in, data, t[agent_batch], t[lane_batch], i, prev_i
                 )
                 node_lp = _masked_gaussian_logprob(x_tm1_a, mean_a, logvar_a, self.agent_free_mask)
-                out[:, col] = out[:, col].index_add(0, agent_batch, node_lp * controlled_f)
+                out[:, col] = out[:, col].index_add(0, agent_batch, node_lp * gen_agent_f)
                 if self.lane_free:
                     lane_mask = torch.ones(x_lane_in.shape[-1], dtype=torch.bool, device=self.device)
                     lane_lp = _masked_gaussian_logprob(x_tm1_l, mean_l, logvar_l, lane_mask)
@@ -582,7 +592,7 @@ class DMGoalDDPOPolicy:
                             self.ref, x_t_a, x_lane_in, data, t[agent_batch], t[lane_batch], i, prev_i
                         )
                     node_kl = _masked_gaussian_kl(mean_a, mean_a_ref, logvar_a, self.agent_free_mask)
-                    kl[:, col] = kl[:, col].index_add(0, agent_batch, node_kl * controlled_f)
+                    kl[:, col] = kl[:, col].index_add(0, agent_batch, node_kl * gen_agent_f)
                     if self.lane_free:
                         lane_mask = torch.ones(x_lane_in.shape[-1], dtype=torch.bool, device=self.device)
                         lane_kl = _masked_gaussian_kl(mean_l, mean_l_ref, logvar_l, lane_mask)
@@ -608,9 +618,9 @@ class DMGoalDDPOPolicy:
         agent_types = agent_types.clone()
         agent_batch = data["agent"].batch
         num_scenes = int(data.batch_size)
-        controlled = self._controlled_node_mask(agent_batch, num_scenes)
+        gen_agent_mask = self._gen_agent_node_mask(agent_batch, num_scenes)
         agent_states, agent_types = self._project_decoded_vehicle_footprint(
-            agent_states, agent_types, agent_batch, num_scenes, controlled
+            agent_states, agent_types, agent_batch, num_scenes, gen_agent_mask
         )
         meta = {"lane_scene_idx": data["lane"].batch}
         lane_edge_store = data["lane", "to", "lane"]
@@ -619,7 +629,8 @@ class DMGoalDDPOPolicy:
         if "type" in lane_edge_store:
             meta["lane_edge_type"] = lane_edge_store.type
         # per-agent flag for viz: which nodes this policy actually generates
-        meta["controlled_mask"] = controlled
+        meta["gen_agent_mask"] = gen_agent_mask
+        adv_local_idx = single_adv_local_idx(gen_agent_mask, agent_batch, num_scenes)
         if self.mode == "goal_only":
             # GT parking state per agent (goal within reach radius of spawn). Only
             # meaningful in goal_only mode, where generated agents correspond 1:1 to
@@ -637,6 +648,7 @@ class DMGoalDDPOPolicy:
             agent_scene_idx=data["agent"].batch,
             lane_polylines=lane_states,
             num_scenes=int(data.batch_size),
+            adv_local_idx=adv_local_idx,
             meta=meta,
         )
 

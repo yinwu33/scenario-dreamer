@@ -1,0 +1,15 @@
+{
+  "split": "train",
+  "policy": "base",
+  "summary": {
+    "n_scenes": 2048,
+    "max_steps": 5,
+    "P_crash_frame1": 0.02294921875,
+    "P_crash_within_maxsteps": 0.02294921875,
+    "n_crash_frame1": 47,
+    "frame1_hit_normal_rate": 0.10638297872340426,
+    "frame1_hit_adv_rate": 0.8936170212765957,
+    "P_frame1_crash_by_normal": 0.00244140625,
+    "P_frame1_crash_by_adv": 0.0205078125
+  }
+}

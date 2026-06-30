@@ -1,0 +1,70 @@
+{
+  "args": {
+    "chunk_contexts": 1,
+    "config_name": "config_critical_scene_ldm_adv_ddpo",
+    "device": "auto",
+    "device_resolved": "cpu",
+    "high_reward_threshold": 0.3,
+    "include_conditioning": false,
+    "num_scenes": 1,
+    "output_dir": "data_analysis/ldm_adv_ddpo_support_smoke",
+    "overrides": [
+      "ddpo.sampler=ddim",
+      "ddpo.ddim_steps=2"
+    ],
+    "policy": "base",
+    "policy_ckpt": null,
+    "samples_per_scene": 1,
+    "seed": 0,
+    "selection": "first",
+    "splits": [
+      "train"
+    ],
+    "top_k_samples": 200
+  },
+  "sample_summary": {
+    "train/base": {
+      "artifact_given_high_reward_rate": null,
+      "artifact_sample_rate": 1.0,
+      "high_reward_sample_rate": 0.0,
+      "n_samples": 1,
+      "positive_sample_rate": 0.0,
+      "reward_max": -1.0,
+      "reward_mean": -1.0,
+      "reward_p50": -1.0,
+      "reward_p90": -1.0,
+      "reward_p95": -1.0,
+      "reward_p99": -1.0,
+      "small_vehicle_given_high_reward_rate": null,
+      "small_vehicle_sample_rate": 0.0
+    }
+  },
+  "scene_summary": {
+    "train/base": {
+      "collision_rate_mean": 0.0,
+      "controlled_parking_rate_mean": 1.0,
+      "ego_adv_min_dist_min_p10": 45.27562713623047,
+      "ego_adv_min_dist_min_p50": 45.27562713623047,
+      "goal_offlane_rate_mean": 1.0,
+      "high_reward_threshold": 0.3,
+      "init_invalid_rate_mean": 0.0,
+      "mean_sample_high_reward_rate": 0.0,
+      "n_scenes": 1,
+      "near_miss_rate_mean": 0.0,
+      "reward_max_mean": -1.0,
+      "reward_max_p50": -1.0,
+      "reward_max_p90": -1.0,
+      "reward_max_p95": -1.0,
+      "reward_max_p99": -1.0,
+      "reward_mean_mean": -1.0,
+      "reward_mean_p50": -1.0,
+      "reward_mean_p95": -1.0,
+      "scene_with_high_reward_sample_rate": 0.0,
+      "scene_with_positive_sample_rate": 0.0,
+      "small_vehicle_rate_mean": 0.0
+    }
+  },
+  "selected_counts": {
+    "train": 1
+  }
+}

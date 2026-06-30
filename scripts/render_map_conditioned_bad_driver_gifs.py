@@ -66,7 +66,7 @@ def _slice_scenes(scenes: GeneratedScenes, start: int, end: int) -> GeneratedSce
     l_sel = (l_idx >= start) & (l_idx < end)
 
     meta = {"lane_scene_idx": l_idx[l_sel] - start}
-    for key in ("controlled_mask", "gt_parking_mask"):
+    for key in ("gen_agent_mask", "gt_parking_mask"):
         if key in scenes.meta:
             meta[key] = _as_cpu_tensor(scenes.meta[key]).bool()[a_sel]
 
@@ -117,12 +117,12 @@ def _scene_kwargs(
     a_sel = agent_scene_idx == local_idx
 
     agent_colors = None
-    controlled = scenes.meta.get("controlled_mask")
-    if controlled is not None:
-        ctrl = _to_numpy(controlled).astype(bool)[a_sel]
+    gen_agent_mask = scenes.meta.get("gen_agent_mask")
+    if gen_agent_mask is not None:
+        gen_agent_s = _to_numpy(gen_agent_mask).astype(bool)[a_sel]
         agent_colors = [
-            CONTROL_COLOR if (agent_i > 0 and bool(is_controlled)) else None
-            for agent_i, is_controlled in enumerate(ctrl)
+            CONTROL_COLOR if (agent_i > 0 and bool(is_gen_agent)) else None
+            for agent_i, is_gen_agent in enumerate(gen_agent_s)
         ]
 
     components = {
@@ -158,7 +158,7 @@ def _metric_row(split: str, source: str, scene_id: int, metrics: dict[str, Any],
         "goal_offlane_frac",
         "parking_mismatch_frac",
         "ego_adv_min_dist",
-        "controlled_parking_frac",
+        "gen_agent_is_parked",
     ):
         if key in metrics:
             value = float(metrics[key][local_idx])

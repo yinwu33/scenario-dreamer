@@ -3,7 +3,7 @@
 Style follows scenario-dreamer's ``utils/viz.py`` ``plot_scene``: lanes are drawn
 twice (a thin dashed grey centerline plus a wide light-grey solid stroke that mimics
 the road surface), agents are rounded boxes (ego red, vehicles blue, ...; callers
-may pass ``agent_colors`` to override per agent, e.g. DDPO-controlled non-ego
+may pass ``agent_colors`` to override per agent, e.g. DDPO-generated non-ego
 agents in green), and a moving agent's goal is a dotted line + same-colour ``x``
 marker. Parked/static
 agents (goal within 2 m of spawn) instead get a bold black ``x`` at their centre.
@@ -35,7 +35,7 @@ _EGO_COLOR = "#de5959"      # light red  (ego = local index 0)
 _VEH_COLOR = "#87b3e6"      # light blue (other vehicles)
 _PED_COLOR = "#bea9f5"      # light purple (pedestrians)
 _CYC_COLOR = "#5fa55f"      # green (cyclists)
-CONTROL_COLOR = "#2ca02c"   # vivid green: DDPO-controlled (generated) non-ego agents,
+CONTROL_COLOR = "#2ca02c"   # vivid green: DDPO-generated non-ego agents,
                             # passed in via ``agent_colors`` to flag who is being trained
 _JUMP_THRESH = 10.0         # metres/step above which motion is a teleport, not driving
 _PARKING_DIST = MIN_DISTANCE_TO_GOAL  # goal within this of spawn => parked/static
@@ -97,16 +97,17 @@ def _fmt_float(value, *, signed: bool = False, digits: int = 2, inf: str = "inf"
 # Reward-component breakdown rendered (one list == one line, in order) under the
 # summary line when the caller passes a ``components`` dict (e.g. from
 # PufferDriveReward.evaluate). Each field is (short label, component key); missing
-# keys are skipped so this degrades gracefully as new components are added
-# (Phase 3/5). The leading field of each line is that line's total.
+# keys are skipped so this degrades gracefully as new components are added. The
+# leading field of each line is that line's total. Layout mirrors the reward
+# assembly: constraint + its penalty terms, then criticality + its terms, then the
+# raw ego<->adversary / lane geometry behind those terms.
 _COMPONENT_LINES = [
-    [("risk", "r_risk"), ("ttc", "r_ttc"), ("appr", "r_approach"),
-     ("coll", "r_collision")],
-    [("lane", "c_lane"), ("gD", "goal_lane_dist"), ("sD", "spawn_lane_dist"),
-     ("gFrac", "goal_offlane_frac")],
-    [("park", "c_parking"), ("triv", "c_trivial")],
+    [("cons", "constraint"), ("spawn_off", "c_spawn_lane"),
+     ("goal_off", "c_goal_lane"), ("init_over", "c_overlap")],
+    [("crit", "criticality"), ("r_ttc", "r_ttc"), ("r_appr", "r_approach")],
     [("d0", "ego_adv_init_dist"), ("dmin", "ego_adv_min_dist_warmup"),
-     ("tcol", "ego_collision_time")],
+     ("sd", "spawn_lane_dist"), ("gd", "goal_lane_dist"),
+     ("oFrac", "init_overlap_frac")],
 ]
 
 
@@ -127,20 +128,11 @@ def _status_text(
     is rendered on extra lines below the summary.
     """
     r = 0.0 if reward is None else float(reward)
-    if components and "criticality" in components and "constraint" in components:
-        lines = [
-            f"R={r:+.2f} = crit {_fmt_float(components['criticality'])}"
-            f" - cons {_fmt_float(components['constraint'])}  "
-            f"TTC={_fmt_float(ego_min_ttc)}  col={int(bool(collided))}  "
-            f"init={int(bool(init_invalid))}"
-        ]
-    else:
-        lines = [
-            f"R={r:+.2f}  TTC={_fmt_float(ego_min_ttc)}  "
-            f"col={int(bool(collided))}  init={int(bool(init_invalid))}  "
-            f"gOff={_fmt_float(goal_offlane_frac)}  pMis={_fmt_float(parking_mismatch_frac)}"
-        ]
     if components:
+        # Summary line: total reward + the hard parking branch flag (a parked
+        # adversary is rejected outright, reward = -1), then the component lines.
+        park = bool(float(components.get("c_parking", 0.0)) > 0.0)
+        lines = [f"R={r:+.2f}  park={str(park).lower()}"]
         for fields in _COMPONENT_LINES:
             parts = [
                 f"{short}={_fmt_float(components[key])}"
@@ -149,6 +141,12 @@ def _status_text(
             ]
             if parts:
                 lines.append("  ".join(parts))
+    else:
+        lines = [
+            f"R={r:+.2f}  TTC={_fmt_float(ego_min_ttc)}  "
+            f"col={int(bool(collided))}  init={int(bool(init_invalid))}  "
+            f"gOff={_fmt_float(goal_offlane_frac)}  pMis={_fmt_float(parking_mismatch_frac)}"
+        ]
     if collided:
         color = _EGO_COLOR
     elif init_invalid:
@@ -328,7 +326,7 @@ def render_rollout_frames(traj, lanes, *, agent_states=None, agent_types=None, a
             ax.plot(xb, yb, color=color, linewidth=V["base_lw"] * (1.3 if is_ego else 0.9),
                     alpha=0.5, zorder=4, solid_capstyle="round")  # trail so far
             _draw_agent_box(ax, x[t, a], y[t, a], hd[t, a], lengths[a], widths[a], color,
-                            V["bbox_lw"] * (1.4 if is_ego else 1.0), alpha=1.0)  # current pose
+                            V["bbox_lw"] * (1.4 if is_ego else 1.0), alpha=0.8)  # current pose
             _draw_goals(ax, agent_states[a] if agent_states is not None else None, x[0, a], y[0, a], color, V)
         _finish(ax, fig, V, f"{title}   t={int(t)}", txt, scol)
         frames.append(_fig_to_rgb(fig))

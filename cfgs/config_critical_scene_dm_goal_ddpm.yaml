@@ -18,7 +18,7 @@ defaults:
   - dm_goal/model@dm_goal.model
   - dm_goal/datamodule@dm_goal.datamodule
   - ddpo/dm_goal@ddpo
-  - planner@ddpo.planner: selfplay_drive
+  - planner@ddpo.planner: bad_driver
   - sim: base
   - _self_
 

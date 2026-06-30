@@ -1,0 +1,38 @@
+{
+  "config_name": "config_critical_scene_ldm_adv_ddpo",
+  "split": "train",
+  "prune_base_to_ego": false,
+  "pool_size": 40000,
+  "results": {
+    "cond_real_adv": {
+      "n_scenes": 8000,
+      "frac_full_scene_has_normals": 0.956375,
+      "mean_normals_per_scene": 9.055,
+      "P_ego_overlaps_normal_at_spawn": 0.003375,
+      "P_ego_overlaps_adv_at_spawn": 0.000125,
+      "P_ego_overlaps_any_at_spawn": 0.0035,
+      "n_ego_overlaps_normal": 27,
+      "n_ego_overlaps_adv": 1,
+      "n_ego_overlaps_any": 28,
+      "among_overlap_normal_only": 0.9642857142857143,
+      "among_overlap_adv_only": 0.03571428571428571,
+      "among_overlap_both": 0.0,
+      "mean_normals_overlapping_when_any": 1.0
+    },
+    "ddpo_sampled": {
+      "n_scenes": 1024,
+      "frac_full_scene_has_normals": 0.943359375,
+      "mean_normals_per_scene": 8.8828125,
+      "P_ego_overlaps_normal_at_spawn": 0.0029296875,
+      "P_ego_overlaps_adv_at_spawn": 0.025390625,
+      "P_ego_overlaps_any_at_spawn": 0.0283203125,
+      "n_ego_overlaps_normal": 3,
+      "n_ego_overlaps_adv": 26,
+      "n_ego_overlaps_any": 29,
+      "among_overlap_normal_only": 0.10344827586206896,
+      "among_overlap_adv_only": 0.896551724137931,
+      "among_overlap_both": 0.0,
+      "mean_normals_overlapping_when_any": 1.0
+    }
+  }
+}

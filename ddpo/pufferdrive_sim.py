@@ -10,10 +10,10 @@ venv without the C env / .bin round-trip:
     road(512*7), same normalisation constants, partner gate 64 m, road segments
     collected from a 5 m grid in the same 21x21-cell spiral order, truncated at
     512;
-  * agent lifecycle (``set_active_agents`` / ``respawn_agent`` / ``c_step``):
+  * agent lifecycle (``set_active_agents`` / ``c_step``):
     agents whose goal is closer than 2 m at spawn are static (not controlled);
     an agent that reaches its goal (dist < 2, speed <= goal_speed) follows the configured
-    goal behavior: stop, keep being controlled, respawn, or be removed;
+    goal behavior: stop, keep being controlled (continue), or be removed;
   * vehicle collision (``collision_check``): oriented-box SAT, 15 m gate,
     pedestrians never collide, inactive agents excluded.
 
@@ -68,7 +68,6 @@ MAX_CONTROLLED_AGENTS = 32         # config/pacific/selfplay_drive.ini max_contr
 # and re-exported here for the planner/metric modules that import it from this file.
 PARTNER_DIST2_GATE = 4096.0        # 64 m
 COLLISION_DIST2_GATE = 225.0       # 15 m
-TTC_SWEEP_HORIZON = 10.0           # seconds; reward clips all values >= ttc_tau to 0
 EGO_AGGRESSOR_MIN_SPEED = 0.5      # m/s; ego counts as the aggressor only when its
                                    # velocity projected onto the ego->other direction
                                    # exceeds this (a passive/slow ego is never at fault)
@@ -167,7 +166,7 @@ class SimScene:
     def __init__(
         self,
         agent_states: np.ndarray,    # [N, 9] x, y, speed, cos, sin, length, width, goal_x, goal_y
-        agent_types: np.ndarray,     # [N] 0 veh / 1 ped / 2 cyc (dm_goal ids)
+        agent_ptypes: np.ndarray,    # [N] 1 vehicle / 2 pedestrian / 3 cyclist (PufferDrive ids)
         lane_polylines: np.ndarray,  # [L, P, 2]
         *,
         rng: np.random.Generator,
@@ -180,10 +179,10 @@ class SimScene:
         self.dt = cfg.dt
         self.goal_radius = cfg.goal_radius
         self.goal_speed = cfg.goal_speed
-        if cfg.goal_behavior not in ("stop", "continue", "respawn", "remove"):
+        if cfg.goal_behavior not in ("stop", "continue", "remove"):
             raise ValueError(
-                "goal_behavior must be one of 'stop', 'continue', 'respawn', or "
-                f"'remove', got {cfg.goal_behavior!r}"
+                "goal_behavior must be one of 'stop', 'continue', or 'remove', "
+                f"got {cfg.goal_behavior!r}"
             )
         self.goal_behavior = cfg.goal_behavior
         # Half-extent of the square map. Non-ego agents whose centre leaves
@@ -205,10 +204,26 @@ class SimScene:
         self.length = np.maximum(s[:, 5], 0.5).astype(np.float32)
         self.width = np.maximum(s[:, 6], 0.5).astype(np.float32)
         self.goal = s[:, 7:9].copy()
-        self.ptype = (np.asarray(agent_types, dtype=np.int64) + 1).clip(TYPE_VEHICLE, TYPE_CYCLIST)
+        self.ptype = np.asarray(agent_ptypes, dtype=np.int64).copy()
+        if self.ptype.shape[0] != n:
+            raise ValueError(
+                f"agent_ptypes length must match agent_states rows ({n}), "
+                f"got {self.ptype.shape[0]}"
+            )
+        if self.ptype.size and (
+            self.ptype.min() < TYPE_VEHICLE or self.ptype.max() > TYPE_CYCLIST
+        ):
+            raise ValueError(
+                "agent_ptypes must use PufferDrive ids "
+                f"[{TYPE_VEHICLE}, {TYPE_CYCLIST}]"
+            )
 
+        # Spawn pose, kept for the lane-distance / parking reward hooks (it is no
+        # longer used for a respawn teleport, which has been removed).
         self.spawn = np.stack([self.x, self.y, self.heading, self.vx, self.vy], axis=1)
-        self.respawned = np.zeros(n, dtype=bool)
+        # Inactive mask: an agent retired by ``_remove_agent`` (goal_behavior
+        # 'remove' or leaving the map) is dropped from controlled/static/slot_order
+        # and flagged here so the trajectory/viz layer hides it from that step on.
         self.removed = np.zeros(n, dtype=bool)
         self.stopped = np.zeros(n, dtype=bool)   # latched by GOAL_STOP; frozen in place
         # Collision response (see latch_ego_crash): the ego and any vehicle it
@@ -219,6 +234,16 @@ class SimScene:
         # another car. Decouples the rewarded ego collision from the general
         # crashed[0] freeze (which fires on any overlap to stop pass-through).
         self.ego_caused_collision = False
+        # Per-step ego collision event, recorded by latch_ego_crash *before* the
+        # contact response zeroes the ego velocity and consumed the same step by
+        # RewardHookEgoCollision.after_step_scene. ``last_ego_collision_partners`` is the
+        # set of vehicles the ego contacted this step (focal event, fault-agnostic);
+        # ``last_ego_fault_partners`` is the subset the ego was driving *into*.
+        # Recording the event here is what lets the rewarded collision fire at all:
+        # by the next observation the contacted boxes are frozen with zero velocity,
+        # so a velocity-based aggressor re-check would always read the ego as passive.
+        self.last_ego_collision_partners = np.empty(0, dtype=np.int64)
+        self.last_ego_fault_partners = np.empty(0, dtype=np.int64)
         self.collision_state = np.zeros(n, dtype=np.int64)
 
         # Per-agent conditioning inputs fed into the trailing ego observation slots.
@@ -359,36 +384,35 @@ class SimScene:
             o[3] = self.width[i] / MAX_VEH_WIDTH
             o[4] = self.length[i] / MAX_VEH_LEN
             o[5] = 1.0 if self.collision_state[i] > 0 else 0.0
-            o[6] = 1.0 if self.respawned[i] else 0.0
+            o[6] = 1.0 if self.removed[i] else 0.0
             o[7] = self.ptype[i] / 3.0
             o[EGO_FEATURES - 3] = self.collision_factor[i]
             o[EGO_FEATURES - 2] = self.offroad_factor[i]
             o[EGO_FEATURES - 1] = self.lane_width[i]
 
-            # ---- partners (skipped entirely while the ego is inactive) --------
+            # ---- partners (slot_order already excludes retired agents) --------
             base = EGO_FEATURES
-            if not self.respawned[i]:
-                cand = self.slot_order[(self.slot_order != i) & (~self.respawned[self.slot_order])]
-                if len(cand):
-                    dx = self.x[cand] - self.x[i]
-                    dy = self.y[cand] - self.y[i]
-                    near = (dx * dx + dy * dy) <= PARTNER_DIST2_GATE
-                    cand, dx, dy = cand[near], dx[near], dy[near]
-                    cand = cand[:MAX_PARTNER_OBJECTS]
-                    dx, dy = dx[:MAX_PARTNER_OBJECTS], dy[:MAX_PARTNER_OBJECTS]
-                    m = len(cand)
-                    if m:
-                        rel = np.empty((m, PARTNER_FEATURES), dtype=np.float32)
-                        rel[:, 0] = (dx * ch + dy * sh) * 0.02
-                        rel[:, 1] = (-dx * sh + dy * ch) * 0.02
-                        rel[:, 2] = self.width[cand] / MAX_VEH_WIDTH
-                        rel[:, 3] = self.length[cand] / MAX_VEH_LEN
-                        rel[:, 4] = self.heading_x[cand] * ch + self.heading_y[cand] * sh
-                        rel[:, 5] = self.heading_y[cand] * ch - self.heading_x[cand] * sh
-                        sp = np.hypot(self.vx[cand], self.vy[cand])
-                        vdh = self.vx[cand] * self.heading_x[cand] + self.vy[cand] * self.heading_y[cand]
-                        rel[:, 6] = np.copysign(sp, vdh) / MAX_SPEED
-                        o[base : base + m * PARTNER_FEATURES] = rel.reshape(-1)
+            cand = self.slot_order[self.slot_order != i]
+            if len(cand):
+                dx = self.x[cand] - self.x[i]
+                dy = self.y[cand] - self.y[i]
+                near = (dx * dx + dy * dy) <= PARTNER_DIST2_GATE
+                cand, dx, dy = cand[near], dx[near], dy[near]
+                cand = cand[:MAX_PARTNER_OBJECTS]
+                dx, dy = dx[:MAX_PARTNER_OBJECTS], dy[:MAX_PARTNER_OBJECTS]
+                m = len(cand)
+                if m:
+                    rel = np.empty((m, PARTNER_FEATURES), dtype=np.float32)
+                    rel[:, 0] = (dx * ch + dy * sh) * 0.02
+                    rel[:, 1] = (-dx * sh + dy * ch) * 0.02
+                    rel[:, 2] = self.width[cand] / MAX_VEH_WIDTH
+                    rel[:, 3] = self.length[cand] / MAX_VEH_LEN
+                    rel[:, 4] = self.heading_x[cand] * ch + self.heading_y[cand] * sh
+                    rel[:, 5] = self.heading_y[cand] * ch - self.heading_x[cand] * sh
+                    sp = np.hypot(self.vx[cand], self.vy[cand])
+                    vdh = self.vx[cand] * self.heading_x[cand] + self.vy[cand] * self.heading_y[cand]
+                    rel[:, 6] = np.copysign(sp, vdh) / MAX_SPEED
+                    o[base : base + m * PARTNER_FEATURES] = rel.reshape(-1)
 
             # ---- road segments ------------------------------------------------
             base = EGO_FEATURES + MAX_PARTNER_OBJECTS * PARTNER_FEATURES
@@ -454,11 +478,10 @@ class SimScene:
         Heading (and thus the collision box orientation) is left at the generated
         value, so an agent whose goal is not straight ahead slides diagonally
         toward it. The step is not clamped to the goal (it may overshoot);
-        arrival is handled afterwards by ``goal_step``. Stopped / respawned /
-        crashed agents are frozen, matching ``step_dynamics``.
+        arrival is handled afterwards by ``goal_step``. Stopped / crashed agents
+        are frozen, matching ``step_dynamics``.
         """
         idx = self.controlled[~(self.stopped | self.crashed)[self.controlled]]
-        idx = idx[~self.respawned[idx]]
         if len(idx) == 0:
             return
         gx = self.goal[idx, 0] - self.x[idx]
@@ -489,9 +512,9 @@ class SimScene:
             return
         boxes = _corners(self.x, self.y, self.heading, self.length, self.width)
         for i in idx:
-            if self.ptype[i] == TYPE_PEDESTRIAN or self.respawned[i]:
+            if self.ptype[i] == TYPE_PEDESTRIAN:
                 continue
-            cand = self.slot_order[(self.slot_order != i) & (~self.respawned[self.slot_order])]
+            cand = self.slot_order[self.slot_order != i]
             if not len(cand):
                 continue
             dx = self.x[cand] - self.x[i]
@@ -519,13 +542,17 @@ class SimScene:
         car ramming a passive ego stops the scene but is not the ego's collision.
 
         Called once per step by the rollout loop after ``update_metrics``; a
-        no-op once the ego has already crashed, is inactive, or has respawned.
+        no-op once the ego has already crashed or is inactive.
         """
-        if self.n <= 1 or self.crashed[0] or self.respawned[0]:
+        # Clear last step's event first, so a collision-free step (including the
+        # early returns below) reports no event to the hook.
+        self.last_ego_collision_partners = np.empty(0, dtype=np.int64)
+        self.last_ego_fault_partners = np.empty(0, dtype=np.int64)
+        if self.n <= 1 or self.crashed[0]:
             return
         if 0 not in self.controlled:
             return
-        others = self.slot_order[(self.slot_order != 0) & (~self.respawned[self.slot_order])]
+        others = self.slot_order[self.slot_order != 0]
         others = others[(self.ptype[others] != TYPE_PEDESTRIAN) & (~self.crashed[others])]
         if not len(others):
             return
@@ -541,8 +568,13 @@ class SimScene:
         hit = others[overlap]
         if not len(hit):
             return
-        # Fault attribution must read the ego velocity *before* it is zeroed below.
-        if self._ego_aggressor_mask(hit).any():
+        # Record the event + fault attribution while the ego velocity is still the
+        # genuine pre-collision one (it is zeroed below). The hook consumes these
+        # the same step instead of re-deriving contact from the frozen ego.
+        fault_mask = self._ego_aggressor_mask(hit)
+        self.last_ego_collision_partners = hit.copy()
+        self.last_ego_fault_partners = hit[fault_mask].copy()
+        if fault_mask.any():
             self.ego_caused_collision = True
         crashed_now = np.concatenate(([0], hit)).astype(np.int64)
         self.crashed[crashed_now] = True
@@ -550,9 +582,9 @@ class SimScene:
         self.vy[crashed_now] = 0.0
 
     def _remove_agent(self, i: int) -> None:
-        """Deactivate an agent after goal arrival for goal_behavior='remove'."""
+        """Retire an agent (goal_behavior='remove' or out-of-bounds): drop it from
+        control / collision / observation and flag it so the viz hides it."""
         self.removed[i] = True
-        self.respawned[i] = True  # existing trajectory/viz mask: hide inactive agents
         self.stopped[i] = False
         self.vx[i], self.vy[i] = 0.0, 0.0
         self.collision_state[i] = 0
@@ -572,9 +604,6 @@ class SimScene:
             obstacles (collisions + partner observations still see them);
           * ``goal_behavior="continue"``: leave the agent active and controlled;
             no state is changed when it enters the goal radius;
-          * ``goal_behavior="respawn"`` (drive.h GOAL_RESPAWN): teleport back to
-            the spawn pose and latch as respawned (excluded from collisions and
-            partner observations) - the original PufferDrive default;
           * ``goal_behavior="remove"``: delete the agent from subsequent control,
             collision checks, and partner observations.
         """
@@ -594,12 +623,6 @@ class SimScene:
                 self.vx[i], self.vy[i] = 0.0, 0.0
             elif self.goal_behavior == "continue":
                 continue
-            elif self.goal_behavior == "respawn":
-                self.x[i], self.y[i], self.heading[i] = self.spawn[i, 0], self.spawn[i, 1], self.spawn[i, 2]
-                self.heading_x[i] = np.cos(self.heading[i])
-                self.heading_y[i] = np.sin(self.heading[i])
-                self.vx[i], self.vy[i] = self.spawn[i, 3], self.spawn[i, 4]
-                self.respawned[i] = True
             else:  # remove
                 self._remove_agent(int(i))
         return ego_reached, reached
@@ -610,7 +633,7 @@ class SimScene:
         Called once per step after ``goal_step``. With ``goal_behavior='continue'``
         agents keep driving past their goal, so the map boundary
         (``|x| > map_half`` or ``|y| > map_half``) is what retires them. The ego
-        (agent 0) is exempt - its scene is finished by ``ReachedGoalHook`` when it
+        (agent 0) is exempt - its scene is finished by ``RewardHookReachedGoal`` when it
         reaches its goal, never by leaving the map. Returns the removed indices.
         """
         idx = self.controlled
@@ -622,33 +645,16 @@ class SimScene:
             self._remove_agent(int(i))
         return oob
 
-    # ------------------------------------------------------------- inspection
-    def dist_to_lane_centerline(self, points: np.ndarray) -> np.ndarray:
-        """Min distance of each point [M, 2] to any lane centerline segment.
-
-        Returns +inf entries when the scene has no lane geometry.
-        """
-        points = np.atleast_2d(np.asarray(points, dtype=np.float32))
-        if self.seg_start.shape[0] == 0:
-            return np.full(points.shape[0], np.inf, dtype=np.float32)
-        a, b = self.seg_start, self.seg_end                       # [S, 2]
-        ab = b - a
-        denom = np.maximum((ab * ab).sum(-1), 1e-9)               # [S]
-        ap = points[:, None, :] - a[None]                         # [M, S, 2]
-        t = np.clip((ap * ab[None]).sum(-1) / denom[None], 0.0, 1.0)
-        proj = a[None] + t[..., None] * ab[None]
-        d = points[:, None, :] - proj
-        return np.sqrt((d * d).sum(-1)).min(axis=1)
-
+    # ------------------------------------------------------ collision attribution
     def _ego_aggressor_mask(self, others: np.ndarray) -> np.ndarray:
         """Per-``others`` mask: True where the ego is driving *toward* that agent.
 
         Credits only ego-caused contact / closing. The ego is the aggressor w.r.t.
         an agent when its own velocity has a positive component along the
         ego->other direction above ``EGO_AGGRESSOR_MIN_SPEED``; a stopped/slow ego,
-        or one moving across or away from the other, is never at fault. Shared by
-        the TTC, collision and crash-latch checks so a car ramming a passive ego is
-        ignored by all three (only the ego closing in is scored).
+        or one moving across or away from the other, is never at fault. Used by
+        the crash-latch check so a car ramming a passive ego still stops the
+        rollout but is not recorded as ego-fault.
         """
         dx = self.x[others] - self.x[0]
         dy = self.y[others] - self.y[0]
@@ -657,163 +663,3 @@ class SimScene:
         safe = dist > 1e-6
         ego_closing[safe] = (self.vx[0] * dx[safe] + self.vy[0] * dy[safe]) / dist[safe]
         return ego_closing > EGO_AGGRESSOR_MIN_SPEED
-
-    def ego_collides_now(self, others=None) -> bool:
-        """Oriented-box overlap of the ego (agent 0) with a car it is driving into.
-
-        Only overlaps where the ego is the aggressor (see ``_ego_aggressor_mask``)
-        are reported, so another car ramming a passive ego is not counted as an ego
-        collision. ``others`` optionally restricts the check to a subset of agent
-        indices (e.g. the adversary), so the rewarded ego collision is specific to
-        the generated adversary rather than any vehicle.
-        """
-        if self.n <= 1 or self.respawned[0]:
-            return False
-        if others is None:
-            others = self.slot_order[(self.slot_order != 0) & (~self.respawned[self.slot_order])]
-        else:
-            others = np.asarray(others, dtype=np.int64)
-            others = others[(others != 0) & (~self.respawned[others])]
-        if not len(others):
-            return False
-        boxes = _corners(self.x, self.y, self.heading, self.length, self.width)
-        overlap = _sat_overlap(boxes[0], boxes[others])
-        if not overlap.any():
-            return False
-        return bool((overlap & self._ego_aggressor_mask(others)).any())
-
-    def ego_min_ttc_now(self, others=None) -> float:
-        """Relative-velocity TTC for the ego converging with another active agent.
-
-        ``others`` optionally restricts the sweep to a subset of agent indices
-        (e.g. the adversary), so the criticality TTC measures only the generated
-        adversary rather than any vehicle in the scene.
-
-        A pure ego-forward sweep (move only the ego, freeze the others) reports
-        TTC->0 for *any* car sitting in the ego's forward path, even one that is
-        pulling away - which a DDPO policy farms by parking/driving an adversary
-        just ahead of a moving ego. Instead each other box is swept along the
-        *relative* velocity ``v_other - v_ego`` in the ego frame (headings held
-        constant, same constant-velocity assumption as before):
-
-          * a car the ego is genuinely closing on -> small TTC (as before);
-          * a car drawing away (e.g. an adversary that overtook and is now
-            accelerating ahead of the ego) -> diverging, so no overlap and
-            TTC=+inf, removing the "ran ahead of the ego" hacking frames;
-          * a car bearing down on a passive (stopped/slow) ego -> +inf: the ego
-            is not driving toward it, so it fails the aggressor gate below and is
-            not scored as an ego near-miss (the other car is at fault).
-
-        Pairs whose relative velocity is ~0 (moving together, or both at rest)
-        can never close and are skipped, as are agents the ego is not actively
-        closing on (``_ego_aggressor_mask``).
-        """
-        if self.n <= 1 or self.respawned[0] or self.crashed[0]:
-            return float(np.inf)
-        if others is None:
-            others = self.slot_order[(self.slot_order != 0) & (~self.respawned[self.slot_order])]
-        else:
-            others = np.asarray(others, dtype=np.int64)
-            others = others[(others != 0) & (~self.respawned[others])]
-        others = others[(self.ptype[others] != TYPE_PEDESTRIAN) & (~self.crashed[others])]
-        if not len(others):
-            return float(np.inf)
-
-        # Only score agents the ego is actively driving toward (ego the aggressor);
-        # a car bearing down on a passive ego is the other car's fault, not a near
-        # miss the ego caused, so it is excluded from min-TTC.
-        others = others[self._ego_aggressor_mask(others)]
-        if not len(others):
-            return float(np.inf)
-
-        # Relative velocity of each other agent in the ego's (translating) frame.
-        rvx = self.vx[others] - self.vx[0]
-        rvy = self.vy[others] - self.vy[0]
-        closing = (rvx * rvx + rvy * rvy) >= 1e-6
-        if not closing.any():
-            return float(np.inf)
-        others, rvx, rvy = others[closing], rvx[closing], rvy[closing]
-
-        ego_box = _corners(
-            np.asarray([self.x[0]]),
-            np.asarray([self.y[0]]),
-            np.asarray([self.heading[0]]),
-            np.asarray([self.length[0]]),
-            np.asarray([self.width[0]]),
-        )[0]
-        # Other boxes at t=0; only their position translates over the sweep, so
-        # precompute the corners once and add the relative displacement.
-        base_boxes = _corners(
-            self.x[others],
-            self.y[others],
-            self.heading[others],
-            self.length[others],
-            self.width[others],
-        )
-        rv = np.stack([rvx, rvy], axis=1).astype(np.float64)  # [M, 2]
-        steps = int(np.ceil(TTC_SWEEP_HORIZON / max(self.dt, 1e-3)))
-        for step in range(0, steps + 1):
-            t = step * self.dt
-            moved = base_boxes + (rv * t)[:, None, :]
-            if _sat_overlap(ego_box, moved).any():
-                return float(t)
-        return float(np.inf)
-
-    def any_vehicle_overlap(self, margin: float = 0.0) -> bool:
-        """True if any two active (non-pedestrian, non-respawned) agent boxes overlap.
-
-        Boxes are grown by ``margin`` metres per side before the SAT test, so a
-        positive margin also rejects near-touching spawns; ``margin=0`` is exact
-        overlap. Used to flag degenerate generated init states (init_invalid).
-        """
-        active = self.slot_order[~self.respawned[self.slot_order]]
-        active = active[self.ptype[active] != TYPE_PEDESTRIAN]
-        if len(active) < 2:
-            return False
-        boxes = _corners(
-            self.x[active],
-            self.y[active],
-            self.heading[active],
-            self.length[active] + 2.0 * margin,
-            self.width[active] + 2.0 * margin,
-        )
-        for k in range(len(active) - 1):
-            dx = self.x[active[k + 1:]] - self.x[active[k]]
-            dy = self.y[active[k + 1:]] - self.y[active[k]]
-            gate = (dx * dx + dy * dy) <= COLLISION_DIST2_GATE
-            if gate.any() and _sat_overlap(boxes[k], boxes[k + 1:][gate]).any():
-                return True
-        return False
-
-    def adv_overlap(self, adv_idx, margin: float = 0.0) -> bool:
-        """True if an adversary box overlaps any other active agent box.
-
-        Adversary-only analogue of ``any_vehicle_overlap``: only overlaps that
-        involve a generated adversary (vs the ego or any real neighbour) flag the
-        init as degenerate, so a degenerate init is always the adversary's fault
-        and real Waymo neighbours never floor the reward.
-        """
-        adv_idx = np.asarray(adv_idx, dtype=np.int64)
-        adv_idx = adv_idx[~self.respawned[adv_idx]] if len(adv_idx) else adv_idx
-        if len(adv_idx) == 0:
-            return False
-        others = self.slot_order[~self.respawned[self.slot_order]]
-        others = others[self.ptype[others] != TYPE_PEDESTRIAN]
-        for a in adv_idx:
-            rest = others[others != a]
-            if len(rest) == 0:
-                continue
-            a_box = _corners(
-                self.x[a:a + 1], self.y[a:a + 1], self.heading[a:a + 1],
-                self.length[a:a + 1] + 2.0 * margin, self.width[a:a + 1] + 2.0 * margin,
-            )[0]
-            rest_box = _corners(
-                self.x[rest], self.y[rest], self.heading[rest],
-                self.length[rest] + 2.0 * margin, self.width[rest] + 2.0 * margin,
-            )
-            dx = self.x[rest] - self.x[a]
-            dy = self.y[rest] - self.y[a]
-            gate = (dx * dx + dy * dy) <= COLLISION_DIST2_GATE
-            if gate.any() and _sat_overlap(a_box, rest_box[gate]).any():
-                return True
-        return False

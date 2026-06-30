@@ -26,7 +26,7 @@ min_ego_drive: 10.0          # metres (map is 64x64 / fov=64)
 # normal-scene contribution, so the default keeps credit attributable to the adv.
 prune_base_to_ego: false
 # Force the decoded adversary to an ego-sized vehicle (type + length/width), the
-# latent-space analogue of the dm flow's vehicle projection of controlled agents.
+# latent-space analogue of the dm flow's vehicle projection of generated agents.
 force_adv_vehicle: true
 
 # Adversary conditioning target (requires a base ldm_adv ckpt trained with
@@ -74,9 +74,17 @@ sim_steps: 91
 planner_deterministic: true
 ttc_tau: 3.0
 init_overlap_margin: 0.0
+# Soft init-overlap (replaces the old hard init_invalid -1 floor): the adversary's
+# spawn box-IoU with its neighbours adds a graded penalty AND gates out criticality
+# (overlap_gate = smoothstep(IoU, lo, hi)), so an interpenetrating init can never
+# farm a fake near-miss while the policy still gets a "separate the boxes" gradient.
+init_overlap_penalty: 0.5        # weight on the IoU overlap penalty (constraint)
+init_overlap_gate_lo: 0.02       # IoU below which criticality is untouched
+init_overlap_gate_hi: 0.20       # IoU at/above which criticality is fully gated out
 goal_offlane_threshold: 2.75     # = hard end of the continuous lane penalty (m)
 goal_onroad_threshold: 2.75
-# criticality = risk_coef * noisy_OR(R_ttc, R_approach) + collision_coef*R_coll
+# criticality = risk_coef * noisy_OR(R_ttc, R_approach) * (1 - overlap_gate)
+# (collision no longer enters the reward; a contact still surfaces via dense TTC)
 risk_coef: 1.0
 approach_d_safe: 6.0             # adversary "close" scale for the proximity gate (m)
 approach_d_scale: 2.0
@@ -84,17 +92,21 @@ approach_close_delta: 2.0        # min (d0 - dmin) closed-in distance to score (
 approach_close_scale: 1.0        # closing-gate sharpness (smaller = crisper gate)
 approach_warmup_time: 0.5        # ignore first N s when measuring closing
 # constraints (subtracted, each >= 0)
-goal_offlane_penalty: 1.0        # weight on the continuous lane-distance penalty
+goal_offlane_penalty: 0.25        # weight on the continuous lane-distance penalty
 lane_soft: 1.75                  # lane penalty starts ramping here (m)
-parking_mismatch_penalty: 0.5    # inert here (no gt_parking_mask in init_adv)
-controlled_parking_penalty: 0.5  # penalise a parked adversary -> force it to drive
-# collision: time-gated bonus (not a +1 override).
+# A parked adversary is now rejected outright (hard reward = -1), so the soft
+# parking penalties below are no longer applied. parking_mismatch is also dropped
+# (only one adversary is generated). Kept for back-compat; inert in the reward.
+parking_mismatch_penalty: 0.0    # REMOVED from reward (single adversary)
+gen_agent_parking_penalty: 0.0  # REMOVED from reward (parked adv -> hard -1)
+# collision: NO LONGER in the reward. Still rolled out so r_collision / c_trivial
+# are logged as diagnostics (collision_enabled keeps populating ego_collision).
 collision_enabled: true
-collision_coef: 0.3
+collision_coef: 0.0              # REMOVED from reward (collision bonus dropped)
 collision_warmup: 0.75
 collision_window: 0.5
 trivial_collision_t: 0.75
-trivial_collision_penalty: 0.5
+trivial_collision_penalty: 0.0   # REMOVED from reward (trivial-collision penalty dropped)
 # deprecated linear proximity bonus (superseded by the gated approach bonus)
 min_dist_coef: 0.0
 min_dist_dmax: 10.0
@@ -106,23 +118,28 @@ ddim_eta: 1.0
 batch_size: 64
 # Per-context (GRPO) grouping: batch_size/group_size distinct contexts, each
 # sampled group_size times; advantages whitened within group.
-group_size: 16
-num_iterations: 20000
-inner_epochs: 2
-k_steps: 8
-min_diffusion_t: 20
+group_size: 8
+num_iterations: 40000
+inner_epochs: 1
+k_steps: 16
+min_diffusion_t: 1
 bf16: false
 logprob_bf16: false
 lr: 1e-5
 weight_decay: 1e-4
 grad_clip: 1.0
 save_every: 100
+# Resume this run from <output_dir>/last.ckpt when present: restores net weights,
+# the AdamW state, the global RNG, the iteration counter and the wandb run id. The
+# KL reference always stays anchored to ldm_adv_ckpt (the base manifold), never the
+# resumed weights. Set false to always start a fresh DDPO run from the base ckpt.
+resume: true
 output_dir: ${experiment.output_dir}
 
 ddpo:
   estimator: is
   clip_range: 1.0e-4
-  kl_coef: 0.01
+  kl_coef: 0.2
   adv_clip: 5.0
   adv_eps: 1.0e-6
   logratio_clip: 20.0
@@ -140,6 +157,16 @@ eval_every: 50
 eval_num_scenes: 8
 eval_visualize_reference: true
 eval_visualize_conditioning: true
+# Also run the val eval/viz on a fixed subset of the train scenes (the training
+# pool's first eval_num_scenes slots), logged under train_viz/*. Lets the rising
+# train reward be checked visually against the held-out val/* rollouts.
+eval_visualize_train: true
+# Diagnostic for GRPO signal quality: every N iterations, take the current train
+# batch, find the groups with the largest within-group reward spread, and log a
+# table plus top/bottom rollout media. This does not change the reward or update.
+train_group_viz_every: 50
+train_group_viz_num_groups: 2
+train_group_viz_extremes: 1
 save_gif: true
 gif_fps: 10
 gif_max_frames: 90

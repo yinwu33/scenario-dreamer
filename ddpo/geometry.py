@@ -54,6 +54,115 @@ def _sat_overlap(box_a, boxes_b):
     return overlap
 
 
+def _poly_signed_area(poly) -> float:
+    """Shoelace signed area of an ordered polygon (CCW positive)."""
+    n = len(poly)
+    if n < 3:
+        return 0.0
+    a = 0.0
+    for i in range(n):
+        x1, y1 = poly[i]
+        x2, y2 = poly[(i + 1) % n]
+        a += x1 * y2 - x2 * y1
+    return 0.5 * a
+
+
+def _clip_polygon(subject, clip):
+    """Sutherland-Hodgman clip of ``subject`` by the convex ``clip`` polygon.
+
+    Both are sequences of (x, y) vertices in any consistent winding. Returns the
+    intersection polygon as a list of (x, y) tuples (empty if disjoint).
+    """
+    clip = [tuple(p) for p in clip]
+    sign = 1.0 if _poly_signed_area(clip) >= 0.0 else -1.0
+
+    def inside(p, a, b):
+        cr = (b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0])
+        return cr * sign >= 0.0
+
+    def intersect(p1, p2, a, b):
+        x1, y1 = p1
+        x2, y2 = p2
+        x3, y3 = a
+        x4, y4 = b
+        den = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4)
+        if abs(den) < 1e-12:
+            return p2
+        t = ((x1 - x3) * (y3 - y4) - (y1 - y3) * (x3 - x4)) / den
+        return (x1 + t * (x2 - x1), y1 + t * (y2 - y1))
+
+    output = [tuple(p) for p in subject]
+    K = len(clip)
+    for i in range(K):
+        if not output:
+            break
+        a, b = clip[i], clip[(i + 1) % K]
+        inp, output = output, []
+        s = inp[-1]
+        for e in inp:
+            if inside(e, a, b):
+                if not inside(s, a, b):
+                    output.append(intersect(s, e, a, b))
+                output.append(e)
+            elif inside(s, a, b):
+                output.append(intersect(s, e, a, b))
+            s = e
+    return output
+
+
+def _obb_iou(box_a, boxes_b):
+    """IoU of one oriented box [4,2] against many [M,4,2] -> float [M] in [0,1].
+
+    Continuous companion to ``_sat_overlap``: exact convex-polygon intersection
+    area over (area_a + area_b - inter). 0 when separated or merely touching;
+    ramps toward 1 with deeper interpenetration. Used for the soft init-overlap
+    penalty (a graded signal the flat SAT boolean cannot give).
+    """
+    M = boxes_b.shape[0]
+    out = np.zeros(M, dtype=np.float64)
+    if M == 0:
+        return out
+    area_a = abs(_poly_signed_area(box_a))
+    for i in range(M):
+        inter = _clip_polygon(box_a, boxes_b[i])
+        if len(inter) < 3:
+            continue
+        inter_area = abs(_poly_signed_area(inter))
+        if inter_area <= 0.0:
+            continue
+        area_b = abs(_poly_signed_area(boxes_b[i]))
+        denom = area_a + area_b - inter_area
+        if denom > 1e-9:
+            out[i] = inter_area / denom
+    return out
+
+
+def _obb_overlap_frac(box_a, boxes_b):
+    """Fraction of box_a's area overlapped by each of many [M,4,2] -> float [M] in [0,1].
+
+    Like ``_obb_iou`` but normalised by box_a's OWN area instead of the union, so it
+    measures how much of box_a (the adversary) is interpenetrating, independent of
+    boxes_b's size: a half-buried adversary reads 0.5 whether the neighbour is a car
+    or a bus (IoU would dilute that toward 0 for a large neighbour). 0 when separated
+    or merely touching; 1 when box_a is fully contained.
+    """
+    M = boxes_b.shape[0]
+    out = np.zeros(M, dtype=np.float64)
+    if M == 0:
+        return out
+    area_a = abs(_poly_signed_area(box_a))
+    if area_a <= 1e-9:
+        return out
+    for i in range(M):
+        inter = _clip_polygon(box_a, boxes_b[i])
+        if len(inter) < 3:
+            continue
+        inter_area = abs(_poly_signed_area(inter))
+        if inter_area > 0.0:
+            out[i] = inter_area / area_a
+    return out
+
+
 def ego_collides(ego, others) -> bool:
     """ego/others: dicts of arrays (x,y,heading,length,width). Returns any-overlap."""
     if np.atleast_1d(others["x"]).shape[0] == 0:

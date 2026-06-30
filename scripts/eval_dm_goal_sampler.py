@@ -41,7 +41,7 @@ METRIC_KEYS = (
     "init_invalid",
     "goal_offlane_frac",
     "parking_mismatch_frac",
-    "controlled_parking_frac",
+    "gen_agent_is_parked",
     "ego_min_ttc",
     "ego_adv_min_dist",
 )
@@ -65,7 +65,7 @@ def _build_reward(cfg):
         parking_mismatch_penalty=cfg.get("parking_mismatch_penalty", 0.5),
         min_dist_coef=cfg.get("min_dist_coef", 0.0),
         min_dist_dmax=cfg.get("min_dist_dmax", 20.0),
-        controlled_parking_penalty=cfg.get("controlled_parking_penalty", 0.0),
+        gen_agent_parking_penalty=cfg.get("gen_agent_parking_penalty", 0.0),
         seed=cfg.seed,
         backend=cfg.get("reward_backend", "numpy"),
         pufferdrive_root=cfg.get("pufferdrive_root", None),
@@ -142,7 +142,7 @@ def _evaluate_sampler(
     print(
         f"{name:8s} reward={summary['reward']:+.3f} "
         f"init={summary['init_invalid']:.3f} goalOff={summary['goal_offlane_frac']:.3f} "
-        f"parked={summary['controlled_parking_frac']:.3f} "
+        f"parked={summary['gen_agent_is_parked']:.3f} "
         f"advDist={summary['ego_adv_min_dist']:.2f} time={elapsed:.1f}s",
         flush=True,
     )
@@ -154,7 +154,7 @@ def _passes(base: dict[str, float], cand: dict[str, float], args) -> tuple[bool,
     checks = (
         ("init_invalid", args.max_init_invalid_delta),
         ("goal_offlane_frac", args.max_goal_offlane_delta),
-        ("controlled_parking_frac", args.max_controlled_parking_delta),
+        ("gen_agent_is_parked", args.max_gen_agent_parking_delta),
         ("parking_mismatch_frac", args.max_parking_mismatch_delta),
     )
     for key, max_delta in checks:
@@ -199,18 +199,18 @@ def _save_visuals(
         states = scenes.agent_states.detach().cpu().numpy()
         types = scenes.agent_types.detach().cpu().numpy()
         agent_scene_idx = scenes.agent_scene_idx.detach().cpu().numpy()
-        controlled = scenes.meta.get("controlled_mask")
-        if isinstance(controlled, torch.Tensor):
-            controlled = controlled.detach().cpu().numpy()
+        gen_agent_mask = scenes.meta.get("gen_agent_mask")
+        if isinstance(gen_agent_mask, torch.Tensor):
+            gen_agent_mask = gen_agent_mask.detach().cpu().numpy()
 
         for s in range(scenes.num_scenes):
             a_sel = agent_scene_idx == s
             agent_colors = None
-            if controlled is not None:
-                ctrl_s = controlled[a_sel]
+            if gen_agent_mask is not None:
+                gen_agent_s = gen_agent_mask[a_sel]
                 agent_colors = [
-                    CONTROL_COLOR if (i > 0 and bool(ctrl_s[i])) else None
-                    for i in range(len(ctrl_s))
+                    CONTROL_COLOR if (i > 0 and bool(gen_agent_s[i])) else None
+                    for i in range(len(gen_agent_s))
                 ]
             kwargs = dict(
                 agent_states=states[a_sel],
@@ -259,7 +259,7 @@ def main() -> int:
     ap.add_argument("--eta", type=float, default=1.0)
     ap.add_argument("--max-init-invalid-delta", type=float, default=0.03)
     ap.add_argument("--max-goal-offlane-delta", type=float, default=0.05)
-    ap.add_argument("--max-controlled-parking-delta", type=float, default=0.05)
+    ap.add_argument("--max-gen-agent-parking-delta", type=float, default=0.05)
     ap.add_argument("--max-parking-mismatch-delta", type=float, default=0.05)
     ap.add_argument("--out-dir", default="outputs/dm_goal_sampler_eval")
     ap.add_argument("--num-visuals", type=int, default=4)

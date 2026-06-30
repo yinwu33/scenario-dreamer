@@ -379,7 +379,7 @@ class LDMAdvConditioningPool:
         adversary is generated in the context of all real neighbours and the
         criticality credit is de-biased by GRPO per-context whitening (the normal
         scene is identical across a group, so its constant contribution is
-        baselined out). ``controlled_mask`` still flags only the adv, so the
+        baselined out). ``gen_agent_mask`` still flags only the adv, so the
         approach / lane / parking terms and the green viz highlight stay
         adv-specific either way.
       * **near-stationary egos filtered out** -- a scene whose real ego barely
@@ -493,6 +493,10 @@ class LDMAdvConditioningPool:
             d["agent"].log_var = d["agent"].log_var[:1]
         if "partition_mask" in d["agent"]:
             d["agent"].partition_mask = d["agent"].partition_mask[:1]
+        # Per-agent conditioning labels must shrink with the agent set, otherwise
+        # the conditioned DiT adds an (N, 3) embedding onto a single ego token.
+        if "cond" in d["agent"]:
+            d["agent"].cond = d["agent"].cond[:1]
         d["num_agents"] = 1
         d["agent", "to", "agent"].edge_index = get_edge_index_complete_graph(1)
         d["lane", "to", "agent"].edge_index = get_edge_index_bipartite(num_lanes, 1)
@@ -522,6 +526,30 @@ class LDMAdvConditioningPool:
         )
         return self._unnormalize_lane_polylines(road_points)
 
+    def build_scene(self, scene_idx: int, *, require_driving_ego: bool = True):
+        """Build the full conditioning graph for dataset index ``scene_idx`` with
+        every config-driven transform applied: sorted physical lane polylines, the
+        optional base->ego prune, and the per-scene adversary-conditioning target
+        override. Returns ``None`` when the scene has no non-ego agent (or, when
+        ``require_driving_ego``, a near-stationary ego).
+
+        Shared by the pool's own random sampling (``_get``) and external callers
+        (the ldm_adv viz test scripts) so they condition the model exactly the way
+        DDPO training does."""
+        with open(self.dataset.files[scene_idx], "rb") as f:
+            raw = pickle.load(f)
+        # Cheap filter on the raw pickle before building the graph.
+        if require_driving_ego and not self._ego_drives_enough(raw):
+            return None
+        d = self.dataset.get(scene_idx)
+        if d is None:
+            return None
+        d["lane"].road_points = self._sorted_road_points(raw)
+        if self.prune_base_to_ego:
+            d = self._prune_base_to_ego(d)
+        d = self._apply_target_cond(d, scene_idx)
+        return d
+
     def _get(self, pool_idx: int):
         """Graph for pool slot ``pool_idx``. Scenes with no non-ego agent or a
         near-stationary ego are skipped by probing subsequent dataset indices
@@ -531,20 +559,10 @@ class LDMAdvConditioningPool:
         ds_idx = int(self.pool_indices[pool_idx])
         for probe in range(len(self.dataset)):
             scene_idx = (ds_idx + probe) % len(self.dataset)
-            with open(self.dataset.files[scene_idx], "rb") as f:
-                raw = pickle.load(f)
-            # Cheap filters on the raw pickle before building the graph.
-            if not self._ego_drives_enough(raw):
-                continue
-            d = self.dataset.get(scene_idx)
-            if d is None:
-                continue
-            d["lane"].road_points = self._sorted_road_points(raw)
-            if self.prune_base_to_ego:
-                d = self._prune_base_to_ego(d)
-            d = self._apply_target_cond(d, scene_idx)
-            self._cache[pool_idx] = d
-            return d
+            d = self.build_scene(scene_idx, require_driving_ego=True)
+            if d is not None:
+                self._cache[pool_idx] = d
+                return d
         raise RuntimeError("no valid (driving-ego) conditioning graphs in dataset")
 
     def batch_from_indices(self, indices) -> Batch:

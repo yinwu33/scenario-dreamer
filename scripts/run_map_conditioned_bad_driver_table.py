@@ -61,7 +61,7 @@ METRIC_KEYS = (
     "goal_offlane_frac",
     "parking_mismatch_frac",
     "ego_adv_min_dist",
-    "controlled_parking_frac",
+    "gen_agent_is_parked",
 )
 
 
@@ -82,10 +82,10 @@ def _cat_scene_chunks(chunks: list[GeneratedScenes]) -> GeneratedScenes:
     agent_scene_idx = []
     lane_polylines = []
     lane_scene_idx = []
-    controlled = []
+    gen_agent_masks = []
     gt_parking = []
     scene_offset = 0
-    has_controlled = any("controlled_mask" in c.meta for c in chunks)
+    has_gen_agent_mask = any("gen_agent_mask" in c.meta for c in chunks)
     has_gt_parking = any("gt_parking_mask" in c.meta for c in chunks)
 
     for scenes in chunks:
@@ -96,9 +96,9 @@ def _cat_scene_chunks(chunks: list[GeneratedScenes]) -> GeneratedScenes:
         agent_scene_idx.append(a_idx + scene_offset)
         lane_polylines.append(_as_cpu_tensor(scenes.lane_polylines))
         lane_scene_idx.append(l_idx + scene_offset)
-        if has_controlled:
-            controlled.append(
-                _as_cpu_tensor(scenes.meta.get("controlled_mask", torch.zeros_like(a_idx, dtype=torch.bool))).bool()
+        if has_gen_agent_mask:
+            gen_agent_masks.append(
+                _as_cpu_tensor(scenes.meta.get("gen_agent_mask", torch.zeros_like(a_idx, dtype=torch.bool))).bool()
             )
         if has_gt_parking:
             gt_parking.append(
@@ -107,8 +107,8 @@ def _cat_scene_chunks(chunks: list[GeneratedScenes]) -> GeneratedScenes:
         scene_offset += int(scenes.num_scenes)
 
     meta = {"lane_scene_idx": torch.cat(lane_scene_idx, dim=0)}
-    if has_controlled:
-        meta["controlled_mask"] = torch.cat(controlled, dim=0)
+    if has_gen_agent_mask:
+        meta["gen_agent_mask"] = torch.cat(gen_agent_masks, dim=0)
     if has_gt_parking:
         meta["gt_parking_mask"] = torch.cat(gt_parking, dim=0)
 
@@ -129,8 +129,8 @@ def _slice_scenes(scenes: GeneratedScenes, start: int, end: int) -> GeneratedSce
     l_sel = (l_idx >= start) & (l_idx < end)
 
     meta = {"lane_scene_idx": l_idx[l_sel] - start}
-    if "controlled_mask" in scenes.meta:
-        meta["controlled_mask"] = _as_cpu_tensor(scenes.meta["controlled_mask"]).bool()[a_sel]
+    if "gen_agent_mask" in scenes.meta:
+        meta["gen_agent_mask"] = _as_cpu_tensor(scenes.meta["gen_agent_mask"]).bool()[a_sel]
     if "gt_parking_mask" in scenes.meta:
         meta["gt_parking_mask"] = _as_cpu_tensor(scenes.meta["gt_parking_mask"]).bool()[a_sel]
 
@@ -276,7 +276,7 @@ def _summarize(metrics: dict[str, np.ndarray]) -> dict[str, float]:
         "goal_offlane_frac": _mean_finite(metrics["goal_offlane_frac"]),
         "parking_mismatch_frac": _mean_finite(metrics["parking_mismatch_frac"]),
         "ego_adv_min_dist": _mean_finite(metrics.get("ego_adv_min_dist", [])),
-        "controlled_parking_frac": _mean_finite(metrics.get("controlled_parking_frac", [])),
+        "gen_agent_is_parked": _mean_finite(metrics.get("gen_agent_is_parked", [])),
     }
 
 

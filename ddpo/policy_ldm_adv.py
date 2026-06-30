@@ -29,7 +29,7 @@ from nn_modules.ldm_adv import LDMAdv
 from utils.data_container import ScenarioDreamerData
 from utils.data_helpers import unnormalize_latents, unnormalize_scene
 
-from .interfaces import GeneratedScenes, SamplingTrajectory
+from .interfaces import GeneratedScenes, SamplingTrajectory, single_adv_local_idx
 
 _LOG_2PI = math.log(2.0 * math.pi)
 
@@ -384,7 +384,7 @@ class LDMAdvDDPOPolicy:
     def _decode(self, x_agent, x_lane, x_adv, data) -> GeneratedScenes:
         """Decode the ``ego + adv`` scene: re-insert the adv into the base agent
         set, decode the full set in one pass (permutation-equivariant set decoder),
-        then expose every scene as ``[ego, adv]`` with ``controlled_mask`` on the
+        then expose every scene as ``[ego, adv]`` with ``gen_agent_mask`` on the
         adv. Mirrors ``ScenarioDreamerLDMAdv._decode_scene_and_adv``."""
         agent_latents, lane_latents = unnormalize_latents(
             x_agent[:, 0],
@@ -437,36 +437,42 @@ class LDMAdvDDPOPolicy:
         agent_types = agent_types.clone()
 
         num_scenes = int(data.batch_size)
-        controlled = torch.zeros(combined_latents.shape[0], dtype=torch.bool, device=self.device)
-        controlled[num_base:] = True  # the appended adv rows
+        gen_agent_mask = torch.zeros(
+            combined_latents.shape[0], dtype=torch.bool, device=self.device
+        )
+        gen_agent_mask[num_base:] = True  # the appended adv rows
         if self.force_adv_vehicle:
             agent_states, agent_types = self._project_adv_vehicle(
-                agent_states, agent_types, combined_batch, num_scenes, controlled
+                agent_states, agent_types, combined_batch, num_scenes, gen_agent_mask
             )
 
-        meta = {"lane_scene_idx": lane_batch, "controlled_mask": controlled}
+        meta = {"lane_scene_idx": lane_batch, "gen_agent_mask": gen_agent_mask}
         lane_edge_store = data["lane", "to", "lane"]
         if "edge_index" in lane_edge_store:
             meta["lane_edge_index"] = lane_edge_store.edge_index
         if "type" in lane_edge_store:
             meta["lane_edge_type"] = lane_edge_store.type
+        adv_local_idx = single_adv_local_idx(gen_agent_mask, combined_batch, num_scenes)
         return GeneratedScenes(
             agent_states=agent_states,
             agent_types=agent_types,
             agent_scene_idx=combined_batch,
             lane_polylines=data["lane"].road_points,
             num_scenes=num_scenes,
+            adv_local_idx=adv_local_idx,
             meta=meta,
         )
 
-    def _project_adv_vehicle(self, agent_states, agent_types, agent_batch, num_scenes, controlled):
+    def _project_adv_vehicle(
+        self, agent_states, agent_types, agent_batch, num_scenes, gen_agent_mask
+    ):
         """Force the adversary to be an ego-sized vehicle (type + length/width),
-        matching the dm flow's vehicle projection of controlled agents."""
-        if not controlled.any():
+        matching the dm flow's vehicle projection of generated agents."""
+        if not gen_agent_mask.any():
             return agent_states, agent_types
         counts = torch.bincount(agent_batch, minlength=num_scenes)
         ego_idx = torch.cumsum(counts, 0) - counts  # first (ego) row per scene
         ego_size = agent_states[ego_idx, 5:7]
-        agent_states[controlled, 5:7] = ego_size[agent_batch[controlled]]
-        agent_types[controlled] = 0  # vehicle type id
+        agent_states[gen_agent_mask, 5:7] = ego_size[agent_batch[gen_agent_mask]]
+        agent_types[gen_agent_mask] = 0  # vehicle type id
         return agent_states, agent_types

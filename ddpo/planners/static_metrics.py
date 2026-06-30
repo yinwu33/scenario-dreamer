@@ -1,11 +1,12 @@
 """Init-state (non-rollout) validity metrics for planners that don't use hooks.
 
-The numpy ``SimScene`` planners compute goal-off-lane / parking / controlled-
+The numpy ``SimScene`` planners compute goal-off-lane / parking / generated-agent
 parking fractions through rollout hooks. Backends that own their own loop (e.g.
 ``puffer_drive``) cannot run those hooks, so they call ``add_static_metrics``
 to fill the same metric keys directly from the generated init states + lanes.
 
-Mirrors ``GoalOfflaneHook`` / ``ParkingMismatchHook`` / ``ControlledParkingHook``.
+Mirrors ``RewardHookGoalOfflane`` / ``RewardHookParkingMismatch`` /
+``RewardHookGenAgentParking``.
 """
 
 from __future__ import annotations
@@ -14,7 +15,8 @@ import numpy as np
 import torch
 
 from ..interfaces import GeneratedScenes
-from ..pufferdrive_sim import MIN_DISTANCE_TO_GOAL, TYPE_CYCLIST, TYPE_VEHICLE, SimConfig
+from ..pufferdrive_sim import MIN_DISTANCE_TO_GOAL, TYPE_VEHICLE, SimConfig
+from .type_utils import to_puffer_agent_types
 
 
 def _to_numpy(value, dtype=None) -> np.ndarray:
@@ -57,10 +59,10 @@ def add_static_metrics(
     goal_offlane_threshold: float,
     goal_onroad_threshold: float,
 ) -> dict:
-    """Fill controlled-agent lane / parking-mismatch / parking fractions.
+    """Fill generated-agent lane / parking-mismatch / parking fractions.
 
-    Goal-off-lane and lane-distance metrics are computed only over DDPO-controlled
-    non-ego vehicles, mirroring ``GoalOfflaneHook``. Adds the keys in place and
+    Goal-off-lane and lane-distance metrics are computed only over DDPO-generated
+    non-ego vehicles, mirroring ``RewardHookGoalOfflane``. Adds the keys in place and
     returns ``metrics``. ``ego_adv_min_dist`` needs per-step rollout positions
     this static path does not have; it is left at +inf (zero shaping bonus)
     unless the caller already populated it.
@@ -75,15 +77,15 @@ def add_static_metrics(
     goal_lane_dist = np.zeros(scenes.num_scenes, dtype=np.float32)
     spawn_lane_dist = np.zeros(scenes.num_scenes, dtype=np.float32)
     parking_mismatch = np.zeros(scenes.num_scenes, dtype=np.float32)
-    controlled_parking = np.zeros(scenes.num_scenes, dtype=np.float32)
+    gen_agent_parking = np.zeros(scenes.num_scenes, dtype=np.float32)
     gt_parking = scenes.meta.get("gt_parking_mask")
     if gt_parking is not None:
         gt_parking = _to_numpy(gt_parking, bool)
-    controlled = scenes.meta.get("controlled_mask")
-    if controlled is not None:
-        controlled = _to_numpy(controlled, bool)
+    gen_agent_mask = scenes.meta.get("gen_agent_mask")
+    if gen_agent_mask is not None:
+        gen_agent_mask = _to_numpy(gen_agent_mask, bool)
 
-    ptype = (types + 1).clip(TYPE_VEHICLE, TYPE_CYCLIST)
+    ptype = to_puffer_agent_types(types)
     for s in range(scenes.num_scenes):
         a_sel = agent_scene_idx == s
         s_states = states[a_sel]
@@ -99,28 +101,30 @@ def add_static_metrics(
             if len(gt_p):
                 parking_mismatch[s] = float(((gen_dist < MIN_DISTANCE_TO_GOAL) != gt_p).mean())
 
-        adv_local = np.zeros(0, dtype=np.int64)
-        if controlled is not None:
-            ctrl_s = controlled[a_sel]
-            adv_local = np.nonzero(ctrl_s)[0]
-            adv_local = adv_local[adv_local > 0]  # drop ego (local 0)
-            if len(adv_local):
-                controlled_parking[s] = float((gen_dist[adv_local] < MIN_DISTANCE_TO_GOAL).mean())
+        gen_agent_local = np.zeros(0, dtype=np.int64)
+        if gen_agent_mask is not None:
+            gen_agent_s = gen_agent_mask[a_sel]
+            gen_agent_local = np.nonzero(gen_agent_s)[0]
+            gen_agent_local = gen_agent_local[gen_agent_local > 0]  # drop ego
+            if len(gen_agent_local):
+                gen_agent_parking[s] = float(
+                    (gen_dist[gen_agent_local] < MIN_DISTANCE_TO_GOAL).mean()
+                )
 
-        controlled_local = adv_local[: int(sim_cfg.max_controlled_agents)]
-        if len(controlled_local) == 0:
+        gen_agent_local = gen_agent_local[: int(sim_cfg.max_controlled_agents)]
+        if len(gen_agent_local) == 0:
             continue
 
-        global_idx = np.nonzero(a_sel)[0][controlled_local]
+        global_idx = np.nonzero(a_sel)[0][gen_agent_local]
         eligible = ptype[global_idx] == TYPE_VEHICLE
         if not eligible.any():
             continue
 
-        # Mirror GoalOfflaneHook: only DDPO-controlled non-ego vehicles are
+        # Mirror RewardHookGoalOfflane: only DDPO-generated non-ego vehicles are
         # scored; ego/fixed GT agents are excluded from the lane constraint.
         s_lanes = lanes[lane_scene_idx == s]
-        spawn_d = _lane_distance(spawn[controlled_local], s_lanes)
-        goal_d = _lane_distance(goal[controlled_local], s_lanes)
+        spawn_d = _lane_distance(spawn[gen_agent_local], s_lanes)
+        goal_d = _lane_distance(goal[gen_agent_local], s_lanes)
         offlane = eligible & (
             (np.isfinite(spawn_d) & (spawn_d > goal_onroad_threshold))
             | (np.isfinite(goal_d) & (goal_d > goal_offlane_threshold))
@@ -137,7 +141,7 @@ def add_static_metrics(
     metrics["goal_lane_dist"] = goal_lane_dist
     metrics["spawn_lane_dist"] = spawn_lane_dist
     metrics["parking_mismatch_frac"] = parking_mismatch
-    metrics["controlled_parking_frac"] = controlled_parking
+    metrics["gen_agent_is_parked"] = gen_agent_parking
     metrics.setdefault(
         "ego_adv_min_dist", np.full(scenes.num_scenes, np.inf, dtype=np.float32)
     )

@@ -12,7 +12,7 @@ defaults:
   - dm_fixed_map_agent_goal/model@dm_fixed_map_agent_goal.model
   - dm_fixed_map_agent_goal/datamodule@dm_fixed_map_agent_goal.datamodule
   - ddpo/dm_fixed_map_agent_goal@ddpo
-  - planner@ddpo.planner: selfplay_drive
+  - planner@ddpo.planner: bad_driver
   - sim: base
   - _self_
 

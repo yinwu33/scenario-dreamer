@@ -17,7 +17,7 @@ control_agent_num: 1       # number of non-ego agents to generate; -1 = all
 
 # --- ego goal override (rule-based, applied at conditioning load) -----------
 # Real SDC trajectories often barely move (goal ~= spawn), so the ego is never
-# controlled and the criticality reward gets no signal. Replace the ego goal
+# planner-controlled and the criticality reward gets no signal. Replace the ego goal
 # with a far, forward, on-road lane endpoint so the ego actually drives; the
 # (fixed) ego node then conditions the generated adversaries. Falls back to the
 # original goal when no lane endpoint qualifies.
@@ -52,12 +52,12 @@ goal_offlane_penalty: 1.0       # reward -= penalty * frac of moving cars off-la
 parking_mismatch_penalty: 0.5
 # Dense shaping toward criticality (numpy backend): bonus =
 # min_dist_coef * clip(1 - ego_adv_min_dist / min_dist_dmax, 0, 1), the closest
-# same-step ego<->controlled-adversary centre distance over the rollout.
+# same-step ego<->generated-adversary centre distance over the rollout.
 min_dist_coef: 0.5
 min_dist_dmax: 10.0             # metres; beyond this the bonus saturates at 0 (fov=64)
-# Penalise a controlled adversary generated parked (goal within 2 m of spawn)
+# Penalise a generated adversary that is parked (goal within 2 m of spawn)
 # to force it to actually drive: reward -= penalty * frac of parked adversaries.
-controlled_parking_penalty: 0.5
+gen_agent_parking_penalty: 0.5
 
 # --- DDPO ---------------------------------------------------------------------
 sampler: ddpm                 # "ddpm" keeps the original 100-step policy; "ddim" uses stochastic DDIM
@@ -80,7 +80,7 @@ output_dir: ${experiment.output_dir}
 ddpo:
   estimator: is
   clip_range: 1.0e-4
-  kl_coef: 0.01  # analytic KL(policy||ref) trust region over free dims of controlled nodes; 0 disables
+  kl_coef: 0.01  # analytic KL(policy||ref) trust region over free dims of generated nodes; 0 disables
   adv_clip: 5.0
   adv_eps: 1.0e-6
   logratio_clip: 20.0

@@ -16,7 +16,7 @@ from typing import Any
 import numpy as np
 import torch
 
-from planner.selfplay_drive.planner import OBS_DIM
+from planner..planner import OBS_DIM
 
 from .interfaces import GeneratedScenes
 from .pufferdrive_sim import load_sim_config

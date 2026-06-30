@@ -26,6 +26,7 @@ from ddpo.policy import DMFixedMapAgentGoalDDPOPolicy, DMGoalDDPOPolicy
 from ddpo.policy_ldm import LDMGoalDDPOPolicy
 from ddpo.policy_ldm_adv import LDMAdvDDPOPolicy
 from ddpo.reward import PufferDriveReward
+from ddpo.interfaces import GeneratedScenes
 from datasets.waymo.dataset_dm_fixed_map_agent_goal_waymo import WaymoDatasetDMFixedMapAgentGoal
 from utils.train_helpers import cache_latent_stats, set_latent_stats
 
@@ -176,9 +177,365 @@ def _bf16_autocast(device: str, enabled: bool = True):
     return nullcontext()
 
 
+def _rng_snapshot(device: str) -> dict:
+    """Global RNG state for a faithful DDPO resume (torch CPU + numpy + cuda)."""
+    snap = {"torch": torch.get_rng_state(), "numpy": np.random.get_state()}
+    if str(device).startswith("cuda") and torch.cuda.is_available():
+        snap["cuda"] = torch.cuda.get_rng_state_all()
+    return snap
+
+
+def _rng_restore(snap: dict, device: str) -> None:
+    """Inverse of ``_rng_snapshot``. RNG byte tensors are forced back to CPU since
+    ``torch.load(..., map_location=device)`` may have moved them onto the GPU."""
+    if not snap:
+        return
+    if "torch" in snap:
+        torch.set_rng_state(snap["torch"].cpu())
+    if "numpy" in snap:
+        np.random.set_state(snap["numpy"])
+    if "cuda" in snap and str(device).startswith("cuda") and torch.cuda.is_available():
+        torch.cuda.set_rng_state_all([s.cpu() for s in snap["cuda"]])
+
+
+# Per-agent raw numbers logged as a wandb.Table next to the rollout images, so the
+# adversary's generated output can be read off directly when it is hard to see in
+# the render (e.g. it spawns outside the 64x64 m FOV the viz clips to, or sits on
+# top of the ego). Positions are physical metres in the scene frame (centre = 0),
+# the same frame as the viz; agent_states layout is
+# [x, y, speed, cos, sin, length, width, goal_x, goal_y].
+_ADV_TABLE_COLUMNS = [
+    "variant", "scene", "idx", "type", "in_fov",
+    "x", "y", "heading_deg", "speed", "length", "width",
+    "goal_x", "goal_y", "goal_dist", "dist_to_ego",
+    "traj_x0", "traj_y0", "traj_xT", "traj_yT", "n_steps", "reward",
+]
+
+_REWARD_COMPONENT_KEYS = (
+    "criticality", "r_ttc", "r_approach",
+    "constraint", "c_spawn_lane", "c_goal_lane", "c_overlap", "c_parking",
+    "spawn_lane_dist", "goal_lane_dist", "init_overlap_frac",
+    "ego_adv_init_dist", "ego_adv_min_dist_warmup",
+)
+
+_GROUP_TABLE_COLUMNS = [
+    "iter", "group", "sample", "rank", "selected_for_media",
+    "reward", "advantage", "group_mean", "group_std", "group_min", "group_max",
+    "group_pos_count", "group_skipped",
+    *_REWARD_COMPONENT_KEYS,
+]
+
+
+def _adv_agent_rows(name, s, states_s, types_s, gen_agent_s, traj, reward_s):
+    """One row per DDPO-generated non-ego adversary agent in scene ``s``.
+
+    ``states_s`` / ``types_s`` / ``gen_agent_s`` are this scene's slices of the
+    decoded agent_states / agent_types / gen_agent_mask; ``traj`` is the scene's rollout
+    dict (per-step [T, n_agents] arrays in the same per-agent order). The endpoints
+    are taken from the first episode so they line up with what the viz draws.
+    """
+    from ddpo.viz import FOV, _first_episode_end
+
+    rows = []
+    half = FOV / 2.0
+    ego_xy = states_s[0, 0:2] if len(states_s) else np.zeros(2)
+    end = _first_episode_end(traj.get("done")) if isinstance(traj, dict) else None
+    for i in range(len(states_s)):
+        if i == 0 or not bool(gen_agent_s[i]):
+            continue  # ego or a fixed neighbour: not the generated adversary
+        a = states_s[i]
+        x, y = float(a[0]), float(a[1])
+        heading = float(np.degrees(np.arctan2(a[4], a[3])))
+        gx, gy = float(a[7]), float(a[8])
+        tx0 = ty0 = txT = tyT = float("nan")
+        n_steps = 0
+        if isinstance(traj, dict) and traj["x"].ndim == 2 and i < traj["x"].shape[1]:
+            txa, tya = traj["x"][:end, i], traj["y"][:end, i]
+            n_steps = int(len(txa))
+            if n_steps:
+                tx0, ty0, txT, tyT = float(txa[0]), float(tya[0]), float(txa[-1]), float(tya[-1])
+        rows.append([
+            name, int(s), int(i), int(types_s[i]),
+            bool(abs(x) <= half and abs(y) <= half),
+            x, y, heading, float(a[2]), float(a[5]), float(a[6]),
+            gx, gy, float(np.hypot(gx - x, gy - y)),
+            float(np.hypot(x - ego_xy[0], y - ego_xy[1])),
+            tx0, ty0, txT, tyT, n_steps, float(reward_s),
+        ])
+    return rows
+
+
+def _reward_components(metrics: dict, s: int) -> dict:
+    return {k: metrics[k][s] for k in _REWARD_COMPONENT_KEYS if k in metrics}
+
+
+def _to_numpy_index(x):
+    if isinstance(x, torch.Tensor):
+        return x.detach().cpu().numpy()
+    return np.asarray(x)
+
+
+def _index_like(value, mask):
+    if isinstance(value, torch.Tensor):
+        return value[mask.to(value.device)]
+    return np.asarray(value)[_to_numpy_index(mask)]
+
+
+def _subset_scenes(scenes: GeneratedScenes, scene_ids: list[int]) -> GeneratedScenes:
+    """Return a compact GeneratedScenes batch containing the selected scene ids."""
+    device = scenes.agent_scene_idx.device
+    selected = [int(s) for s in scene_ids]
+    agent_idx = scenes.agent_scene_idx
+    agent_mask = torch.zeros(agent_idx.shape[0], dtype=torch.bool, device=device)
+    new_agent_idx = torch.empty_like(agent_idx)
+    for new_s, old_s in enumerate(selected):
+        m = agent_idx == old_s
+        agent_mask |= m
+        new_agent_idx[m] = new_s
+    new_agent_idx = new_agent_idx[agent_mask]
+
+    lane_scene_idx = scenes.meta["lane_scene_idx"]
+    lane_device = lane_scene_idx.device if isinstance(lane_scene_idx, torch.Tensor) else device
+    lane_idx_t = torch.as_tensor(lane_scene_idx, device=lane_device)
+    lane_mask = torch.zeros(lane_idx_t.shape[0], dtype=torch.bool, device=lane_device)
+    new_lane_idx = torch.empty_like(lane_idx_t)
+    for new_s, old_s in enumerate(selected):
+        m = lane_idx_t == old_s
+        lane_mask |= m
+        new_lane_idx[m] = new_s
+    new_lane_idx = new_lane_idx[lane_mask]
+
+    lanes = scenes.lane_polylines
+    if isinstance(lanes, torch.Tensor):
+        lane_polylines = lanes[lane_mask.to(lanes.device)]
+    else:
+        lane_polylines = np.asarray(lanes)[_to_numpy_index(lane_mask)]
+
+    meta = {"lane_scene_idx": new_lane_idx}
+    gen_agent_mask = scenes.meta.get("gen_agent_mask")
+    if gen_agent_mask is not None:
+        meta["gen_agent_mask"] = _index_like(gen_agent_mask, agent_mask)
+    gt_parking_mask = scenes.meta.get("gt_parking_mask")
+    if gt_parking_mask is not None and getattr(gt_parking_mask, "shape", [0])[0] == agent_idx.shape[0]:
+        meta["gt_parking_mask"] = _index_like(gt_parking_mask, agent_mask)
+
+    adv_local_idx = None
+    if scenes.adv_local_idx is not None:
+        adv_local_idx = scenes.adv_local_idx[
+            torch.as_tensor(selected, device=scenes.adv_local_idx.device, dtype=torch.long)
+        ]
+
+    return GeneratedScenes(
+        agent_states=scenes.agent_states[agent_mask],
+        agent_types=scenes.agent_types[agent_mask],
+        agent_scene_idx=new_agent_idx,
+        lane_polylines=lane_polylines,
+        num_scenes=len(selected),
+        adv_local_idx=adv_local_idx,
+        meta=meta,
+    )
+
+
+def _group_reward_summary(rewards: torch.Tensor, group_ids: torch.Tensor, ddpo_cfg: DDPOConfig) -> dict:
+    group_ids = group_ids.to(rewards.device)
+    uniq = torch.unique(group_ids)
+    if uniq.numel() == 0:
+        return {}
+    stds, ranges, pos_counts = [], [], []
+    skipped = 0
+    for g in uniq:
+        r = rewards[group_ids == g].float()
+        std = r.std(unbiased=False)
+        stds.append(std)
+        ranges.append(r.max() - r.min())
+        pos_counts.append(r.gt(0).float().sum())
+        skipped += int(std < ddpo_cfg.group_skip_std)
+    stds = torch.stack(stds)
+    ranges = torch.stack(ranges)
+    pos_counts = torch.stack(pos_counts)
+    return {
+        "train/group_reward_std": float(stds.mean()),
+        "train/group_reward_std_max": float(stds.max()),
+        "train/group_reward_range_mean": float(ranges.mean()),
+        "train/group_reward_range_max": float(ranges.max()),
+        "train/group_pos_count_mean": float(pos_counts.mean()),
+        "train/group_skip_frac": float(skipped / max(int(uniq.numel()), 1)),
+    }
+
+
 @torch.no_grad()
-def evaluate_and_visualize(policy, eval_pool, reward, cfg, it, wandb):
-    """Roll out fixed held-out val scenes and build trajectory media."""
+def _visualize_train_group_diversity(
+    scenes: GeneratedScenes,
+    metrics: dict,
+    rewards: torch.Tensor,
+    advantages: torch.Tensor,
+    group_ids: torch.Tensor | None,
+    reward_model: PufferDriveReward,
+    cfg,
+    ddpo_cfg: DDPOConfig,
+    it: int,
+    wandb,
+) -> dict:
+    """Log top/bottom samples from the most reward-diverse GRPO train groups."""
+    if group_ids is None:
+        return {}
+
+    every = int(cfg.get("train_group_viz_every", 0))
+    if every <= 0 or (it + 1) % every != 0:
+        return {}
+
+    group_ids_cpu = group_ids.detach().cpu()
+    rewards_cpu = rewards.detach().cpu().float()
+    advantages_cpu = advantages.detach().cpu().float()
+    uniq = torch.unique(group_ids_cpu)
+    if uniq.numel() == 0:
+        return {}
+
+    group_rows = []
+    group_summaries = []
+    selected_lookup: set[int] = set()
+    max_groups = max(int(cfg.get("train_group_viz_num_groups", 2)), 1)
+    extremes = max(int(cfg.get("train_group_viz_extremes", 1)), 1)
+
+    for g in uniq.tolist():
+        mask = group_ids_cpu == int(g)
+        idx = torch.nonzero(mask, as_tuple=False).flatten()
+        r = rewards_cpu[idx]
+        std = float(r.std(unbiased=False))
+        gmin = float(r.min())
+        gmax = float(r.max())
+        order = idx[torch.argsort(r)]
+        media_idx = torch.cat([order[:extremes], order[-extremes:]]).unique(sorted=True)
+        group_summaries.append((std, gmax - gmin, int(g), idx, media_idx))
+
+    group_summaries.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    selected_groups = group_summaries[:max_groups]
+    media_scene_ids = []
+    for _, _, _, _, media_idx in selected_groups:
+        for s in media_idx.tolist():
+            if int(s) not in selected_lookup:
+                selected_lookup.add(int(s))
+                media_scene_ids.append(int(s))
+    if not media_scene_ids:
+        return {}
+
+    for std, _, g, idx, media_idx in selected_groups:
+        r = rewards_cpu[idx]
+        mean = float(r.mean())
+        gmin = float(r.min())
+        gmax = float(r.max())
+        pos_count = int(r.gt(0).sum())
+        skipped = bool(std < ddpo_cfg.group_skip_std)
+        order_desc = idx[torch.argsort(r, descending=True)]
+        rank_by_sample = {int(s): int(rank) for rank, s in enumerate(order_desc.tolist())}
+        for s in idx.tolist():
+            row = [
+                int(it), int(g), int(s), rank_by_sample[int(s)],
+                bool(int(s) in selected_lookup),
+                float(rewards_cpu[s]), float(advantages_cpu[s]),
+                mean, std, gmin, gmax, pos_count, skipped,
+            ]
+            row.extend(float(metrics[k][s]) if k in metrics else float("nan") for k in _REWARD_COMPONENT_KEYS)
+            group_rows.append(row)
+
+    print(
+        f"   [train_group it {it:04d}] visualizing {len(selected_groups)} group(s), "
+        f"{len(media_scene_ids)} sample(s); max_std={selected_groups[0][0]:.4f}"
+    )
+
+    if wandb is None:
+        return {}
+
+    log_payload = {
+        "train_group/reward_table": wandb.Table(
+            columns=_GROUP_TABLE_COLUMNS,
+            data=group_rows,
+        )
+    }
+    subset = _subset_scenes(scenes, media_scene_ids)
+    viz_metrics = reward_model.evaluate(subset, record_trajectories=True)
+
+    import matplotlib.pyplot as plt
+    from ddpo.viz import CONTROL_COLOR, render_rollout, render_rollout_frames, save_gif
+
+    save_gif_mode = bool(cfg.get("save_gif", False))
+    media_dir = Path(cfg.output_dir) / "eval_media" / "train_group"
+    if save_gif_mode:
+        media_dir.mkdir(parents=True, exist_ok=True)
+
+    lanes = subset.lane_polylines
+    if isinstance(lanes, torch.Tensor):
+        lanes = lanes.detach().cpu().numpy()
+    lane_scene_idx = subset.meta["lane_scene_idx"].detach().cpu().numpy()
+    states = subset.agent_states.detach().cpu().numpy()
+    types = subset.agent_types.detach().cpu().numpy()
+    agent_scene_idx = subset.agent_scene_idx.detach().cpu().numpy()
+    gen_agent_mask = subset.meta.get("gen_agent_mask")
+    if isinstance(gen_agent_mask, torch.Tensor):
+        gen_agent_mask = gen_agent_mask.detach().cpu().numpy()
+
+    group_by_scene = {int(s): int(group_ids_cpu[s]) for s in media_scene_ids}
+    media = []
+    for local_s, original_s in enumerate(media_scene_ids):
+        a_sel = agent_scene_idx == local_s
+        agent_colors = None
+        if gen_agent_mask is not None:
+            gen_agent_s = gen_agent_mask[a_sel]
+            agent_colors = [
+                CONTROL_COLOR if (i > 0 and bool(gen_agent_s[i])) else None
+                for i in range(len(gen_agent_s))
+            ]
+        components = _reward_components(viz_metrics, local_s)
+        title = (
+            f"train_group it{it} g{group_by_scene[original_s]} "
+            f"sample{original_s} r={float(rewards_cpu[original_s]):.3f}"
+        )
+        kwargs = dict(
+            agent_states=states[a_sel],
+            agent_types=types[a_sel],
+            agent_colors=agent_colors,
+            reward=viz_metrics["reward"][local_s],
+            ego_collision=viz_metrics["ego_collision"][local_s] > 0,
+            ego_offroad=viz_metrics["ego_offroad"][local_s] > 0,
+            init_invalid=viz_metrics["init_invalid"][local_s] > 0,
+            ego_min_ttc=viz_metrics["ego_min_ttc"][local_s],
+            goal_offlane_frac=viz_metrics["goal_offlane_frac"][local_s],
+            parking_mismatch_frac=viz_metrics["parking_mismatch_frac"][local_s],
+            components=components,
+            title=title,
+        )
+        if save_gif_mode:
+            frames = render_rollout_frames(
+                viz_metrics["trajectories"][local_s],
+                lanes[lane_scene_idx == local_s],
+                max_frames=int(cfg.get("gif_max_frames", 50)),
+                **kwargs,
+            )
+            path = str(
+                media_dir
+                / f"it_{it:05d}_g{group_by_scene[original_s]:03d}_s{original_s:03d}.gif"
+            )
+            save_gif(frames, path, fps=int(cfg.get("gif_fps", 10)))
+            media.append(wandb.Video(path, format="gif"))
+        else:
+            fig = render_rollout(
+                viz_metrics["trajectories"][local_s],
+                lanes[lane_scene_idx == local_s],
+                **kwargs,
+            )
+            media.append(wandb.Image(fig))
+            plt.close(fig)
+
+    log_payload["train_group/rollouts"] = media
+    return log_payload
+
+
+@torch.no_grad()
+def evaluate_and_visualize(policy, eval_pool, reward, cfg, it, wandb, *, media_tag="eval"):
+    """Roll out the first ``eval_num_scenes`` fixed scenes of ``eval_pool`` and
+    build trajectory media. ``media_tag`` namespaces the on-disk GIF directory so
+    callers that pass different pools (e.g. val vs. a train-scene subset) don't
+    overwrite each other's frames."""
     import matplotlib.pyplot as plt
 
     from ddpo.viz import CONTROL_COLOR, render_rollout, render_rollout_frames, save_gif
@@ -187,7 +544,7 @@ def evaluate_and_visualize(policy, eval_pool, reward, cfg, it, wandb):
     cond = eval_pool.batch_from_indices(list(range(n)))
 
     save_gif_mode = bool(cfg.get("save_gif", False))
-    gif_dir = Path(cfg.output_dir) / "eval_media"
+    gif_dir = Path(cfg.output_dir) / "eval_media" / media_tag
     if save_gif_mode:
         gif_dir.mkdir(parents=True, exist_ok=True)
 
@@ -204,6 +561,7 @@ def evaluate_and_visualize(policy, eval_pool, reward, cfg, it, wandb):
 
     metrics_by_variant = {}
     media_by_variant = {}
+    adv_rows = []  # raw adv-agent numbers across every variant/scene -> one wandb.Table
     for name, scenes in variants.items():
         metrics = reward.evaluate(scenes, record_trajectories=True)
         metrics_by_variant[name] = metrics
@@ -216,31 +574,36 @@ def evaluate_and_visualize(policy, eval_pool, reward, cfg, it, wandb):
         states = scenes.agent_states.detach().cpu().numpy()
         types = scenes.agent_types.detach().cpu().numpy()
         agent_scene_idx = scenes.agent_scene_idx.detach().cpu().numpy()
-        controlled = scenes.meta.get("controlled_mask")
-        if isinstance(controlled, torch.Tensor):
-            controlled = controlled.detach().cpu().numpy()
+        gen_agent_mask = scenes.meta.get("gen_agent_mask")
+        if isinstance(gen_agent_mask, torch.Tensor):
+            gen_agent_mask = gen_agent_mask.detach().cpu().numpy()
 
         if wandb is None:
             media_by_variant[name] = media
             continue
         for s in range(scenes.num_scenes):
             a_sel = agent_scene_idx == s
-            # Flag DDPO-controlled (generated) non-ego agents green so it is clear
+            # Flag DDPO-generated non-ego agents green so it is clear
             # which agents to watch; ego (local index 0) keeps its red.
             agent_colors = None
-            if controlled is not None:
-                ctrl_s = controlled[a_sel]
+            if gen_agent_mask is not None:
+                gen_agent_s = gen_agent_mask[a_sel]
                 agent_colors = [
-                    CONTROL_COLOR if (i > 0 and bool(ctrl_s[i])) else None
-                    for i in range(len(ctrl_s))
+                    CONTROL_COLOR if (i > 0 and bool(gen_agent_s[i])) else None
+                    for i in range(len(gen_agent_s))
                 ]
+                adv_rows.extend(_adv_agent_rows(
+                    name, s, states[a_sel], types[a_sel], gen_agent_s,
+                    metrics["trajectories"][s], metrics["reward"][s],
+                ))
             # Full Phase 2 reward breakdown overlaid on the GIF/figure.
             components = {
                 k: metrics[k][s]
                 for k in (
-                    "criticality", "r_ttc", "r_approach", "r_risk", "r_collision",
-                    "constraint", "c_lane", "c_parking", "c_trivial",
-                    "ego_adv_init_dist", "ego_adv_min_dist_warmup", "ego_collision_time",
+                    "criticality", "r_ttc", "r_approach",
+                    "constraint", "c_spawn_lane", "c_goal_lane", "c_overlap", "c_parking",
+                    "spawn_lane_dist", "goal_lane_dist", "init_overlap_frac",
+                    "ego_adv_init_dist", "ego_adv_min_dist_warmup",
                 )
                 if k in metrics
             }
@@ -271,7 +634,68 @@ def evaluate_and_visualize(policy, eval_pool, reward, cfg, it, wandb):
                 media.append(wandb.Image(fig))
                 plt.close(fig)
         media_by_variant[name] = media
-    return metrics_by_variant, media_by_variant
+    adv_table = (
+        wandb.Table(columns=_ADV_TABLE_COLUMNS, data=adv_rows)
+        if (wandb is not None and adv_rows)
+        else None
+    )
+    return metrics_by_variant, media_by_variant, adv_table
+
+
+def _eval_and_log(policy, pool, reward, cfg, it, wandb, *, prefix):
+    """Roll out a fixed pool, print a summary, and log metrics + rollout media
+    under ``prefix``: ``'val'`` for the held-out val scenes, ``'train_viz'`` for a
+    fixed subset of the train scenes (so the rising train reward can be inspected
+    visually). Returns the per-variant metrics dict."""
+    ev_by_variant, images_by_variant, adv_table = evaluate_and_visualize(
+        policy, pool, reward, cfg, it, wandb, media_tag=prefix
+    )
+    ev = ev_by_variant["current"]
+    ev_crit = float((ev["ego_collision"] > 0).mean())
+    ev_inval = float((ev["init_invalid"] > 0).mean())
+    print(
+        f"   [{prefix} it {it:04d}] current critical_rate={ev_crit:.3f} "
+        f"init_invalid={ev_inval:.3f} goal_offlane={float(ev['goal_offlane_frac'].mean()):.3f}"
+    )
+    for name, cmp_ev in ev_by_variant.items():
+        if name == "current":
+            continue
+        print(
+            f"      [{prefix}/{name}] reward={float(cmp_ev['reward'].mean()):.3f} "
+            f"critical_rate={float((cmp_ev['ego_collision'] > 0).mean()):.3f} "
+            f"goal_offlane={float(cmp_ev['goal_offlane_frac'].mean()):.3f} "
+            f"parking_mismatch={float(cmp_ev['parking_mismatch_frac'].mean()):.3f}"
+        )
+    if wandb is not None:
+        ev_ttc = ev["ego_min_ttc"]
+        ev_ttc_finite = np.isfinite(ev_ttc)
+        log_payload = {
+            f"{prefix}/critical_rate": ev_crit,
+            f"{prefix}/ego_fault_collision_rate": float((ev["ego_fault_collision"] > 0).mean()),
+            f"{prefix}/init_invalid": ev_inval,
+            f"{prefix}/ego_min_ttc": float(ev_ttc[ev_ttc_finite].mean()) if ev_ttc_finite.any() else float("nan"),
+            f"{prefix}/ego_offroad_rate": float(ev["ego_offroad"].mean()),
+            f"{prefix}/reached_goal_rate": float(ev["reached_goal"].mean()),
+            f"{prefix}/goal_offlane_frac": float(ev["goal_offlane_frac"].mean()),
+            f"{prefix}/parking_mismatch_frac": float(ev["parking_mismatch_frac"].mean()),
+            f"{prefix}/rollouts": images_by_variant.get("current", []),
+        }
+        if adv_table is not None:
+            log_payload[f"{prefix}/adv_data"] = adv_table
+        for name, cmp_ev in ev_by_variant.items():
+            log_payload.update(
+                {
+                    f"{prefix}/{name}/reward": float(cmp_ev["reward"].mean()),
+                    f"{prefix}/{name}/critical_rate": float((cmp_ev["ego_collision"] > 0).mean()),
+                    f"{prefix}/{name}/init_invalid": float(cmp_ev["init_invalid"].mean()),
+                    f"{prefix}/{name}/ego_offroad_rate": float(cmp_ev["ego_offroad"].mean()),
+                    f"{prefix}/{name}/reached_goal_rate": float(cmp_ev["reached_goal"].mean()),
+                    f"{prefix}/{name}/goal_offlane_frac": float(cmp_ev["goal_offlane_frac"].mean()),
+                    f"{prefix}/{name}/rollouts": images_by_variant.get(name, []),
+                }
+            )
+        wandb.log(log_payload, step=it)
+    return ev_by_variant
 
 
 def run_ddpo(cfg_root):
@@ -287,13 +711,16 @@ def run_ddpo(cfg_root):
         deterministic=cfg.get("planner_deterministic", None),
         ttc_tau=cfg.get("ttc_tau", 3.0),
         init_overlap_margin=cfg.get("init_overlap_margin", 0.0),
+        init_overlap_penalty=cfg.get("init_overlap_penalty", 1.0),
+        init_overlap_gate_lo=cfg.get("init_overlap_gate_lo", 0.02),
+        init_overlap_gate_hi=cfg.get("init_overlap_gate_hi", 0.20),
         goal_offlane_threshold=cfg.get("goal_offlane_threshold", 3.0),
         goal_onroad_threshold=cfg.get("goal_onroad_threshold", 2.0),
         goal_offlane_penalty=cfg.get("goal_offlane_penalty", 0.5),
         parking_mismatch_penalty=cfg.get("parking_mismatch_penalty", 0.5),
         min_dist_coef=cfg.get("min_dist_coef", 0.0),
         min_dist_dmax=cfg.get("min_dist_dmax", 20.0),
-        controlled_parking_penalty=cfg.get("controlled_parking_penalty", 0.0),
+        gen_agent_parking_penalty=cfg.get("gen_agent_parking_penalty", 0.0),
         risk_coef=cfg.get("risk_coef", 1.0),
         approach_d_safe=cfg.get("approach_d_safe", 6.0),
         approach_d_scale=cfg.get("approach_d_scale", 2.0),
@@ -315,17 +742,54 @@ def run_ddpo(cfg_root):
     trainable_params = list(policy.trainable_parameters())
     opt = torch.optim.AdamW(trainable_params, lr=cfg.lr, weight_decay=cfg.weight_decay)
 
+    out_dir = Path(cfg.output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # ---- optional resume from last.ckpt -----------------------------------
+    # Faithful continuation: restore the trainable net weights, the AdamW state
+    # (so resume doesn't suffer a cold-Adam transient), the global RNG and the
+    # iteration counter. Crucially the KL reference (policy.ref) is NOT touched:
+    # it stays anchored to the base checkpoint the policy was just built from, so
+    # kl_to_base keeps measuring drift from the pretrained manifold across resumes
+    # (loading a DDPO ckpt as the base would silently reset that anchor to ~0).
+    start_it = 0
+    resume_wandb_id = None
+    resume_path = out_dir / "last.ckpt"
+    if cfg.get("resume", True) and resume_path.exists():
+        ckpt = torch.load(resume_path, map_location=device, weights_only=False)
+        sd = ckpt["state_dict"]
+        net_sd = {k[len("diff_model."):]: v for k, v in sd.items() if k.startswith("diff_model.")}
+        policy.load_state_dict(net_sd)
+        rs = ckpt.get("ddpo", {})
+        if "opt" in rs:
+            opt.load_state_dict(rs["opt"])
+        _rng_restore(rs.get("rng", {}), device)
+        start_it = int(rs.get("it", 0))
+        resume_wandb_id = rs.get("wandb_id", None)
+        print(
+            f"[ddpo] resumed from {resume_path} at it={start_it} "
+            f"(opt={'yes' if 'opt' in rs else 'no'}, "
+            f"rng={'yes' if rs.get('rng') else 'no'}, wandb_id={resume_wandb_id})"
+        )
+
     wandb = None
+    wandb_run_id = None
     if cfg.get("wandb", {}).get("enabled", False):
         import wandb as _wandb
 
-        _wandb.init(
+        init_kwargs = dict(
             project=cfg.wandb.get("project", "scenario_dreamer_ddpo"),
             entity=cfg.wandb.get("entity", None),
             name=cfg.wandb.get("run_name", None) or _default_run_name(cfg, model_type),
             config=OmegaConf.to_container(cfg, resolve=True),
         )
+        # Continue the same wandb run (same id) so the curves don't split.
+        if resume_wandb_id is not None:
+            init_kwargs["id"] = resume_wandb_id
+            init_kwargs["resume"] = "allow"
+        _wandb.init(**init_kwargs)
         wandb = _wandb
+        wandb_run_id = _wandb.run.id
 
     eval_every = int(cfg.get("eval_every", 0))
     eval_pool = None
@@ -375,9 +839,6 @@ def run_ddpo(cfg_root):
             f"no stochastic diffusion steps for sampler={policy.sampler}, "
             f"ddim_eta={getattr(policy, 'ddim_eta', None)}, min_diffusion_t={min_diffusion_t}"
         )
-    out_dir = Path(cfg.output_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-
     # Per-context (GRPO) grouping: each batch is num_groups distinct contexts,
     # each replicated group_size times, and advantages are whitened within group
     # (see compute_advantages). group_size=1 -> legacy global whitening.
@@ -387,7 +848,7 @@ def run_ddpo(cfg_root):
             f"batch_size ({cfg.batch_size}) must be divisible by group_size ({group_size})"
         )
 
-    for it in range(cfg.num_iterations):
+    for it in range(start_it, cfg.num_iterations):
         # ---- rollout / collect -------------------------------------------------
         if group_size > 1:
             num_groups = cfg.batch_size // group_size
@@ -441,16 +902,14 @@ def run_ddpo(cfg_root):
         adv_dist = metrics["ego_adv_min_dist"]
         finite_dist = np.isfinite(adv_dist)
         mean_adv_dist = float(adv_dist[finite_dist].mean()) if finite_dist.any() else float("nan")
-        parked = float(metrics["controlled_parking_frac"].mean())
+        parked = float(metrics["gen_agent_is_parked"].mean())
         # Within-group reward spread: this is the only signal per-context
         # advantage normalisation can use. If it collapses to ~0, the group has
         # no learnable contrast (every sample equally (in)valid) and is skipped.
+        group_log = {}
         if group_ids is not None:
-            grp_std = float(
-                torch.stack(
-                    [rewards[group_ids == g].std(unbiased=False) for g in torch.unique(group_ids)]
-                ).mean()
-            )
+            group_log = _group_reward_summary(rewards, group_ids, ddpo_cfg)
+            grp_std = group_log.get("train/group_reward_std", float("nan"))
         else:
             grp_std = float("nan")
         near_miss = float((metrics["r_risk"] > 0.5).mean())
@@ -464,91 +923,77 @@ def run_ddpo(cfg_root):
             f"skipped_updates={skipped_updates}"
         )
 
+        group_viz_log = _visualize_train_group_diversity(
+            scenes, metrics, rewards, advantages, group_ids, reward, cfg, ddpo_cfg, it, wandb
+        )
+
         if wandb is not None:
-            wandb.log(
-                {
-                    "train/reward": float(rewards.mean()),
-                    "train/pos_reward_rate": crit,
-                    "train/near_miss_rate": near_miss,
-                    "train/init_invalid": inval,
-                    "train/ego_min_ttc": mean_ttc,
-                    "train/ego_adv_min_dist": mean_adv_dist,
-                    "train/controlled_parking_frac": parked,
-                    "train/ego_collision_rate": float(metrics["ego_collision"].mean()),
-                    "train/ego_offroad_rate": float(metrics["ego_offroad"].mean()),
-                    "train/reached_goal_rate": float(metrics["reached_goal"].mean()),
-                    "train/goal_offlane_frac": float(metrics["goal_offlane_frac"].mean()),
-                    "train/parking_mismatch_frac": float(metrics["parking_mismatch_frac"].mean()),
-                    # Phase 2 reward components (mean over batch).
-                    "train/r_ttc": float(metrics["r_ttc"].mean()),
-                    "train/r_approach": float(metrics["r_approach"].mean()),
-                    "train/r_risk": float(metrics["r_risk"].mean()),
-                    "train/criticality": float(metrics["criticality"].mean()),
-                    "train/c_lane": float(metrics["c_lane"].mean()),
-                    "train/c_trivial": float(metrics["c_trivial"].mean()),
-                    "train/constraint": float(metrics["constraint"].mean()),
-                    "train/group_reward_std": grp_std,
-                    "train/loss": log["loss"],
-                    "train/pg_loss": log.get("pg_loss", log["loss"]),
-                    "train/ratio_mean": log.get("ratio_mean", 1.0),
-                    "train/kl_to_base": log.get("kl_to_base", 0.0),
-                    "train/adv_std": float(advantages.std(unbiased=False)),
-                    "train/skipped_updates": skipped_updates,
-                },
-                step=it,
-            )
+            log_payload = {
+                "train/reward": float(rewards.mean()),
+                "train/pos_reward_rate": crit,
+                "train/near_miss_rate": near_miss,
+                "train/init_invalid": inval,
+                "train/ego_min_ttc": mean_ttc,
+                "train/ego_adv_min_dist": mean_adv_dist,
+                "train/gen_agent_is_parked": parked,
+                "train/ego_collision_rate": float(metrics["ego_collision"].mean()),
+                "train/ego_offroad_rate": float(metrics["ego_offroad"].mean()),
+                "train/reached_goal_rate": float(metrics["reached_goal"].mean()),
+                "train/goal_offlane_frac": float(metrics["goal_offlane_frac"].mean()),
+                "train/parking_mismatch_frac": float(metrics["parking_mismatch_frac"].mean()),
+                # Phase 2 reward components (mean over batch).
+                "train/r_ttc": float(metrics["r_ttc"].mean()),
+                "train/r_approach": float(metrics["r_approach"].mean()),
+                "train/r_risk": float(metrics["r_risk"].mean()),
+                "train/criticality": float(metrics["criticality"].mean()),
+                "train/c_lane": float(metrics["c_lane"].mean()),
+                "train/c_trivial": float(metrics["c_trivial"].mean()),
+                "train/constraint": float(metrics["constraint"].mean()),
+                "train/group_reward_std": grp_std,
+                "train/loss": log["loss"],
+                "train/pg_loss": log.get("pg_loss", log["loss"]),
+                "train/ratio_mean": log.get("ratio_mean", 1.0),
+                "train/kl_to_base": log.get("kl_to_base", 0.0),
+                "train/adv_std": float(advantages.std(unbiased=False)),
+                "train/skipped_updates": skipped_updates,
+            }
+            log_payload.update(group_log)
+            log_payload.update(group_viz_log)
+            wandb.log(log_payload, step=it)
 
         # ---- periodic held-out eval + trajectory viz --------------------------
         if eval_pool is not None and (it + 1) % eval_every == 0:
-            ev_by_variant, images_by_variant = evaluate_and_visualize(policy, eval_pool, reward, cfg, it, wandb)
-            ev = ev_by_variant["current"]
-            ev_crit = float((ev["ego_collision"] > 0).mean())
-            ev_inval = float((ev["init_invalid"] > 0).mean())
-            print(
-                f"   [eval it {it:04d}] current critical_rate={ev_crit:.3f} "
-                f"init_invalid={ev_inval:.3f} goal_offlane={float(ev['goal_offlane_frac'].mean()):.3f}"
-            )
-            for name, cmp_ev in ev_by_variant.items():
-                if name == "current":
-                    continue
-                print(
-                    f"      [{name}] reward={float(cmp_ev['reward'].mean()):.3f} "
-                    f"critical_rate={float((cmp_ev['ego_collision'] > 0).mean()):.3f} "
-                    f"goal_offlane={float(cmp_ev['goal_offlane_frac'].mean()):.3f} "
-                    f"parking_mismatch={float(cmp_ev['parking_mismatch_frac'].mean()):.3f}"
-                )
-            if wandb is not None:
-                ev_ttc = ev["ego_min_ttc"]
-                ev_ttc_finite = np.isfinite(ev_ttc)
-                log_payload = {
-                    "val/critical_rate": ev_crit,
-                    "val/init_invalid": ev_inval,
-                    "val/ego_min_ttc": float(ev_ttc[ev_ttc_finite].mean()) if ev_ttc_finite.any() else float("nan"),
-                    "val/ego_offroad_rate": float(ev["ego_offroad"].mean()),
-                    "val/reached_goal_rate": float(ev["reached_goal"].mean()),
-                    "val/goal_offlane_frac": float(ev["goal_offlane_frac"].mean()),
-                    "val/parking_mismatch_frac": float(ev["parking_mismatch_frac"].mean()),
-                    "val/rollouts": images_by_variant.get("current", []),
-                }
-                for name, cmp_ev in ev_by_variant.items():
-                    log_payload.update(
-                        {
-                            f"val/{name}/reward": float(cmp_ev["reward"].mean()),
-                            f"val/{name}/critical_rate": float((cmp_ev["ego_collision"] > 0).mean()),
-                            f"val/{name}/init_invalid": float(cmp_ev["init_invalid"].mean()),
-                            f"val/{name}/ego_offroad_rate": float(cmp_ev["ego_offroad"].mean()),
-                            f"val/{name}/reached_goal_rate": float(cmp_ev["reached_goal"].mean()),
-                            f"val/{name}/goal_offlane_frac": float(cmp_ev["goal_offlane_frac"].mean()),
-                            f"val/{name}/rollouts": images_by_variant.get(name, []),
-                        }
-                    )
-                wandb.log(log_payload, step=it)
+            _eval_and_log(policy, eval_pool, reward, cfg, it, wandb, prefix="val")
+            # Same eval/viz pass over a fixed subset of the *train* scenes, so the
+            # rising train reward can be inspected visually. Reuses the already
+            # loaded training pool's first eval_num_scenes slots (deterministic +
+            # cached), logged under train_viz/* alongside the val/* media.
+            if cfg.get("eval_visualize_train", False):
+                _eval_and_log(policy, pool, reward, cfg, it, wandb, prefix="train_viz")
 
         if cfg.save_every and (it + 1) % cfg.save_every == 0:
             # Lightning-compatible layout (diff_model.* prefix) so the regular
             # scenario-dreamer eval/viz tooling can load DDPO checkpoints.
             sd = {f"diff_model.{k}": v for k, v in policy.state_dict().items()}
             torch.save({"state_dict": sd}, out_dir / f"{_checkpoint_prefix(cfg, model_type)}_{it + 1:05d}.ckpt")
+            # Full resume snapshot (net + AdamW + RNG + iter + wandb id), written
+            # atomically to last.ckpt so `resume` can continue this exact run. The
+            # numbered checkpoints above stay net-only for the eval/viz tooling.
+            resume_ckpt = {
+                "state_dict": sd,
+                "ddpo": {
+                    "it": it + 1,
+                    "opt": opt.state_dict(),
+                    "rng": _rng_snapshot(device),
+                    "wandb_id": wandb_run_id,
+                    "base_ckpt": cfg.get("ldm_adv_ckpt")
+                    or cfg.get("ldm_ckpt")
+                    or cfg.get("model_ckpt"),
+                },
+            }
+            tmp_path = out_dir / "last.ckpt.tmp"
+            torch.save(resume_ckpt, tmp_path)
+            tmp_path.replace(out_dir / "last.ckpt")
 
     if wandb is not None:
         wandb.finish()

@@ -26,7 +26,7 @@ METRIC_KEYS = (
     "goal_offlane_frac",
     "parking_mismatch_frac",
     "ego_adv_min_dist",
-    "controlled_parking_frac",
+    "gen_agent_is_parked",
 )
 
 
@@ -71,7 +71,7 @@ def _build_reward(cfg_root):
         parking_mismatch_penalty=cfg.get("parking_mismatch_penalty", 0.5),
         min_dist_coef=cfg.get("min_dist_coef", 0.0),
         min_dist_dmax=cfg.get("min_dist_dmax", 20.0),
-        controlled_parking_penalty=cfg.get("controlled_parking_penalty", 0.0),
+        gen_agent_parking_penalty=cfg.get("gen_agent_parking_penalty", 0.0),
         risk_coef=cfg.get("risk_coef", 1.0),
         approach_d_safe=cfg.get("approach_d_safe", 6.0),
         approach_d_scale=cfg.get("approach_d_scale", 2.0),
@@ -102,7 +102,7 @@ def _summary(metrics: dict[str, np.ndarray]) -> dict[str, float]:
         "goal_offlane_frac": _mean_finite(metrics["goal_offlane_frac"]),
         "parking_mismatch_frac": _mean_finite(metrics["parking_mismatch_frac"]),
         "ego_adv_min_dist": _mean_finite(metrics.get("ego_adv_min_dist", [])),
-        "controlled_parking_frac": _mean_finite(metrics.get("controlled_parking_frac", [])),
+        "gen_agent_is_parked": _mean_finite(metrics.get("gen_agent_is_parked", [])),
     }
 
 

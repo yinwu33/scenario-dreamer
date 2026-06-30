@@ -30,18 +30,18 @@ import torch
 from ..interfaces import GeneratedScenes
 from ..pufferdrive_sim import SimScene, load_sim_config
 from ..reward_hooks import (
-    ControlledParkingHook,
-    EgoAdvMinDistHook,
-    EgoCollisionHook,
-    EgoMinTTCHook,
-    EgoOffroadHook,
-    GoalOfflaneHook,
-    InitOverlapHook,
-    ParkingMismatchHook,
-    ReachedGoalHook,
+    RewardHookGenAgentParking,
+    RewardHookEgoAdvMinDist,
+    RewardHookEgoCollision,
+    RewardHookEgoMinTTC,
+    RewardHookGoalOfflane,
+    RewardHookInitOverlap,
+    RewardHookParkingMismatch,
+    RewardHookReachedGoal,
     RolloutContext,
-    TrajectoryHook,
+    RewardHookTrajectory,
 )
+from .type_utils import to_puffer_agent_types
 
 
 @dataclass
@@ -103,6 +103,7 @@ class NumpyPlanner(RolloutPlanner):
         """Group a batched ``GeneratedScenes`` into per-scene ``SimScene`` objects."""
         states = scenes.agent_states.detach().cpu().numpy()
         types = scenes.agent_types.detach().cpu().numpy()
+        ptypes = to_puffer_agent_types(types)
         a_idx = scenes.agent_scene_idx.detach().cpu().numpy()
         lanes = scenes.lane_polylines
         if isinstance(lanes, torch.Tensor):
@@ -116,7 +117,7 @@ class NumpyPlanner(RolloutPlanner):
             sims.append(
                 SimScene(
                     states[a_idx == s],
-                    types[a_idx == s],
+                    ptypes[a_idx == s],
                     lanes[l_idx == s],
                     rng=self.rng,
                     sim_cfg=self.sim_cfg,
@@ -128,16 +129,15 @@ class NumpyPlanner(RolloutPlanner):
         """Metric hooks shared by all numpy planners (identical metric set)."""
         p = self.params
         return [
-            InitOverlapHook(p.init_overlap_margin),
-            EgoCollisionHook(p.collision_enabled),
-            EgoOffroadHook(),
-            EgoMinTTCHook(),
-            EgoAdvMinDistHook(p.approach_warmup_time),
-            TrajectoryHook(),
-            ReachedGoalHook(self.sim_cfg.goal_radius),
-            GoalOfflaneHook(p.goal_offlane_threshold, p.goal_onroad_threshold),
-            ParkingMismatchHook(),
-            ControlledParkingHook(),
+            RewardHookInitOverlap(p.init_overlap_margin),
+            RewardHookEgoCollision(),
+            RewardHookEgoMinTTC(),
+            RewardHookEgoAdvMinDist(p.approach_warmup_time),
+            RewardHookTrajectory(),
+            RewardHookReachedGoal(self.sim_cfg.goal_radius),
+            RewardHookGoalOfflane(p.goal_offlane_threshold, p.goal_onroad_threshold),
+            RewardHookParkingMismatch(),
+            RewardHookGenAgentParking(),
         ]
 
     # --------------------------------------------------------------- advance
@@ -165,6 +165,7 @@ class NumpyPlanner(RolloutPlanner):
                 "ego_collision": np.zeros(m, dtype=np.float32),
                 "ego_offroad": np.zeros(m, dtype=np.float32),
                 "init_invalid": np.zeros(m, dtype=np.float32),
+                "init_overlap_frac": np.zeros(m, dtype=np.float32),
                 "reached_goal": np.zeros(m, dtype=np.float32),
             },
             record_trajectories=record_trajectories,

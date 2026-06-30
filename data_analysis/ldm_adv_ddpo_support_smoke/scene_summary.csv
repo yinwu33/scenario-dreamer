@@ -1,0 +1,2 @@
+split,policy,pool_idx,n_samples,reward_mean,reward_max,reward_p50,reward_p90,reward_p95,positive_rate,high_reward_rate,near_miss_rate,collision_rate,init_invalid_rate,goal_offlane_rate,controlled_parking_rate,small_vehicle_rate,ego_adv_min_dist_mean,ego_adv_min_dist_min,r_approach_mean,r_ttc_mean,constraint_mean,adv_length_mean,adv_width_mean
+train,base,0,1,-1.0,-1.0,-1.0,-1.0,-1.0,0.0,0.0,0.0,0.0,0.0,1.0,1.0,0.0,45.27562713623047,45.27562713623047,1.8349628372625387e-15,0.0,1.5,5.281631946563721,2.358903646469116

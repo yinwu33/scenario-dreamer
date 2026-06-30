@@ -31,7 +31,7 @@ trivial_collision = collision and collision_time < 0.75
 
 goal_offlane_frac∈{0,1}
 
-parking_mismatch_frac 和 controlled_parking_frac 也类似。
+parking_mismatch_frac 和 gen_agent_is_parked 也类似。
 
 于是一个样本可能因为 goal 稍微越过 threshold，reward 瞬间下降 1.0。相比之下：
 
@@ -47,7 +47,7 @@ parking mismatch 直接 -0.5。
 
 one-agent 阶段直接删除 parking_mismatch_penalty；
 controlled adversary 固定为 dynamic/non-parked，不让 diffusion 生成 parking 状态；
-删除 controlled_parking_penalty；
+删除 gen_agent_parking_penalty；
 将 binary goal_offlane_frac 改成连续 lane-distance penalty。
 3. distance_bonus 很可能在鼓励你看到的“固定几个 ego 附近位置”
 

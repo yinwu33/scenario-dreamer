@@ -151,7 +151,7 @@ def train_ldm(cfg, cfg_ae, save_dir=None, model_cls=ScenarioDreamerLDM):
     else:
         model = model_cls(cfg=cfg, cfg_ae=cfg_ae)
     trainer.fit(model, datamodule, ckpt_path=ckpt_path)
-
+ 
 
 def train_dm(cfg, save_dir=None, model_cls=ScenarioDreamerDM):
     """Train the direct vectorized diffusion model."""

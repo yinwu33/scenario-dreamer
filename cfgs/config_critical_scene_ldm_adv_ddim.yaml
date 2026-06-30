@@ -22,7 +22,7 @@ defaults:
   - model@ae_goal.model: waymo_ae_goal
   - datamodule@ae_goal.datamodule: waymo_ae_goal
   - ddpo/ldm_adv@ddpo
-  - planner@ddpo.planner: selfplay_drive
+  - planner@ddpo.planner: bad_driver
   - sim: base
   - _self_
 

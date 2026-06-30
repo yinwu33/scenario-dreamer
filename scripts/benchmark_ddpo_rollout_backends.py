@@ -21,10 +21,14 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from ddpo.geometry import _corners, _sat_overlap
 from ddpo.interfaces import GeneratedScenes
 from ddpo.native_pufferdrive import PufferBackend
-from ddpo.pufferdrive_sim import SimScene
+from ddpo.planners.type_utils import to_puffer_agent_types
+from ddpo.pufferdrive_sim import COLLISION_DIST2_GATE, TYPE_PEDESTRIAN, SimScene
 from ddpo.reward import PufferDriveReward
+
+TTC_SWEEP_HORIZON = 10.0
 
 
 def make_scenes(
@@ -110,6 +114,7 @@ def _to_numpy(value, dtype=None) -> np.ndarray:
 def build_python_sims(scenes: GeneratedScenes, seed: int) -> list[SimScene]:
     states = _to_numpy(scenes.agent_states, np.float32)
     types = _to_numpy(scenes.agent_types, np.int64)
+    ptypes = to_puffer_agent_types(types)
     agent_scene_idx = _to_numpy(scenes.agent_scene_idx, np.int64)
     lanes = _to_numpy(scenes.lane_polylines, np.float32)
     lane_scene_idx = _to_numpy(scenes.meta["lane_scene_idx"], np.int64)
@@ -120,7 +125,7 @@ def build_python_sims(scenes: GeneratedScenes, seed: int) -> list[SimScene]:
         sims.append(
             SimScene(
                 states[agent_scene_idx == s],
-                types[agent_scene_idx == s],
+                ptypes[agent_scene_idx == s],
                 lanes[lane_scene_idx == s],
                 rng=rng,
             )
@@ -128,19 +133,105 @@ def build_python_sims(scenes: GeneratedScenes, seed: int) -> list[SimScene]:
     return sims
 
 
+def any_vehicle_overlap(sim: SimScene, margin: float = 0.0) -> bool:
+    """Benchmark-only initial overlap statistic for active non-pedestrian agents."""
+    active = sim.slot_order[sim.ptype[sim.slot_order] != TYPE_PEDESTRIAN]
+    if len(active) < 2:
+        return False
+    boxes = _corners(
+        sim.x[active],
+        sim.y[active],
+        sim.heading[active],
+        sim.length[active] + 2.0 * margin,
+        sim.width[active] + 2.0 * margin,
+    )
+    for k in range(len(active) - 1):
+        dx = sim.x[active[k + 1:]] - sim.x[active[k]]
+        dy = sim.y[active[k + 1:]] - sim.y[active[k]]
+        gate = (dx * dx + dy * dy) <= COLLISION_DIST2_GATE
+        if gate.any() and _sat_overlap(boxes[k], boxes[k + 1:][gate]).any():
+            return True
+    return False
+
+
+def ego_collides_now(sim: SimScene, others=None) -> bool:
+    """Benchmark-only current ego-fault overlap statistic."""
+    if sim.n <= 1:
+        return False
+    if others is None:
+        others = sim.slot_order[sim.slot_order != 0]
+    else:
+        others = np.asarray(others, dtype=np.int64)
+        others = others[(others != 0) & (~sim.removed[others])]
+    if not len(others):
+        return False
+    boxes = _corners(sim.x, sim.y, sim.heading, sim.length, sim.width)
+    overlap = _sat_overlap(boxes[0], boxes[others])
+    if not overlap.any():
+        return False
+    return bool((overlap & sim._ego_aggressor_mask(others)).any())
+
+
+def ego_min_ttc_now(sim: SimScene, others=None) -> float:
+    """Benchmark-only relative-velocity TTC sweep."""
+    if sim.n <= 1 or sim.crashed[0]:
+        return float(np.inf)
+    if others is None:
+        others = sim.slot_order[sim.slot_order != 0]
+    else:
+        others = np.asarray(others, dtype=np.int64)
+        others = others[(others != 0) & (~sim.removed[others])]
+    others = others[(sim.ptype[others] != TYPE_PEDESTRIAN) & (~sim.crashed[others])]
+    if not len(others):
+        return float(np.inf)
+    others = others[sim._ego_aggressor_mask(others)]
+    if not len(others):
+        return float(np.inf)
+
+    rvx = sim.vx[others] - sim.vx[0]
+    rvy = sim.vy[others] - sim.vy[0]
+    closing = (rvx * rvx + rvy * rvy) >= 1e-6
+    if not closing.any():
+        return float(np.inf)
+    others, rvx, rvy = others[closing], rvx[closing], rvy[closing]
+
+    ego_box = _corners(
+        np.asarray([sim.x[0]]),
+        np.asarray([sim.y[0]]),
+        np.asarray([sim.heading[0]]),
+        np.asarray([sim.length[0]]),
+        np.asarray([sim.width[0]]),
+    )[0]
+    base_boxes = _corners(
+        sim.x[others],
+        sim.y[others],
+        sim.heading[others],
+        sim.length[others],
+        sim.width[others],
+    )
+    rv = np.stack([rvx, rvy], axis=1).astype(np.float64)
+    steps = int(np.ceil(TTC_SWEEP_HORIZON / max(sim.dt, 1e-3)))
+    for step in range(0, steps + 1):
+        t = step * sim.dt
+        moved = base_boxes + (rv * t)[:, None, :]
+        if _sat_overlap(ego_box, moved).any():
+            return float(t)
+    return float(np.inf)
+
+
 def python_sim_eval(scenes: GeneratedScenes, sim_steps: int, seed: int):
     sims = build_python_sims(scenes, seed)
     collisions = 0
     for sim in sims:
-        collisions += int(sim.any_vehicle_overlap(0.0))
+        collisions += int(any_vehicle_overlap(sim, 0.0))
     for _ in range(sim_steps):
         for sim in sims:
             obs = sim.compute_obs()
             actions = np.zeros(obs.shape[0], dtype=np.int32)
             sim.step_dynamics(actions)
             sim.update_metrics()
-            collisions += int(sim.ego_collides_now())
-            sim.ego_min_ttc_now()
+            collisions += int(ego_collides_now(sim))
+            ego_min_ttc_now(sim)
             sim.goal_step()
     return collisions
 

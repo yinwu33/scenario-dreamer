@@ -132,7 +132,7 @@ class CenterlineDummyPlanner(NumpyPlanner):
             sim.vy[stopped] = 0.0
 
         idx = sim.controlled[~sim.stopped[sim.controlled]]
-        idx = idx[~sim.respawned[idx]]
+        idx = idx[~sim.removed[idx]]
         if len(idx) == 0:
             return
         for i in idx:

@@ -24,11 +24,11 @@ inpaint log-prob mask already implemented). Ordered cheapest-highest-impact firs
       log `group_reward_std`.
 
 ## Phase 2 — Reward shaping: continuous + decoupled  ✅ DONE
-- [x] `EgoAdvMinDistHook`: record initial clearance `d0` and post-warmup `dmin`
+- [x] `RewardHookEgoAdvMinDist`: record initial clearance `d0` and post-warmup `dmin`
       (`ego_adv_init_dist`, `ego_adv_min_dist_warmup`).
-- [x] `GoalOfflaneHook` (+ static_metrics): continuous `goal_lane_dist` /
+- [x] `RewardHookGoalOfflane` (+ static_metrics): continuous `goal_lane_dist` /
       `spawn_lane_dist` (max over controlled) alongside the binary fraction.
-- [x] `EgoCollisionHook`: togglable (`collision_enabled`) + records
+- [x] `RewardHookEgoCollision`: togglable (`collision_enabled`) + records
       `ego_collision_time` (first-collision step * dt) for trivial gating.
 - [x] `reward.py`: distance_bonus -> gated approach bonus
       `sigma((d_safe-dmin)/s)*sigma((d0-dmin-delta)/s)`; binary offlane ->

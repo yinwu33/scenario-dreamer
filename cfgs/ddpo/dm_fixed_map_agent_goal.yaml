@@ -14,11 +14,11 @@ control_ego: false           # false -> fix ego to GT, generate only other agent
 control_agent_num: 1       # number of non-ego agents to generate; -1 = all
 
 # --- fixed-map policy constraints ------------------------------------------
-force_driving: true          # always project controlled parking to not-parked class
+force_driving: true          # always project generated-agent parking to not-parked class
 
 # --- ego goal override (rule-based, applied at conditioning load) ----------
 # Real SDC trajectories often barely move (goal ~= spawn), so the ego is never
-# controlled and the criticality reward gets no signal. Replace the ego goal
+# planner-controlled and the criticality reward gets no signal. Replace the ego goal
 # with a far, forward, on-road lane endpoint so the ego then conditions the
 # generated adversaries.
 ego_goal_override:
@@ -58,7 +58,7 @@ approach_warmup_time: 0.5        # ignore first N s when measuring closing
 goal_offlane_penalty: 1.0        # weight on the continuous lane-distance penalty
 lane_soft: 1.75                  # lane penalty starts ramping here (m)
 parking_mismatch_penalty: 0.5    # inert in agent_only mode (no gt_parking_mask)
-controlled_parking_penalty: 0.5
+gen_agent_parking_penalty: 0.5
 # collision: time-gated bonus (not a +1 override). Trivial crashes < 0.75s get
 # the trivial penalty; the bonus ramps in over [0.75, 1.25] s. Kept small per
 # review (a real crash already maxes R_ttc, so this only separates crash from
