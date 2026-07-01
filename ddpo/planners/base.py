@@ -30,6 +30,8 @@ import torch
 from ..interfaces import GeneratedScenes
 from ..pufferdrive_sim import SimScene, load_sim_config
 from ..reward_hooks import (
+    GenInvalidCheck,
+    RewardHookGenAgentInvalid,
     RewardHookGenAgentParking,
     RewardHookEgoAdvMinDist,
     RewardHookEgoCollision,
@@ -65,6 +67,10 @@ class RolloutParams:
     # much the adversary closed in on the ego.
     collision_enabled: bool = False
     approach_warmup_time: float = 0.5
+    # When set, the conditionally-generated adversary is rejected (hard -1) if its
+    # realized labels violate the requested condition; see RewardHookGenAgentInvalid.
+    # None keeps the plain parked-adv gate (RewardHookGenAgentParking) only.
+    gen_invalid: GenInvalidCheck | None = None
 
 
 @dataclass
@@ -128,7 +134,7 @@ class NumpyPlanner(RolloutPlanner):
     def _make_hooks(self) -> list:
         """Metric hooks shared by all numpy planners (identical metric set)."""
         p = self.params
-        return [
+        hooks = [
             RewardHookInitOverlap(p.init_overlap_margin),
             RewardHookEgoCollision(),
             RewardHookEgoMinTTC(),
@@ -139,6 +145,11 @@ class NumpyPlanner(RolloutPlanner):
             RewardHookParkingMismatch(),
             RewardHookGenAgentParking(),
         ]
+        # Condition-violation gate (ldm_adv, conditional): computed alongside the
+        # parked-adv diagnostic; the reward uses it in place of the parking gate.
+        if p.gen_invalid is not None:
+            hooks.append(RewardHookGenAgentInvalid.from_check(p.gen_invalid))
+        return hooks
 
     # --------------------------------------------------------------- advance
     @abstractmethod

@@ -32,7 +32,7 @@ class GeneratedScenes:
     num_scenes: int
     # Canonical single-adversary handle: per-scene sim-local index of THE generated
     # adversary (the sole generated non-ego agent), or -1 if the scene has none
-    # (e.g. reference conditioning scenes). ``meta['gen_agent_mask']`` is the same
+    # (e.g. no-adv conditioning scenes). ``meta['gen_agent_mask']`` is the same
     # information as a per-node bool, kept only for viz/analysis scripts.
     adv_local_idx: torch.Tensor | None = None   # [num_scenes] long, -1 == no adversary
     meta: dict = field(default_factory=dict)   # carries "lane_scene_idx", "gen_agent_mask"

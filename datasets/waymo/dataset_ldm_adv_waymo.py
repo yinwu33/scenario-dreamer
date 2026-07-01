@@ -28,20 +28,31 @@ class WaymoDatasetLDMAdv(Dataset):
     (``scenario_dreamer_ae_goal_latents_waymo``): the autoencoder is completely
     unaware of the adversary, so an adversary is simply one agent's latent. After
     the deterministic ego-first reordering (same as the base LDM dataset) one
-    non-ego agent's ``mu/log_var/latent`` is split into the ``adv`` node and the
-    agent-to-agent / lane-to-agent graphs are rebuilt over the reduced agent set
-    (exactly like ``WaymoDatasetDMAdv`` does in raw space).
+    non-ego agent's ``mu/log_var/latent`` is split into the ``adv`` node and, by
+    default, removed from the normal agent set. The agent-to-agent /
+    lane-to-agent graphs are rebuilt over that base set (exactly like
+    ``WaymoDatasetDMAdv`` does in raw space). ``keep_adv_in_agents=True`` keeps
+    the selected agent in the normal set as well; DDPO uses this when the
+    generated adversary should be inserted as an extra agent into the full real
+    scene.
 
     Scenes with fewer than two agents (no non-ego agent to act as the adversary)
     are dropped by returning ``None`` -- the datamodule's collater filters those
     out -- so every retained scene has exactly one ``adv`` node.
     """
 
-    def __init__(self, cfg: Any, split_name: str = "train", mode: str = "train") -> None:
+    def __init__(
+        self,
+        cfg: Any,
+        split_name: str = "train",
+        mode: str = "train",
+        keep_adv_in_agents: bool = False,
+    ) -> None:
         super(WaymoDatasetLDMAdv, self).__init__()
         self.cfg = cfg
         self.split_name = split_name
         self.mode = mode
+        self.keep_adv_in_agents = bool(keep_adv_in_agents)
         self.dataset_dir = os.path.join(self.cfg.dataset_path, f"{self.split_name}")
         if not os.path.exists(self.dataset_dir):
             os.makedirs(self.dataset_dir, exist_ok=True)
@@ -187,18 +198,26 @@ class WaymoDatasetLDMAdv(Dataset):
         )
         edge_index_lane_to_lane = torch.from_numpy(edge_index_lane_to_lane)
 
-        # Split off the single adversarial agent latent from the normal agent set.
+        # Select the single adversarial agent latent. The base ldm_adv training
+        # path removes it from the normal agent set (replacement-style missing
+        # agent prior). DDPO can keep it in the normal set and use the adv stream
+        # as an extra inserted agent, preserving the full real scene context.
         adv_idx = self._select_adv_index(agent_mu.shape[0])
         adv_mu = agent_mu[adv_idx:adv_idx + 1]
         adv_log_var = agent_log_var[adv_idx:adv_idx + 1]
         keep = np.ones(agent_mu.shape[0], dtype=bool)
-        keep[adv_idx] = False
+        if not self.keep_adv_in_agents:
+            keep[adv_idx] = False
+        base_agent_states = agent_states_r[keep]
+        base_agent_types = agent_types_r[keep]
+        adv_agent_states = agent_states_r[adv_idx:adv_idx + 1]
+        adv_agent_types = agent_types_r[adv_idx:adv_idx + 1]
         agent_mu = agent_mu[keep]
         agent_log_var = agent_log_var[keep]
         agent_partition_mask = agent_partition_mask[keep]
 
         num_agents = int(agent_mu.shape[0])
-        # Rebuild the agent graphs over the reduced agent set (one fewer agent).
+        # Rebuild the agent graphs over the chosen base agent set.
         edge_index_lane_to_agent = get_edge_index_bipartite(num_lanes, num_agents)
         edge_index_agent_to_agent = get_edge_index_complete_graph(num_agents)
 
@@ -217,9 +236,15 @@ class WaymoDatasetLDMAdv(Dataset):
         d["adv"].x = from_numpy(adv_mu)
         d["adv"].log_var = from_numpy(adv_log_var)
         d["adv"].partition_mask = torch.zeros(1).bool()
+        # Exact normalized GT states/types from the latent cache for reference
+        # visualization/rollout. The model ignores these fields.
+        d["agent"].gt_x = from_numpy(base_agent_states)
+        d["agent"].gt_type = from_numpy(agent_types_r[keep])
+        d["adv"].gt_x = from_numpy(adv_agent_states)
+        d["adv"].gt_type = from_numpy(adv_agent_types)
         # Per-agent conditioning labels [type, motion, goal_dist] (shape
         # (num_agents, 3)) aligned with the reordered + adv-removed agent rows.
-        d["agent"].cond = self._agent_condition(agent_states_r[keep], agent_types_r[keep])
+        d["agent"].cond = self._agent_condition(base_agent_states, base_agent_types)
         # Discretized adv conditioning labels [type, motion, goal_dist, ego_dist]
         # (shape (1, 4)) aligned with the reordered adv row, batches to (B, 4).
         d["adv"].cond = self._adv_condition(agent_states_r, agent_types_r, adv_idx)

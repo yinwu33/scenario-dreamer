@@ -93,8 +93,9 @@ wandb:
   run_name: ${experiment.run_name}
 eval_every: 50
 eval_num_scenes: 4
-eval_visualize_reference: true
-eval_visualize_conditioning: true
+eval_visualize_before_rl: true
+eval_visualize_no_adv: true
+eval_static_baselines_once: true
 save_gif: true
 gif_fps: 10
 gif_max_frames: 90

@@ -54,6 +54,75 @@ def _sat_overlap(box_a, boxes_b):
     return overlap
 
 
+def sat_first_contact_time(box_a, boxes_b, rel_vel, dt, horizon):
+    """Closed-form first-contact time of a static box vs boxes translating at
+    constant relative velocity -- analytic replacement for the per-step SAT sweep.
+
+    ``box_a`` [4,2] is fixed; each of ``boxes_b`` [M,4,2] translates by
+    ``rel_vel[m] * t`` (``rel_vel`` [M,2]). Returns [M] float: the smallest grid
+    time ``k*dt`` (k = 0, 1, ... up to ``ceil(horizon/dt)``) at which box_a and
+    the translated box_b overlap under the same 4-axis SAT convention as
+    ``_sat_overlap``, or ``inf`` if they never overlap within the horizon.
+
+    Same axes/normalisation/inclusive-touch semantics as the sweep, so the result
+    matches ``for step: _sat_overlap(box_a, boxes_b + rel_vel*step*dt)`` to within
+    grid quantisation. On each SAT axis n the two projection intervals are static
+    (box_a) and linearly shifting (box_b, by ``(rel_vel.n) t``), so "projections
+    overlap" holds on a time interval; the boxes overlap on the intersection of
+    the 4 per-axis intervals, whose clamped left endpoint is first contact.
+    """
+    boxes_b = np.asarray(boxes_b, dtype=np.float64)
+    M = boxes_b.shape[0]
+    if M == 0:
+        return np.zeros(0, dtype=np.float64)
+    box_a = np.asarray(box_a, dtype=np.float64)
+    rel_vel = np.asarray(rel_vel, dtype=np.float64).reshape(M, 2)
+
+    def _first_edge_axes(box):
+        # two perpendicular axes from the box's first edge (corner0 -> corner1),
+        # matching _sat_overlap's axis choice + (+1e-9) normalisation.
+        ex = box[..., 1, 0] - box[..., 0, 0]
+        ey = box[..., 1, 1] - box[..., 0, 1]
+        a1 = np.stack([ex, ey], axis=-1)
+        a2 = np.stack([-ey, ex], axis=-1)
+        out = np.stack([a1, a2], axis=-2)  # [...,2,2]
+        norm = np.sqrt((out * out).sum(-1)) + 1e-9
+        return out / norm[..., None]
+
+    ea = np.broadcast_to(_first_edge_axes(box_a), (M, 2, 2))  # ego axes [M,2,2]
+    eb = _first_edge_axes(boxes_b)                            # per-b axes [M,2,2]
+    axes = np.concatenate([ea, eb], axis=1)                   # [M,4,2]
+
+    pa = np.einsum("mad,cd->mac", axes, box_a)                # [M,4,4] ego corners
+    a_min, a_max = pa.min(-1), pa.max(-1)                     # [M,4]
+    pb0 = np.einsum("mad,mcd->mac", axes, boxes_b)            # [M,4,4] at t=0
+    b_min0, b_max0 = pb0.min(-1), pb0.max(-1)                 # [M,4]
+    s = np.einsum("mad,md->ma", axes, rel_vel)                # [M,4] shift rate
+
+    # projections overlap (inclusive) iff  s*t in [lo, hi]  (hi >= lo always).
+    lo = a_min - b_max0
+    hi = a_max - b_min0
+    enter = np.full((M, 4), -np.inf)
+    leave = np.full((M, 4), np.inf)
+    pos, neg = s > 0.0, s < 0.0
+    enter[pos], leave[pos] = lo[pos] / s[pos], hi[pos] / s[pos]
+    enter[neg], leave[neg] = hi[neg] / s[neg], lo[neg] / s[neg]
+    zero = ~(pos | neg)
+    # s == 0: axis is time-independent -> overlaps for all t iff already overlapping.
+    zero_never = zero & ~((lo <= 0.0) & (hi >= 0.0))
+    # (zero & overlapping) keeps the default [-inf, inf], i.e. no time constraint.
+
+    t_enter = np.maximum(enter.max(1), 0.0)   # first time all axes could overlap
+    t_leave = leave.min(1)
+    never = zero_never.any(1) | (t_enter > t_leave)
+
+    k_max = int(np.ceil(horizon / dt))
+    k0 = np.ceil(t_enter / dt - 1e-9)          # first grid index >= t_enter
+    t_grid = k0 * dt
+    ok = (~never) & (t_grid <= t_leave + 1e-9) & (k0 <= k_max) & (k0 >= 0)
+    return np.where(ok, t_grid, np.inf)
+
+
 def _poly_signed_area(poly) -> float:
     """Shoelace signed area of an ordered polygon (CCW positive)."""
     n = len(poly)

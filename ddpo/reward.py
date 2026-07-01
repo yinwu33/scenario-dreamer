@@ -99,6 +99,7 @@ class PufferDriveReward:
         seed: int = 0,
         backend: str = "numpy",
         pufferdrive_root: str | None = None,
+        gen_invalid=None,
     ):
         """Initialize planner-backed reward evaluation.
 
@@ -197,6 +198,7 @@ class PufferDriveReward:
             pufferdrive_root=pufferdrive_root,
             collision_enabled=bool(collision_enabled),
             approach_warmup_time=float(approach_warmup_time),
+            gen_invalid=gen_invalid,
         )
         self.planner = build_planner(planner_cfg, params)
         # Back-compat: expose the native C backend for callers that poke at it
@@ -280,20 +282,31 @@ class PufferDriveReward:
             + self.init_overlap_penalty * c_overlap
         ).astype(np.float32)
 
-        # --- assemble: park -> invalid -> valid -----------------------------
-        # park:    a parked adversary is not a critical scene -> hard -1.
-        # invalid: an interpenetrating init can never earn criticality, so the
-        #          reward is just the (negative) constraint (always <= 0).
-        # valid:   reward = clip(criticality - constraint, -1, 1).
+        # --- assemble: reject -> init_invalid -> valid ----------------------
+        # reject:       a parked / condition-violating adversary is not a critical
+        #               scene -> hard -1. The condition-violation metric
+        #               (``gen_agent_is_invalid``, from RewardHookGenAgentInvalid)
+        #               supersedes the plain parked-adv gate when present: it
+        #               already rejects a parked adversary whenever the target is
+        #               motion=moving, and correctly ACCEPTS one when the target is
+        #               motion=parked (which the raw parking gate would misflag).
+        # init_invalid: an interpenetrating init can never earn criticality, so the
+        #               reward is just the (negative) constraint (always <= 0).
+        # valid:        reward = clip(criticality - constraint, -1, 1).
         c_parking = np.asarray(m.get("gen_agent_is_parked", zeros), dtype=np.float32)
-        parking = c_parking > 0
-        invalid = constraint > 0.0
-        valid = ~(parking | invalid)
+        c_invalid = m.get("gen_agent_is_invalid")
+        if c_invalid is not None:
+            c_reject = np.asarray(c_invalid, dtype=np.float32)
+        else:
+            c_reject = c_parking
+        reject = c_reject > 0
+        init_invalid = constraint > 0.0
+        valid = ~(reject | init_invalid)
 
         # Hard validity gate: criticality is only credited on valid scenes.
         criticality = np.where(valid, criticality_raw, 0.0).astype(np.float32)
         total = np.select(
-            [parking, invalid],
+            [reject, init_invalid],
             [
                 np.full(n, -1.0, dtype=np.float32),
                 np.clip(-constraint, -1.0, 0.0),
@@ -311,6 +324,8 @@ class PufferDriveReward:
             "c_spawn_lane": c_spawn_lane,
             "c_goal_lane": c_goal_lane,
             "c_parking": c_parking,
+            "c_invalid": c_reject,
+            "c_invalid_reason": m.get("gen_agent_invalid_reason", np.full(n, "", dtype=object)),
             "c_trivial": c_trivial,
             "c_overlap": c_overlap,
             "constraint": constraint,
@@ -364,6 +379,7 @@ class PufferDriveReward:
             "ego_adv_init_dist": metrics.get("ego_adv_init_dist", inf.copy()),
             "ego_adv_min_dist_warmup": metrics.get("ego_adv_min_dist_warmup", inf.copy()),
             "gen_agent_is_parked": metrics.get("gen_agent_is_parked", zeros.copy()),
+            "gen_agent_is_invalid": metrics.get("gen_agent_is_invalid", zeros.copy()),
         }
         # Per-component reward arrays (r_ttc, r_approach, r_risk, criticality,
         # c_lane, constraint, ...) for diagnostics / future per-component

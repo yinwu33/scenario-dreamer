@@ -393,7 +393,7 @@ def _condition_stats(
     for i, pool_idx in enumerate(pool_indices):
         rows.append({
             "split": split,
-            "policy": "conditioning_real_adv",
+            "policy": "no_adv",
             "pool_idx": int(pool_idx),
             "n_samples": 1,
             "reward_mean": float(fields["reward"][i]),

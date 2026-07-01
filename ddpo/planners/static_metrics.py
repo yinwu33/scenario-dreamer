@@ -16,6 +16,7 @@ import torch
 
 from ..interfaces import GeneratedScenes
 from ..pufferdrive_sim import MIN_DISTANCE_TO_GOAL, TYPE_VEHICLE, SimConfig
+from ..reward_hooks import GenInvalidCheck
 from .type_utils import to_puffer_agent_types
 
 
@@ -51,6 +52,14 @@ def _lane_distance(points: np.ndarray, lane_polylines: np.ndarray) -> np.ndarray
     return np.sqrt((d * d).sum(-1)).min(axis=1).astype(np.float32)
 
 
+def _bucket(dist: float, near: float, far: float) -> int:
+    if dist < near:
+        return 0
+    if dist < far:
+        return 1
+    return 2
+
+
 def add_static_metrics(
     scenes: GeneratedScenes,
     metrics: dict,
@@ -58,6 +67,7 @@ def add_static_metrics(
     sim_cfg: SimConfig,
     goal_offlane_threshold: float,
     goal_onroad_threshold: float,
+    gen_invalid: GenInvalidCheck | None = None,
 ) -> dict:
     """Fill generated-agent lane / parking-mismatch / parking fractions.
 
@@ -78,17 +88,26 @@ def add_static_metrics(
     spawn_lane_dist = np.zeros(scenes.num_scenes, dtype=np.float32)
     parking_mismatch = np.zeros(scenes.num_scenes, dtype=np.float32)
     gen_agent_parking = np.zeros(scenes.num_scenes, dtype=np.float32)
+    gen_agent_invalid = np.zeros(scenes.num_scenes, dtype=np.float32)
+    gen_agent_invalid_reason = np.full(scenes.num_scenes, "", dtype=object)
     gt_parking = scenes.meta.get("gt_parking_mask")
     if gt_parking is not None:
         gt_parking = _to_numpy(gt_parking, bool)
     gen_agent_mask = scenes.meta.get("gen_agent_mask")
     if gen_agent_mask is not None:
         gen_agent_mask = _to_numpy(gen_agent_mask, bool)
+    adv_cond = scenes.meta.get("adv_cond")
+    if adv_cond is not None:
+        adv_cond = _to_numpy(adv_cond, np.int64)
+    adv_local_idx = getattr(scenes, "adv_local_idx", None)
+    if adv_local_idx is not None:
+        adv_local_idx = _to_numpy(adv_local_idx, np.int64)
 
     ptype = to_puffer_agent_types(types)
     for s in range(scenes.num_scenes):
         a_sel = agent_scene_idx == s
         s_states = states[a_sel]
+        s_types = types[a_sel]
         if s_states.shape[0] == 0:
             continue
 
@@ -110,6 +129,62 @@ def add_static_metrics(
                 gen_agent_parking[s] = float(
                     (gen_dist[gen_agent_local] < MIN_DISTANCE_TO_GOAL).mean()
                 )
+
+        if gen_invalid is not None and adv_cond is not None:
+            if adv_local_idx is not None:
+                adv = int(adv_local_idx[s])
+            elif len(gen_agent_local):
+                adv = int(gen_agent_local[0])
+            else:
+                adv = -1
+            if 0 <= adv < s_states.shape[0] and int(adv_cond[s, 0]) >= 0:
+                tgt = adv_cond[s]
+                goal_dist = float(np.hypot(
+                    goal[adv, 0] - spawn[adv, 0],
+                    goal[adv, 1] - spawn[adv, 1],
+                ))
+                ego_dist = float(np.hypot(
+                    spawn[adv, 0] - spawn[0, 0],
+                    spawn[adv, 1] - spawn[0, 1],
+                ))
+                bad = False
+                reason = []
+                if gen_invalid.check_type:
+                    realized_type = int(s_types[adv])
+                    is_wrong_type = realized_type != int(tgt[0])
+                    bad |= is_wrong_type
+                    if is_wrong_type:
+                        reason.append(f"type:{realized_type}!={int(tgt[0])}")
+                if gen_invalid.check_motion:
+                    realized_motion = (
+                        0 if goal_dist < gen_invalid.min_distance_to_goal else 1
+                    )
+                    is_wrong_motion = realized_motion != int(tgt[1])
+                    bad |= is_wrong_motion
+                    if is_wrong_motion:
+                        reason.append(f"motion:{realized_motion}!={int(tgt[1])}")
+                if gen_invalid.check_goal_dist:
+                    realized_gd = _bucket(
+                        goal_dist,
+                        gen_invalid.goaldist_near,
+                        gen_invalid.goaldist_far,
+                    )
+                    is_wrong_goal_dist = realized_gd != int(tgt[2])
+                    bad |= is_wrong_goal_dist
+                    if is_wrong_goal_dist:
+                        reason.append(f"goal_dist:{realized_gd}!={int(tgt[2])}")
+                if gen_invalid.check_ego_dist:
+                    realized_ed = _bucket(
+                        ego_dist,
+                        gen_invalid.egodist_near,
+                        gen_invalid.egodist_far,
+                    )
+                    is_wrong_ego_dist = realized_ed != int(tgt[3])
+                    bad |= is_wrong_ego_dist
+                    if is_wrong_ego_dist:
+                        reason.append(f"ego_dist:{realized_ed}!={int(tgt[3])}")
+                gen_agent_invalid[s] = 1.0 if bad else 0.0
+                gen_agent_invalid_reason[s] = " ".join(reason)
 
         gen_agent_local = gen_agent_local[: int(sim_cfg.max_controlled_agents)]
         if len(gen_agent_local) == 0:
@@ -142,6 +217,9 @@ def add_static_metrics(
     metrics["spawn_lane_dist"] = spawn_lane_dist
     metrics["parking_mismatch_frac"] = parking_mismatch
     metrics["gen_agent_is_parked"] = gen_agent_parking
+    if gen_invalid is not None:
+        metrics["gen_agent_is_invalid"] = gen_agent_invalid
+        metrics["gen_agent_invalid_reason"] = gen_agent_invalid_reason
     metrics.setdefault(
         "ego_adv_min_dist", np.full(scenes.num_scenes, np.inf, dtype=np.float32)
     )

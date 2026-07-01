@@ -371,6 +371,11 @@ class LDMAdvConditioningPool:
     policy regenerates from noise. Two knobs adapt it for the criticality reward
     (copied from the map-conditioned dm flow):
 
+      * **insert_adv_as_extra** (default ``False``) -- when ``True`` the selected
+        real adversary remains in the normal-agent context and the generated
+        adversary is inserted as an extra agent during decode. This preserves the
+        full real scene for DDPO while keeping the base ldm_adv training path as
+        replacement-style missing-agent modelling.
       * **prune_base_to_ego** (default ``False``) -- when ``True`` only the ego is
         kept among the real base agents (the rest dropped, graphs rebuilt), so the
         decoded scene is ``ego + adv`` and the reward's ego-vs-all TTC / collision
@@ -402,9 +407,15 @@ class LDMAdvConditioningPool:
         seed: int = 0,
         min_ego_drive: float = 10.0,
         prune_base_to_ego: bool = False,
+        insert_adv_as_extra: bool = False,
         adv_cond_target=None,
     ):
-        self.dataset = WaymoDatasetLDMAdv(dataset_cfg, split_name=split_name, mode="eval")
+        self.dataset = WaymoDatasetLDMAdv(
+            dataset_cfg,
+            split_name=split_name,
+            mode="eval",
+            keep_adv_in_agents=insert_adv_as_extra,
+        )
         if len(self.dataset) == 0:
             raise RuntimeError(f"empty ldm_adv dataset for split '{split_name}' "
                                f"({dataset_cfg.dataset_path})")
@@ -417,6 +428,7 @@ class LDMAdvConditioningPool:
         self.adv_cond_seed = int(seed)
         self.min_ego_drive = float(min_ego_drive)
         self.prune_base_to_ego = bool(prune_base_to_ego)
+        self.insert_adv_as_extra = bool(insert_adv_as_extra)
         self.fov = float(dataset_cfg.fov)
         # Adversary conditioning target as per-field candidate bucket lists
         # ({type, motion, goal_dist, ego_dist} -> [int, ...]). The adv is generated
@@ -493,6 +505,10 @@ class LDMAdvConditioningPool:
             d["agent"].log_var = d["agent"].log_var[:1]
         if "partition_mask" in d["agent"]:
             d["agent"].partition_mask = d["agent"].partition_mask[:1]
+        if "gt_x" in d["agent"]:
+            d["agent"].gt_x = d["agent"].gt_x[:1]
+        if "gt_type" in d["agent"]:
+            d["agent"].gt_type = d["agent"].gt_type[:1]
         # Per-agent conditioning labels must shrink with the agent set, otherwise
         # the conditioned DiT adds an (N, 3) embedding onto a single ego token.
         if "cond" in d["agent"]:

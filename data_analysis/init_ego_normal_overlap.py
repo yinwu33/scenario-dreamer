@@ -15,15 +15,15 @@ at the spawn state (t=0) replays the EXACT collision test the sim uses
 (`ddpo.geometry._corners` / `_sat_overlap`, the 15 m broad-phase gate, pedestrian
 exclusion) for:
 
-  * ego vs each NON-adversary vehicle  -> ego_overlaps_normal   (the question)
-  * ego vs the generated adversary     -> ego_overlaps_adv      (adversary's fault)
+  * ego vs each normal vehicle         -> ego_overlaps_normal   (the question)
+  * ego vs the generated adversary     -> ego_overlaps_adv      (sampled scenes only)
 
 Because the normals are fixed conditioning (their latents are held constant and
-the adversary is excluded from the normal test), the normal-overlap rate does not
-need the 1000-step diffusion sampler: it is read from `conditioning_scenes` (base
-+ real adv decode) over a large scene count. A smaller `--sample` validation pass
-runs the real DDPO sampler to confirm the generated adversary does not change the
-normal-overlap rate.
+the no-adv baseline contains no generated adversary), the normal-overlap rate does
+not need the 1000-step diffusion sampler: it is read from `conditioning_scenes`
+(base decode without appending the DDPO adversary) over a large scene count. A
+smaller `--sample` validation pass runs the real DDPO sampler to confirm the
+generated adversary does not change the normal-overlap rate.
 
 Run from the repo root:
 

@@ -26,6 +26,7 @@ from ddpo.policy import DMFixedMapAgentGoalDDPOPolicy, DMGoalDDPOPolicy
 from ddpo.policy_ldm import LDMGoalDDPOPolicy
 from ddpo.policy_ldm_adv import LDMAdvDDPOPolicy
 from ddpo.reward import PufferDriveReward
+from ddpo.reward_hooks import GenInvalidCheck
 from ddpo.interfaces import GeneratedScenes
 from datasets.waymo.dataset_dm_fixed_map_agent_goal_waymo import WaymoDatasetDMFixedMapAgentGoal
 from utils.train_helpers import cache_latent_stats, set_latent_stats
@@ -35,6 +36,13 @@ def _set_dataset_name(cfg_node, dataset_name: str) -> None:
     OmegaConf.set_struct(cfg_node, False)
     cfg_node.dataset_name = dataset_name
     OmegaConf.set_struct(cfg_node, True)
+
+
+def _cfg_get_renamed(cfg, key: str, legacy_key: str, default):
+    value = cfg.get(key, None)
+    if value is not None:
+        return value
+    return cfg.get(legacy_key, default)
 
 
 def _build_policy_and_pool(cfg_root, cfg, device: str):
@@ -104,7 +112,6 @@ def _build_policy_and_pool(cfg_root, cfg, device: str):
             sampler=cfg.get("sampler", "ddpm"),
             ddim_steps=cfg.get("ddim_steps", None),
             ddim_eta=cfg.get("ddim_eta", 1.0),
-            force_adv_vehicle=cfg.get("force_adv_vehicle", True),
         )
         pool = LDMAdvConditioningPool(
             ldm_cfg.dataset,
@@ -114,6 +121,7 @@ def _build_policy_and_pool(cfg_root, cfg, device: str):
             seed=cfg.seed,
             min_ego_drive=cfg.get("min_ego_drive", 10.0),
             prune_base_to_ego=cfg.get("prune_base_to_ego", False),
+            insert_adv_as_extra=cfg.get("insert_adv_as_extra", False),
             adv_cond_target=cfg.get("adv_cond_target", None),
         )
         eval_dataset_cfg = ldm_cfg.dataset
@@ -148,6 +156,29 @@ def _build_policy_and_pool(cfg_root, cfg, device: str):
         raise ValueError(f"Unsupported ddpo.model_type: {model_type}")
 
     return model_type, policy, pool, eval_dataset_cfg
+
+
+def _build_gen_invalid(cfg, dataset_cfg):
+    """Assemble the condition-violation check for RewardHookGenAgentInvalid.
+
+    Bucket thresholds are sourced from the (ldm_adv) dataset config so they stay
+    the single source of truth shared with the training-time discretization; the
+    per-field toggles come from ``cfg.gen_agent_invalid``. Returns ``None`` when
+    the block is absent or ``enabled=false`` (falls back to the parked-adv gate).
+    """
+    spec = cfg.get("gen_agent_invalid", None)
+    if spec is None or not bool(spec.get("enabled", False)):
+        return None
+    return GenInvalidCheck(
+        goaldist_near=float(dataset_cfg.cond_goaldist_near_threshold),
+        goaldist_far=float(dataset_cfg.cond_goaldist_far_threshold),
+        egodist_near=float(dataset_cfg.cond_egodist_near_threshold),
+        egodist_far=float(dataset_cfg.cond_egodist_far_threshold),
+        check_type=bool(spec.get("check_type", True)),
+        check_motion=bool(spec.get("check_motion", True)),
+        check_goal_dist=bool(spec.get("check_goal_dist", True)),
+        check_ego_dist=bool(spec.get("check_ego_dist", True)),
+    )
 
 
 def _default_run_name(cfg, model_type: str) -> str:
@@ -213,10 +244,11 @@ _ADV_TABLE_COLUMNS = [
 
 _REWARD_COMPONENT_KEYS = (
     "criticality", "r_ttc", "r_approach",
-    "constraint", "c_spawn_lane", "c_goal_lane", "c_overlap", "c_parking",
+    "constraint", "c_spawn_lane", "c_goal_lane", "c_overlap", "c_parking", "c_invalid",
     "spawn_lane_dist", "goal_lane_dist", "init_overlap_frac",
     "ego_adv_init_dist", "ego_adv_min_dist_warmup",
 )
+_VIZ_COMPONENT_KEYS = (*_REWARD_COMPONENT_KEYS, "c_invalid_reason")
 
 _GROUP_TABLE_COLUMNS = [
     "iter", "group", "sample", "rank", "selected_for_media",
@@ -266,7 +298,7 @@ def _adv_agent_rows(name, s, states_s, types_s, gen_agent_s, traj, reward_s):
 
 
 def _reward_components(metrics: dict, s: int) -> dict:
-    return {k: metrics[k][s] for k in _REWARD_COMPONENT_KEYS if k in metrics}
+    return {k: metrics[k][s] for k in _VIZ_COMPONENT_KEYS if k in metrics}
 
 
 def _to_numpy_index(x):
@@ -318,6 +350,13 @@ def _subset_scenes(scenes: GeneratedScenes, scene_ids: list[int]) -> GeneratedSc
     gt_parking_mask = scenes.meta.get("gt_parking_mask")
     if gt_parking_mask is not None and getattr(gt_parking_mask, "shape", [0])[0] == agent_idx.shape[0]:
         meta["gt_parking_mask"] = _index_like(gt_parking_mask, agent_mask)
+    adv_cond = scenes.meta.get("adv_cond")
+    if adv_cond is not None:
+        scene_idx = torch.as_tensor(selected, device=device, dtype=torch.long)
+        if isinstance(adv_cond, torch.Tensor):
+            meta["adv_cond"] = adv_cond[scene_idx.to(adv_cond.device)]
+        else:
+            meta["adv_cond"] = np.asarray(adv_cond)[selected]
 
     adv_local_idx = None
     if scenes.adv_local_idx is not None:
@@ -531,7 +570,17 @@ def _visualize_train_group_diversity(
 
 
 @torch.no_grad()
-def evaluate_and_visualize(policy, eval_pool, reward, cfg, it, wandb, *, media_tag="eval"):
+def evaluate_and_visualize(
+    policy,
+    eval_pool,
+    reward,
+    cfg,
+    it,
+    wandb,
+    *,
+    media_tag="eval",
+    include_static_baselines: bool = True,
+):
     """Roll out the first ``eval_num_scenes`` fixed scenes of ``eval_pool`` and
     build trajectory media. ``media_tag`` namespaces the on-disk GIF directory so
     callers that pass different pools (e.g. val vs. a train-scene subset) don't
@@ -548,16 +597,23 @@ def evaluate_and_visualize(policy, eval_pool, reward, cfg, it, wandb, *, media_t
     if save_gif_mode:
         gif_dir.mkdir(parents=True, exist_ok=True)
 
-    # Fixed conditioning + fixed noise: current/reference visuals differ only by
-    # model weights, while conditioning uses the validation graph's original goals.
+    # Fixed conditioning + fixed noise: after_rl / before_rl differ only by model
+    # weights. no_adv decodes the conditioning graph without appending the DDPO
+    # adversary, so it has no generated-agent highlight.
     variants = {}
     torch.manual_seed(int(cfg.seed))
-    variants["current"] = policy.sample(cond)[0]
-    if cfg.get("eval_visualize_reference", True):
+    variants["after_rl"] = policy.sample(cond)[0]
+    if (
+        include_static_baselines
+        and _cfg_get_renamed(cfg, "eval_visualize_before_rl", "eval_visualize_reference", True)
+    ):
         torch.manual_seed(int(cfg.seed))
-        variants["reference"] = policy.sample(cond, use_reference=True)[0]
-    if cfg.get("eval_visualize_conditioning", True):
-        variants["conditioning"] = policy.conditioning_scenes(cond)
+        variants["before_rl"] = policy.sample(cond, use_reference=True)[0]
+    if (
+        include_static_baselines
+        and _cfg_get_renamed(cfg, "eval_visualize_no_adv", "eval_visualize_conditioning", True)
+    ):
+        variants["no_adv"] = policy.conditioning_scenes(cond)
 
     metrics_by_variant = {}
     media_by_variant = {}
@@ -601,9 +657,10 @@ def evaluate_and_visualize(policy, eval_pool, reward, cfg, it, wandb, *, media_t
                 k: metrics[k][s]
                 for k in (
                     "criticality", "r_ttc", "r_approach",
-                    "constraint", "c_spawn_lane", "c_goal_lane", "c_overlap", "c_parking",
+                    "constraint", "c_spawn_lane", "c_goal_lane", "c_overlap", "c_parking", "c_invalid",
                     "spawn_lane_dist", "goal_lane_dist", "init_overlap_frac",
                     "ego_adv_init_dist", "ego_adv_min_dist_warmup",
+                    "c_invalid_reason",
                 )
                 if k in metrics
             }
@@ -642,23 +699,40 @@ def evaluate_and_visualize(policy, eval_pool, reward, cfg, it, wandb, *, media_t
     return metrics_by_variant, media_by_variant, adv_table
 
 
-def _eval_and_log(policy, pool, reward, cfg, it, wandb, *, prefix):
+def _eval_and_log(
+    policy,
+    pool,
+    reward,
+    cfg,
+    it,
+    wandb,
+    *,
+    prefix,
+    include_static_baselines: bool = True,
+):
     """Roll out a fixed pool, print a summary, and log metrics + rollout media
     under ``prefix``: ``'val'`` for the held-out val scenes, ``'train_viz'`` for a
     fixed subset of the train scenes (so the rising train reward can be inspected
     visually). Returns the per-variant metrics dict."""
     ev_by_variant, images_by_variant, adv_table = evaluate_and_visualize(
-        policy, pool, reward, cfg, it, wandb, media_tag=prefix
+        policy,
+        pool,
+        reward,
+        cfg,
+        it,
+        wandb,
+        media_tag=prefix,
+        include_static_baselines=include_static_baselines,
     )
-    ev = ev_by_variant["current"]
+    ev = ev_by_variant["after_rl"]
     ev_crit = float((ev["ego_collision"] > 0).mean())
     ev_inval = float((ev["init_invalid"] > 0).mean())
     print(
-        f"   [{prefix} it {it:04d}] current critical_rate={ev_crit:.3f} "
+        f"   [{prefix} it {it:04d}] after_rl critical_rate={ev_crit:.3f} "
         f"init_invalid={ev_inval:.3f} goal_offlane={float(ev['goal_offlane_frac'].mean()):.3f}"
     )
     for name, cmp_ev in ev_by_variant.items():
-        if name == "current":
+        if name == "after_rl":
             continue
         print(
             f"      [{prefix}/{name}] reward={float(cmp_ev['reward'].mean()):.3f} "
@@ -667,34 +741,37 @@ def _eval_and_log(policy, pool, reward, cfg, it, wandb, *, prefix):
             f"parking_mismatch={float(cmp_ev['parking_mismatch_frac'].mean()):.3f}"
         )
     if wandb is not None:
-        ev_ttc = ev["ego_min_ttc"]
-        ev_ttc_finite = np.isfinite(ev_ttc)
         log_payload = {
-            f"{prefix}/critical_rate": ev_crit,
-            f"{prefix}/ego_fault_collision_rate": float((ev["ego_fault_collision"] > 0).mean()),
-            f"{prefix}/init_invalid": ev_inval,
-            f"{prefix}/ego_min_ttc": float(ev_ttc[ev_ttc_finite].mean()) if ev_ttc_finite.any() else float("nan"),
-            f"{prefix}/ego_offroad_rate": float(ev["ego_offroad"].mean()),
-            f"{prefix}/reached_goal_rate": float(ev["reached_goal"].mean()),
-            f"{prefix}/goal_offlane_frac": float(ev["goal_offlane_frac"].mean()),
-            f"{prefix}/parking_mismatch_frac": float(ev["parking_mismatch_frac"].mean()),
-            f"{prefix}/rollouts": images_by_variant.get("current", []),
+            "ddpo_step": int(it),
         }
         if adv_table is not None:
             log_payload[f"{prefix}/adv_data"] = adv_table
         for name, cmp_ev in ev_by_variant.items():
+            cmp_ttc = cmp_ev["ego_min_ttc"]
+            cmp_ttc_finite = np.isfinite(cmp_ttc)
             log_payload.update(
                 {
                     f"{prefix}/{name}/reward": float(cmp_ev["reward"].mean()),
                     f"{prefix}/{name}/critical_rate": float((cmp_ev["ego_collision"] > 0).mean()),
+                    f"{prefix}/{name}/ego_fault_collision_rate": float(
+                        (cmp_ev["ego_fault_collision"] > 0).mean()
+                    ),
                     f"{prefix}/{name}/init_invalid": float(cmp_ev["init_invalid"].mean()),
+                    f"{prefix}/{name}/ego_min_ttc": (
+                        float(cmp_ttc[cmp_ttc_finite].mean())
+                        if cmp_ttc_finite.any()
+                        else float("nan")
+                    ),
                     f"{prefix}/{name}/ego_offroad_rate": float(cmp_ev["ego_offroad"].mean()),
                     f"{prefix}/{name}/reached_goal_rate": float(cmp_ev["reached_goal"].mean()),
                     f"{prefix}/{name}/goal_offlane_frac": float(cmp_ev["goal_offlane_frac"].mean()),
+                    f"{prefix}/{name}/parking_mismatch_frac": float(
+                        cmp_ev["parking_mismatch_frac"].mean()
+                    ),
                     f"{prefix}/{name}/rollouts": images_by_variant.get(name, []),
                 }
             )
-        wandb.log(log_payload, step=it)
+        wandb.log(log_payload)
     return ev_by_variant
 
 
@@ -737,6 +814,7 @@ def run_ddpo(cfg_root):
         seed=cfg.seed,
         backend=cfg.get("reward_backend", "numpy"),
         pufferdrive_root=cfg.get("pufferdrive_root", None),
+        gen_invalid=_build_gen_invalid(cfg, eval_dataset_cfg),
     )
     ddpo_cfg = DDPOConfig(**OmegaConf.to_container(cfg.ddpo, resolve=True))
     trainable_params = list(policy.trainable_parameters())
@@ -788,6 +866,12 @@ def run_ddpo(cfg_root):
             init_kwargs["id"] = resume_wandb_id
             init_kwargs["resume"] = "allow"
         _wandb.init(**init_kwargs)
+        # W&B's internal step can be ahead of the local checkpoint after an
+        # interrupted run (history was logged, last.ckpt was not). Use an explicit
+        # DDPO x-axis instead of passing `step=it`, so resumed logs are not dropped
+        # for being lower than the run's current internal step.
+        _wandb.define_metric("ddpo_step")
+        _wandb.define_metric("*", step_metric="ddpo_step")
         wandb = _wandb
         wandb_run_id = _wandb.run.id
 
@@ -804,6 +888,7 @@ def run_ddpo(cfg_root):
             pool_kwargs = {
                 "min_ego_drive": cfg.get("min_ego_drive", 10.0),
                 "prune_base_to_ego": cfg.get("prune_base_to_ego", False),
+                "insert_adv_as_extra": cfg.get("insert_adv_as_extra", False),
                 "adv_cond_target": cfg.get("adv_cond_target", None),
             }
         else:
@@ -847,6 +932,8 @@ def run_ddpo(cfg_root):
         raise ValueError(
             f"batch_size ({cfg.batch_size}) must be divisible by group_size ({group_size})"
         )
+    static_baselines_once = bool(cfg.get("eval_static_baselines_once", True))
+    static_baseline_prefixes_logged: set[str] = set()
 
     for it in range(start_it, cfg.num_iterations):
         # ---- rollout / collect -------------------------------------------------
@@ -903,6 +990,7 @@ def run_ddpo(cfg_root):
         finite_dist = np.isfinite(adv_dist)
         mean_adv_dist = float(adv_dist[finite_dist].mean()) if finite_dist.any() else float("nan")
         parked = float(metrics["gen_agent_is_parked"].mean())
+        invalid_cond = float(metrics.get("gen_agent_is_invalid", np.zeros(1)).mean())
         # Within-group reward spread: this is the only signal per-context
         # advantage normalisation can use. If it collapses to ~0, the group has
         # no learnable contrast (every sample equally (in)valid) and is skipped.
@@ -917,7 +1005,7 @@ def run_ddpo(cfg_root):
             f"[it {it:04d}] reward={rewards.mean():.3f} pos_reward_rate={crit:.3f} "
             f"near_miss={near_miss:.3f} risk={float(metrics['r_risk'].mean()):.3f} "
             f"approach={float(metrics['r_approach'].mean()):.3f} min_ttc={mean_ttc:.2f} "
-            f"adv_dist={mean_adv_dist:.2f} parked={parked:.3f} "
+            f"adv_dist={mean_adv_dist:.2f} parked={parked:.3f} cond_invalid={invalid_cond:.3f} "
             f"init_invalid={inval:.3f} loss={log['loss']:.4f} grp_std={grp_std:.3f} "
             f"ratio={log.get('ratio_mean', 1.0):.3f} kl={log.get('kl_to_base', 0.0):.4f} "
             f"skipped_updates={skipped_updates}"
@@ -929,6 +1017,7 @@ def run_ddpo(cfg_root):
 
         if wandb is not None:
             log_payload = {
+                "ddpo_step": int(it),
                 "train/reward": float(rewards.mean()),
                 "train/pos_reward_rate": crit,
                 "train/near_miss_rate": near_miss,
@@ -936,6 +1025,7 @@ def run_ddpo(cfg_root):
                 "train/ego_min_ttc": mean_ttc,
                 "train/ego_adv_min_dist": mean_adv_dist,
                 "train/gen_agent_is_parked": parked,
+                "train/gen_agent_is_invalid": invalid_cond,
                 "train/ego_collision_rate": float(metrics["ego_collision"].mean()),
                 "train/ego_offroad_rate": float(metrics["ego_offroad"].mean()),
                 "train/reached_goal_rate": float(metrics["reached_goal"].mean()),
@@ -959,17 +1049,45 @@ def run_ddpo(cfg_root):
             }
             log_payload.update(group_log)
             log_payload.update(group_viz_log)
-            wandb.log(log_payload, step=it)
+            wandb.log(log_payload)
 
         # ---- periodic held-out eval + trajectory viz --------------------------
         if eval_pool is not None and (it + 1) % eval_every == 0:
-            _eval_and_log(policy, eval_pool, reward, cfg, it, wandb, prefix="val")
+            include_static = (
+                not static_baselines_once
+                or "val" not in static_baseline_prefixes_logged
+            )
+            _eval_and_log(
+                policy,
+                eval_pool,
+                reward,
+                cfg,
+                it,
+                wandb,
+                prefix="val",
+                include_static_baselines=include_static,
+            )
+            static_baseline_prefixes_logged.add("val")
             # Same eval/viz pass over a fixed subset of the *train* scenes, so the
             # rising train reward can be inspected visually. Reuses the already
             # loaded training pool's first eval_num_scenes slots (deterministic +
             # cached), logged under train_viz/* alongside the val/* media.
             if cfg.get("eval_visualize_train", False):
-                _eval_and_log(policy, pool, reward, cfg, it, wandb, prefix="train_viz")
+                include_static = (
+                    not static_baselines_once
+                    or "train_viz" not in static_baseline_prefixes_logged
+                )
+                _eval_and_log(
+                    policy,
+                    pool,
+                    reward,
+                    cfg,
+                    it,
+                    wandb,
+                    prefix="train_viz",
+                    include_static_baselines=include_static,
+                )
+                static_baseline_prefixes_logged.add("train_viz")
 
         if cfg.save_every and (it + 1) % cfg.save_every == 0:
             # Lightning-compatible layout (diff_model.* prefix) so the regular

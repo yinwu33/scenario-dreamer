@@ -129,10 +129,16 @@ def _status_text(
     """
     r = 0.0 if reward is None else float(reward)
     if components:
-        # Summary line: total reward + the hard parking branch flag (a parked
-        # adversary is rejected outright, reward = -1), then the component lines.
-        park = bool(float(components.get("c_parking", 0.0)) > 0.0)
-        lines = [f"R={r:+.2f}  park={str(park).lower()}"]
+        # Summary line: total reward + the hard reject branch flag (a parked /
+        # condition-violating adversary is rejected outright, reward = -1), then
+        # the component lines. c_invalid (condition check) supersedes c_parking
+        # when present; fall back to the parking flag otherwise.
+        reject_val = components.get("c_invalid", components.get("c_parking", 0.0))
+        reject_reason = components.get("c_invalid_reason", "")
+        park = bool(float(reject_val) > 0.0)
+        reject_reason = str(reject_reason).strip()
+        reason_txt = f"  reason={reject_reason}" if reject_reason else ""
+        lines = [f"R={r:+.2f}  reject={str(park).lower()}{reason_txt}"]
         for fields in _COMPONENT_LINES:
             parts = [
                 f"{short}={_fmt_float(components[key])}"

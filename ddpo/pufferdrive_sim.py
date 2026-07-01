@@ -28,6 +28,7 @@ behaved with generated scenes):
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -155,6 +156,124 @@ def spiral_offsets(vision_range: int = VISION_RANGE) -> np.ndarray:
 
 
 _SPIRAL = spiral_offsets()
+
+
+# --- lane-grid cache -------------------------------------------------------
+# The 5 m cell grid + spiral neighbour cache depends ONLY on the (frozen) lane
+# polylines, but SimScene rebuilds it per scene per rollout -- the single biggest
+# reward cost. In the DDPO flow the base scene is fixed and only the adversary
+# latent changes, and group replication repeats each context group_size times, so
+# a batch of B scenes has only ~B/group_size distinct lane sets. This module-level
+# LRU (keyed on the lane bytes) collapses that redundancy within a rollout and
+# across iterations for recurring pool contexts. The cached dict is shared by
+# reference; every field it holds is read-only during a rollout (only compute_obs
+# / _agent_cell read them, never mutate), so sharing is safe. Not thread-safe;
+# fork-based workers get independent module globals, which is fine.
+_GRID_CACHE_MAXSIZE = 1024
+_grid_cache: "OrderedDict[tuple, dict]" = OrderedDict()
+
+
+def _grid_cache_get(key):
+    g = _grid_cache.get(key)
+    if g is not None:
+        _grid_cache.move_to_end(key)
+    return g
+
+
+def _grid_cache_put(key, g):
+    _grid_cache[key] = g
+    _grid_cache.move_to_end(key)
+    while len(_grid_cache) > _GRID_CACHE_MAXSIZE:
+        _grid_cache.popitem(last=False)
+
+
+def _compute_grid(lanes: np.ndarray) -> dict:
+    """Pure lane-grid build (segments + 5 m cell spiral cache). Returns a dict of
+    every field ``SimScene._apply_grid`` assigns; degenerate scenes get empty
+    segments / ``grid_ok=False`` (grid_cols/rows/min_* are then never read)."""
+    empty = dict(
+        seg_mid=np.zeros((0, 2), np.float32),
+        seg_half_len=np.zeros(0, np.float32),
+        seg_dir=np.zeros((0, 2), np.float32),
+        seg_start=np.zeros((0, 2), np.float32),
+        seg_end=np.zeros((0, 2), np.float32),
+        min_x=0.0, max_x=0.0, min_y=0.0, max_y=0.0,
+        grid_ok=False, grid_cols=0, grid_rows=0, cell_cache={},
+    )
+
+    mids, half_len, dirs = [], [], []
+    starts, ends = [], []
+    pts_all = []
+    for poly in lanes:
+        valid = np.isfinite(poly).all(axis=1)
+        p = poly[valid]
+        if p.shape[0] >= 2:
+            pts_all.append(p)
+            start, end = p[:-1], p[1:]
+            mid = (start + end) / 2.0
+            d = end - mid
+            h = np.hypot(d[:, 0], d[:, 1])
+            dn = np.where(h[:, None] > 0, d / np.maximum(h[:, None], 1e-12), d)
+            mids.append(mid)
+            half_len.append(h)
+            dirs.append(dn)
+            starts.append(start)
+            ends.append(end)
+    if not mids:
+        return empty
+
+    seg_mid = np.concatenate(mids).astype(np.float32)
+    seg_half_len = np.concatenate(half_len).astype(np.float32)
+    seg_dir = np.concatenate(dirs).astype(np.float32)
+    seg_start = np.concatenate(starts).astype(np.float32)
+    seg_end = np.concatenate(ends).astype(np.float32)
+
+    pts = np.concatenate(pts_all)
+    min_x, max_x = float(pts[:, 0].min()), float(pts[:, 0].max())
+    min_y, max_y = float(pts[:, 1].min()), float(pts[:, 1].max())
+    grid = dict(
+        seg_mid=seg_mid, seg_half_len=seg_half_len, seg_dir=seg_dir,
+        seg_start=seg_start, seg_end=seg_end,
+        min_x=min_x, max_x=max_x, min_y=min_y, max_y=max_y,
+        grid_ok=(min_x < max_x and min_y < max_y),
+        grid_cols=0, grid_rows=0, cell_cache={},
+    )
+    if not grid["grid_ok"]:
+        return grid
+
+    grid_cols = int(np.ceil((max_x - min_x) / GRID_CELL_SIZE)) + 1
+    grid_rows = int(np.ceil((max_y - min_y) / GRID_CELL_SIZE)) + 1
+
+    # per-cell segment lists in registration order (lane idx, then point idx)
+    gx = ((seg_mid[:, 0] - min_x) / GRID_CELL_SIZE).astype(np.int64)
+    gy = ((seg_mid[:, 1] - min_y) / GRID_CELL_SIZE).astype(np.int64)
+    in_bounds = (gx >= 0) & (gx < grid_cols) & (gy >= 0) & (gy < grid_rows)
+    cell_of_seg = gy * grid_cols + gx
+    cells: dict[int, list[int]] = {}
+    for seg_idx in np.nonzero(in_bounds)[0]:
+        cells.setdefault(int(cell_of_seg[seg_idx]), []).append(int(seg_idx))
+
+    # neighbor cache: for each cell, all segments of the 21x21 spiral neighborhood
+    cell_cache: dict[int, np.ndarray] = {}
+    for cy in range(grid_rows):
+        for cx in range(grid_cols):
+            acc: list[int] = []
+            for ox, oy in _SPIRAL:
+                nx_, ny_ = cx + int(ox), cy + int(oy)
+                if 0 <= nx_ < grid_cols and 0 <= ny_ < grid_rows:
+                    lst = cells.get(ny_ * grid_cols + nx_)
+                    if lst:
+                        acc.extend(lst)
+                        if len(acc) >= MAX_ROAD_OBJECTS:
+                            break
+            if acc:
+                cell_cache[cy * grid_cols + cx] = np.asarray(
+                    acc[:MAX_ROAD_OBJECTS], dtype=np.int64
+                )
+    grid["grid_cols"] = grid_cols
+    grid["grid_rows"] = grid_rows
+    grid["cell_cache"] = cell_cache
+    return grid
 
 
 class SimScene:
@@ -285,76 +404,31 @@ class SimScene:
 
     # ------------------------------------------------------------------ grid
     def _build_grid(self, lanes: np.ndarray) -> None:
-        """Register lane segments into 5 m cells and precompute the spiral cache."""
-        mids, half_len, dirs = [], [], []
-        starts, ends = [], []
-        pts_all = []
-        for poly in lanes:
-            valid = np.isfinite(poly).all(axis=1)
-            p = poly[valid]
-            if p.shape[0] >= 2:
-                pts_all.append(p)
-                start, end = p[:-1], p[1:]
-                mid = (start + end) / 2.0
-                d = end - mid
-                h = np.hypot(d[:, 0], d[:, 1])
-                dn = np.where(h[:, None] > 0, d / np.maximum(h[:, None], 1e-12), d)
-                mids.append(mid)
-                half_len.append(h)
-                dirs.append(dn)
-                starts.append(start)
-                ends.append(end)
-        if not mids:
-            self.seg_mid = np.zeros((0, 2), np.float32)
-            self.seg_half_len = np.zeros(0, np.float32)
-            self.seg_dir = np.zeros((0, 2), np.float32)
-            self.seg_start = np.zeros((0, 2), np.float32)
-            self.seg_end = np.zeros((0, 2), np.float32)
-            self._grid_ok = False
-            self._cell_cache: dict[int, np.ndarray] = {}
-            return
-        self.seg_mid = np.concatenate(mids).astype(np.float32)
-        self.seg_half_len = np.concatenate(half_len).astype(np.float32)
-        self.seg_dir = np.concatenate(dirs).astype(np.float32)
-        self.seg_start = np.concatenate(starts).astype(np.float32)
-        self.seg_end = np.concatenate(ends).astype(np.float32)
+        """Register lane segments into 5 m cells + precompute the spiral cache.
 
-        pts = np.concatenate(pts_all)
-        self.min_x, self.max_x = float(pts[:, 0].min()), float(pts[:, 0].max())
-        self.min_y, self.max_y = float(pts[:, 1].min()), float(pts[:, 1].max())
-        self._grid_ok = self.min_x < self.max_x and self.min_y < self.max_y
-        if not self._grid_ok:
-            self._cell_cache = {}
-            return
-        self.grid_cols = int(np.ceil((self.max_x - self.min_x) / GRID_CELL_SIZE)) + 1
-        self.grid_rows = int(np.ceil((self.max_y - self.min_y) / GRID_CELL_SIZE)) + 1
+        The grid depends only on ``lanes``, which are frozen in the DDPO flow, so
+        the heavy build is memoised on the lane bytes (see ``_grid_cache``). The
+        cached dict is shared by reference across scenes; ``_apply_grid`` only
+        reads its fields, never mutates them, so sharing is safe."""
+        key = (lanes.shape, lanes.tobytes())
+        g = _grid_cache_get(key)
+        if g is None:
+            g = _compute_grid(lanes)
+            _grid_cache_put(key, g)
+        self._apply_grid(g)
 
-        # per-cell segment lists in registration order (lane idx, then point idx)
-        gx = ((self.seg_mid[:, 0] - self.min_x) / GRID_CELL_SIZE).astype(np.int64)
-        gy = ((self.seg_mid[:, 1] - self.min_y) / GRID_CELL_SIZE).astype(np.int64)
-        in_bounds = (gx >= 0) & (gx < self.grid_cols) & (gy >= 0) & (gy < self.grid_rows)
-        cell_of_seg = gy * self.grid_cols + gx
-        cells: dict[int, list[int]] = {}
-        for seg_idx in np.nonzero(in_bounds)[0]:
-            cells.setdefault(int(cell_of_seg[seg_idx]), []).append(int(seg_idx))
-
-        # neighbor cache: for each cell, all segments of the 21x21 spiral neighborhood
-        self._cell_cache = {}
-        for cy in range(self.grid_rows):
-            for cx in range(self.grid_cols):
-                acc: list[int] = []
-                for ox, oy in _SPIRAL:
-                    nx_, ny_ = cx + int(ox), cy + int(oy)
-                    if 0 <= nx_ < self.grid_cols and 0 <= ny_ < self.grid_rows:
-                        lst = cells.get(ny_ * self.grid_cols + nx_)
-                        if lst:
-                            acc.extend(lst)
-                            if len(acc) >= MAX_ROAD_OBJECTS:
-                                break
-                if acc:
-                    self._cell_cache[cy * self.grid_cols + cx] = np.asarray(
-                        acc[:MAX_ROAD_OBJECTS], dtype=np.int64
-                    )
+    def _apply_grid(self, g: dict) -> None:
+        self.seg_mid = g["seg_mid"]
+        self.seg_half_len = g["seg_half_len"]
+        self.seg_dir = g["seg_dir"]
+        self.seg_start = g["seg_start"]
+        self.seg_end = g["seg_end"]
+        self.min_x, self.max_x = g["min_x"], g["max_x"]
+        self.min_y, self.max_y = g["min_y"], g["max_y"]
+        self._grid_ok = g["grid_ok"]
+        self.grid_cols = g["grid_cols"]
+        self.grid_rows = g["grid_rows"]
+        self._cell_cache = g["cell_cache"]
 
     def _agent_cell(self, i: int) -> int:
         if not self._grid_ok:

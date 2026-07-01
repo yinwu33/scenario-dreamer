@@ -1,10 +1,10 @@
 """ldm_adv latent-diffusion model as a DDPO policy (single-adversary, init_adv).
 
-The latent-space analogue of the map-conditioned dm flow: the base scene (one
-real ego + the real lanes) is held fixed as conditioning and the policy denoises
-ONLY the single adversary latent. A frozen goal autoencoder decodes the
-``ego + adv`` scene for the reward, which scores the ego against the (sole)
-generated adversary.
+The latent-space analogue of the map-conditioned dm flow: the base scene (real
+agents + real lanes) is held fixed as conditioning and the policy denoises ONLY
+the single adversary latent. A frozen goal autoencoder decodes the base agents
+plus the generated adversary for the reward, which identifies the sole generated
+adversary via ``gen_agent_mask`` / ``adv_local_idx``.
 
   * horizon  H = n_diffusion_timesteps (DDPM) or ddim_steps (DDIM)
   * state    s_t = (noisy adv latent x_adv_t, fixed ego/lane latents, graph)
@@ -62,13 +62,11 @@ class LDMAdvDDPOPolicy:
         sampler: str = "ddpm",
         ddim_steps: int | None = None,
         ddim_eta: float = 1.0,
-        force_adv_vehicle: bool = True,
     ):
         self.cfg = ldm_cfg
         self.cfg_model = ldm_cfg.model
         self.cfg_dataset = ldm_cfg.dataset
         self.device = device
-        self.force_adv_vehicle = bool(force_adv_vehicle)
         self.sampler = str(sampler).lower()
         if self.sampler not in ("ddpm", "ddim"):
             raise ValueError(f"sampler must be one of ('ddpm', 'ddim'), got {sampler!r}")
@@ -329,12 +327,17 @@ class LDMAdvDDPOPolicy:
 
     @torch.no_grad()
     def conditioning_scenes(self, conditioning: Batch) -> GeneratedScenes:
-        """Decode the real (ground-truth) ego + adv latents for reference viz."""
+        """Decode the base conditioning scene without appending an adversary.
+
+        In the DDPO insertion setup, ``data["agent"]`` already contains the original
+        dataset agents as normal traffic. The policy appends one extra adversary only
+        in ``sample`` / ``_decode``; this path intentionally skips that append so the
+        validation visual can show the no-adv baseline with no green generated row.
+        """
         data = conditioning.to(self.device)
         x_agent = self._agent_latents(data)
         x_lane = self._lane_latents(data)
-        x_adv = data["adv"].latents.float().to(self.device).unsqueeze(1)
-        return self._decode(x_agent, x_lane, x_adv, data)
+        return self._decode_base(x_agent, x_lane, data)
 
     # ----------------------------------------------------------- scoring
     def trajectory_logprob(
@@ -381,11 +384,57 @@ class LDMAdvDDPOPolicy:
 
     # ----------------------------------------------------------- decode
     @torch.no_grad()
+    def _decode_base(self, x_agent, x_lane, data) -> GeneratedScenes:
+        """Decode only the base normal-agent set from the conditioning graph."""
+        agent_latents, lane_latents = unnormalize_latents(
+            x_agent[:, 0],
+            x_lane[:, 0],
+            self.agent_latents_mean,
+            self.agent_latents_std,
+            self.lane_latents_mean,
+            self.lane_latents_std,
+        )
+        agent_states, lane_states, agent_types, _, _ = self.ae.forward_decoder(
+            agent_latents, lane_latents, data
+        )
+        agent_states, _ = unnormalize_scene(
+            agent_states.clone(),
+            lane_states.clone(),
+            fov=self.cfg_dataset.fov,
+            min_speed=self.cfg_dataset.min_speed,
+            max_speed=self.cfg_dataset.max_speed,
+            min_length=self.cfg_dataset.min_length,
+            max_length=self.cfg_dataset.max_length,
+            min_width=self.cfg_dataset.min_width,
+            max_width=self.cfg_dataset.max_width,
+            min_lane_x=self.cfg_dataset.min_lane_x,
+            max_lane_x=self.cfg_dataset.max_lane_x,
+            min_lane_y=self.cfg_dataset.min_lane_y,
+            max_lane_y=self.cfg_dataset.max_lane_y,
+        )
+        agent_types = agent_types.clone()
+
+        meta = {"lane_scene_idx": data["lane"].batch}
+        lane_edge_store = data["lane", "to", "lane"]
+        if "edge_index" in lane_edge_store:
+            meta["lane_edge_index"] = lane_edge_store.edge_index
+        if "type" in lane_edge_store:
+            meta["lane_edge_type"] = lane_edge_store.type
+        return GeneratedScenes(
+            agent_states=agent_states,
+            agent_types=agent_types,
+            agent_scene_idx=data["agent"].batch,
+            lane_polylines=data["lane"].road_points,
+            num_scenes=int(data.batch_size),
+            meta=meta,
+        )
+
+    @torch.no_grad()
     def _decode(self, x_agent, x_lane, x_adv, data) -> GeneratedScenes:
-        """Decode the ``ego + adv`` scene: re-insert the adv into the base agent
-        set, decode the full set in one pass (permutation-equivariant set decoder),
-        then expose every scene as ``[ego, adv]`` with ``gen_agent_mask`` on the
-        adv. Mirrors ``ScenarioDreamerLDMAdv._decode_scene_and_adv``."""
+        """Decode the base agents plus generated adv: append the adv to the base
+        agent set, decode the full set in one pass (permutation-equivariant set
+        decoder), then mark the appended rows with ``gen_agent_mask``. Mirrors
+        ``ScenarioDreamerLDMAdv._decode_scene_and_adv``."""
         agent_latents, lane_latents = unnormalize_latents(
             x_agent[:, 0],
             x_lane[:, 0],
@@ -441,12 +490,17 @@ class LDMAdvDDPOPolicy:
             combined_latents.shape[0], dtype=torch.bool, device=self.device
         )
         gen_agent_mask[num_base:] = True  # the appended adv rows
-        if self.force_adv_vehicle:
-            agent_states, agent_types = self._project_adv_vehicle(
-                agent_states, agent_types, combined_batch, num_scenes, gen_agent_mask
-            )
 
         meta = {"lane_scene_idx": lane_batch, "gen_agent_mask": gen_agent_mask}
+        # Carry the adv conditioning target ([type, motion, goal_dist, ego_dist]
+        # bucket ids, one row per scene) through to the reward so it can check the
+        # realized adversary against its requested condition (RewardHookGenAgentInvalid).
+        if "cond" in data["adv"]:
+            adv_cond = torch.full(
+                (num_scenes, data["adv"].cond.shape[1]), -1, dtype=torch.long
+            )
+            adv_cond[adv_batch.cpu()] = data["adv"].cond.cpu()
+            meta["adv_cond"] = adv_cond
         lane_edge_store = data["lane", "to", "lane"]
         if "edge_index" in lane_edge_store:
             meta["lane_edge_index"] = lane_edge_store.edge_index
@@ -462,17 +516,3 @@ class LDMAdvDDPOPolicy:
             adv_local_idx=adv_local_idx,
             meta=meta,
         )
-
-    def _project_adv_vehicle(
-        self, agent_states, agent_types, agent_batch, num_scenes, gen_agent_mask
-    ):
-        """Force the adversary to be an ego-sized vehicle (type + length/width),
-        matching the dm flow's vehicle projection of generated agents."""
-        if not gen_agent_mask.any():
-            return agent_states, agent_types
-        counts = torch.bincount(agent_batch, minlength=num_scenes)
-        ego_idx = torch.cumsum(counts, 0) - counts  # first (ego) row per scene
-        ego_size = agent_states[ego_idx, 5:7]
-        agent_states[gen_agent_mask, 5:7] = ego_size[agent_batch[gen_agent_mask]]
-        agent_types[gen_agent_mask] = 0  # vehicle type id
-        return agent_states, agent_types

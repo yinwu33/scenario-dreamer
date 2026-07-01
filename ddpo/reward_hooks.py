@@ -8,7 +8,7 @@ from typing import Any
 import numpy as np
 import torch
 
-from .geometry import _corners, _obb_overlap_frac, _sat_overlap
+from .geometry import _corners, _obb_overlap_frac, sat_first_contact_time
 from .interfaces import GeneratedScenes
 from .pufferdrive_sim import (
     COLLISION_DIST2_GATE,
@@ -19,6 +19,28 @@ from .pufferdrive_sim import (
 )
 
 TTC_SWEEP_HORIZON = 10.0
+
+
+@dataclass
+class GenInvalidCheck:
+    """Config for ``RewardHookGenAgentInvalid``.
+
+    Bucket thresholds mirror the dataset's adv-conditioning discretization
+    (``WaymoDatasetLDMAdv._adv_condition`` / ``cfgs/ldm_adv/dataset.yaml``); they
+    MUST match or valid samples get wrongly rejected. Each ``check_*`` toggles
+    one field of the ``[type, motion, goal_dist, ego_dist]`` condition; disable a
+    field the model cannot reliably control (or that the target does not pin).
+    """
+
+    goaldist_near: float
+    goaldist_far: float
+    egodist_near: float
+    egodist_far: float
+    min_distance_to_goal: float = MIN_DISTANCE_TO_GOAL
+    check_type: bool = True
+    check_motion: bool = True
+    check_goal_dist: bool = True
+    check_ego_dist: bool = True
 
 
 @dataclass
@@ -268,14 +290,15 @@ class RewardHookEgoMinTTC(RewardHook):
             sim.length[others],
             sim.width[others],
         )
-        rv = np.stack([rvx, rvy], axis=1).astype(np.float64)
-        steps = int(np.ceil(TTC_SWEEP_HORIZON / max(sim.dt, 1e-3)))
-        for step in range(0, steps + 1):
-            t = step * sim.dt
-            moved = base_boxes + (rv * t)[:, None, :]
-            if _sat_overlap(ego_box, moved).any():
-                return float(t)
-        return float(np.inf)
+        # Closed-form first-contact time over the same dt grid, replacing the
+        # per-step SAT sweep (bit-exact; see geometry.sat_first_contact_time). The
+        # sweep returned the first grid step where ANY box overlapped == the min
+        # over boxes of their individual first-contact times.
+        rv = np.stack([rvx, rvy], axis=1)
+        contact = sat_first_contact_time(
+            ego_box, base_boxes, rv, sim.dt, TTC_SWEEP_HORIZON
+        )
+        return float(contact.min())
 
     def before_step_scene(
         self, ctx: RolloutContext, scene_idx: int, sim: SimScene
@@ -574,3 +597,121 @@ class RewardHookGenAgentParking(RewardHook):
             ))
             is_parked[s] = 1.0 if gen_dist < MIN_DISTANCE_TO_GOAL else 0.0
         ctx.metrics["gen_agent_is_parked"] = is_parked
+
+
+class RewardHookGenAgentInvalid(RewardHook):
+    """Penalty feature: whether the generated adversary violates its condition.
+
+    The adversary is generated from a discretized ``[type, motion, goal_dist,
+    ego_dist]`` condition (see ``WaymoDatasetLDMAdv._adv_condition``). Conditional
+    generation is imperfect, so the realized adversary sometimes lands in a
+    different bucket than requested. This recomputes the realized labels from the
+    decoded scene (physical metres, same thresholds as the dataset) and flags a
+    mismatch on any *enabled* field, writing the per-scene 0/1 metric
+    ``gen_agent_is_invalid`` (a hard reward = -1, like the parked-adv gate it
+    generalises: when ``check_motion`` is on and the target is motion=moving, a
+    parked adversary is one such violation).
+
+    The condition target is carried in ``ctx.scenes.meta['adv_cond']`` (a
+    ``[num_scenes, 4]`` long array set by the policy decode); scenes with no
+    adversary carry ``-1`` and are skipped. When the target is absent the metric
+    is all-zeros (no-op, e.g. non-conditional flows).
+    """
+
+    def __init__(
+        self,
+        *,
+        goaldist_near: float,
+        goaldist_far: float,
+        egodist_near: float,
+        egodist_far: float,
+        min_distance_to_goal: float = MIN_DISTANCE_TO_GOAL,
+        check_type: bool = True,
+        check_motion: bool = True,
+        check_goal_dist: bool = True,
+        check_ego_dist: bool = True,
+    ):
+        self.goaldist_near = float(goaldist_near)
+        self.goaldist_far = float(goaldist_far)
+        self.egodist_near = float(egodist_near)
+        self.egodist_far = float(egodist_far)
+        self.min_distance_to_goal = float(min_distance_to_goal)
+        self.check_type = bool(check_type)
+        self.check_motion = bool(check_motion)
+        self.check_goal_dist = bool(check_goal_dist)
+        self.check_ego_dist = bool(check_ego_dist)
+
+    @classmethod
+    def from_check(cls, check: GenInvalidCheck) -> "RewardHookGenAgentInvalid":
+        """Build from the typed ``GenInvalidCheck`` carried on ``RolloutParams``."""
+        from dataclasses import asdict
+
+        return cls(**asdict(check))
+
+    @staticmethod
+    def _bucket(dist: float, near: float, far: float) -> int:
+        """Discretize a physical distance into near(0)/middle(1)/far(2). Matches
+        ``WaymoDatasetLDMAdv._bucket``."""
+        if dist < near:
+            return 0
+        if dist < far:
+            return 1
+        return 2
+
+    def before_rollout(self, ctx: RolloutContext) -> None:
+        n = ctx.num_scenes
+        is_invalid = np.zeros(n, dtype=np.float32)
+        reasons = np.full(n, "", dtype=object)
+        cond = ctx.scenes.meta.get("adv_cond")
+        if cond is None:
+            ctx.metrics["gen_agent_is_invalid"] = is_invalid
+            ctx.metrics["gen_agent_invalid_reason"] = reasons
+            return
+        if isinstance(cond, torch.Tensor):
+            cond = cond.detach().cpu().numpy()
+        cond = np.asarray(cond)
+        adv = adv_local_indices(ctx.scenes, ctx.num_scenes)
+        for s, sim in enumerate(ctx.sims):
+            a = adv[s]
+            if a < 0 or int(cond[s, 0]) < 0:
+                continue
+            tgt = cond[s]  # [type, motion, goal_dist, ego_dist] target bucket ids
+            goal_dist = float(np.hypot(
+                sim.goal[a, 0] - sim.spawn[a, 0],
+                sim.goal[a, 1] - sim.spawn[a, 1],
+            ))
+            ego_dist = float(np.hypot(
+                sim.spawn[a, 0] - sim.spawn[0, 0],
+                sim.spawn[a, 1] - sim.spawn[0, 1],
+            ))
+            bad = False
+            reason = []
+            if self.check_type:
+                # sim type ids are 1/2/3 (veh/ped/cyc); condition ids are 0/1/2.
+                realized_type = int(sim.ptype[a]) - 1
+                is_wrong_type = realized_type != int(tgt[0])
+                bad |= is_wrong_type
+                if is_wrong_type:
+                    reason.append(f"type:{realized_type}!={int(tgt[0])}")
+            if self.check_motion:
+                realized_motion = 0 if goal_dist < self.min_distance_to_goal else 1
+                is_wrong_motion = realized_motion != int(tgt[1])
+                bad |= is_wrong_motion
+                if is_wrong_motion:
+                    reason.append(f"motion:{realized_motion}!={int(tgt[1])}")
+            if self.check_goal_dist:
+                realized_gd = self._bucket(goal_dist, self.goaldist_near, self.goaldist_far)
+                is_wrong_goal_dist = realized_gd != int(tgt[2])
+                bad |= is_wrong_goal_dist
+                if is_wrong_goal_dist:
+                    reason.append(f"goal_dist:{realized_gd}!={int(tgt[2])}")
+            if self.check_ego_dist:
+                realized_ed = self._bucket(ego_dist, self.egodist_near, self.egodist_far)
+                is_wrong_ego_dist = realized_ed != int(tgt[3])
+                bad |= is_wrong_ego_dist
+                if is_wrong_ego_dist:
+                    reason.append(f"ego_dist:{realized_ed}!={int(tgt[3])}")
+            is_invalid[s] = 1.0 if bad else 0.0
+            reasons[s] = " ".join(reason)
+        ctx.metrics["gen_agent_is_invalid"] = is_invalid
+        ctx.metrics["gen_agent_invalid_reason"] = reasons  # for logging / eval, not the reward

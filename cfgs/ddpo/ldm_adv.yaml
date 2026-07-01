@@ -5,8 +5,8 @@
 # denoised and trained), and a frozen goal AutoEncoder decodes the ego+adv scene.
 #
 # Mirrors the map-conditioned dm flow (config_critical_scene_map_conditioned_dm_goal):
-#   * the conditioning pool prunes the base scene to the ego (LDMAdvConditioningPool),
-#     so the criticality reward's ego-vs-all TTC/collision measures the adversary;
+#   * the conditioning pool can keep the full real scene and insert one generated
+#     adversary as an extra agent (LDMAdvConditioningPool);
 #   * the SAME Phase-2 reward + GRPO settings are used verbatim (see below);
 #   * instead of the dm flow's ego-goal override we filter out near-stationary egos
 #     (min_ego_drive), keeping each ego's real on-road goal.
@@ -25,9 +25,10 @@ min_ego_drive: 10.0          # metres (map is 64x64 / fov=64)
 # loses the full scene). GRPO per-context whitening baselines out the constant
 # normal-scene contribution, so the default keeps credit attributable to the adv.
 prune_base_to_ego: false
-# Force the decoded adversary to an ego-sized vehicle (type + length/width), the
-# latent-space analogue of the dm flow's vehicle projection of generated agents.
-force_adv_vehicle: true
+# DDPO insertion mode: keep the selected real adversary in the normal-agent
+# context and append the generated adversary as an extra agent during decode.
+# Base ldm_adv training still uses the replacement/missing-agent dataset path.
+insert_adv_as_extra: true
 
 # Adversary conditioning target (requires a base ldm_adv ckpt trained with
 # model.use_adv_conditioning=true). The adversary is generated from noise, so the
@@ -52,10 +53,33 @@ force_adv_vehicle: true
 # distribution are out-of-distribution for the frozen conditional prior.
 adv_cond_target:
   enabled: true
-  type: vehicle            # fixed (force_adv_vehicle also pins vehicle geometry)
-  motion: moving           # fixed (reward penalises a parked adversary)
-  goal_dist: [middle, far] # sample per scene from {middle, far}
-  ego_dist: null           # sample per scene over {near, middle, far}
+  type: vehicle            # fixed  [vehicle, pedestrian, cyclist]
+  motion: moving           # fixed (a parked adversary violates the condition), [moving, parked]
+  goal_dist: null # sample per scene from {middle, far}, [near, middle, far]
+  ego_dist: null           # sample per scene over {near, middle, far}, [near, middle, far]
+
+# Condition-violation gate (RewardHookGenAgentInvalid): reject a conditionally-
+# generated adversary with a HARD reward = -1 if its realized labels fall in a
+# different bucket than the requested adv_cond_target on ANY enabled field. This
+# generalises the parked-adv penalty: with check_motion + motion=moving, a parked
+# adversary is one such violation. Bucket thresholds are taken from the ldm_adv
+# dataset config (cfgs/ldm_adv/dataset.yaml) so they match training's discretization.
+# Disable a field the model cannot reliably control or that the target leaves
+# unconstrained. enabled=false falls back to the plain parked-adv gate.
+#   check_type      -> realized agent type == target type (veh/ped/cyc)
+#   check_motion    -> parked vs moving (||goal - spawn|| vs MIN_DISTANCE_TO_GOAL)
+#   check_goal_dist -> near/middle/far bucket of ||goal - spawn||
+#   check_ego_dist  -> near/middle/far bucket of ||adv spawn - ego spawn||
+# NOTE: keep adv_cond_target internally consistent -- an impossible combo (e.g.
+# motion=parked + goal_dist=far) makes every sample invalid (constant -1, no
+# GRPO gradient). WARNING: with type not pinned to vehicle geometry anymore, a
+# checked field the frozen prior samples off-distribution can drive high reject.
+gen_agent_invalid:
+  enabled: true
+  check_type: true
+  check_motion: true
+  check_goal_dist: true
+  check_ego_dist: true
 
 # --- artifacts -------------------------------------------------------------
 ldm_adv_ckpt: ${scratch_root}/checkpoints/scenario_dreamer_ldm_adv_train/last.ckpt
@@ -113,7 +137,7 @@ min_dist_dmax: 10.0
 
 # --- DDPO ------------------------------------------------------------------
 sampler: ddpm                 # ddim variant overrides this in its entrypoint
-ddim_steps: 50
+ddim_steps: 30
 ddim_eta: 1.0
 batch_size: 64
 # Per-context (GRPO) grouping: batch_size/group_size distinct contexts, each
@@ -128,7 +152,7 @@ logprob_bf16: false
 lr: 1e-5
 weight_decay: 1e-4
 grad_clip: 1.0
-save_every: 100
+save_every: 500
 # Resume this run from <output_dir>/last.ckpt when present: restores net weights,
 # the AdamW state, the global RNG, the iteration counter and the wandb run id. The
 # KL reference always stays anchored to ldm_adv_ckpt (the base manifold), never the
@@ -153,10 +177,11 @@ wandb:
   project: ${experiment.project}
   entity: null
   run_name: ${experiment.run_name}
-eval_every: 50
+eval_every: 100
 eval_num_scenes: 8
-eval_visualize_reference: true
-eval_visualize_conditioning: true
+eval_visualize_before_rl: true
+eval_visualize_no_adv: true
+eval_static_baselines_once: true
 # Also run the val eval/viz on a fixed subset of the train scenes (the training
 # pool's first eval_num_scenes slots), logged under train_viz/*. Lets the rising
 # train reward be checked visually against the held-out val/* rollouts.
@@ -164,7 +189,7 @@ eval_visualize_train: true
 # Diagnostic for GRPO signal quality: every N iterations, take the current train
 # batch, find the groups with the largest within-group reward spread, and log a
 # table plus top/bottom rollout media. This does not change the reward or update.
-train_group_viz_every: 50
+train_group_viz_every: 100
 train_group_viz_num_groups: 2
 train_group_viz_extremes: 1
 save_gif: true

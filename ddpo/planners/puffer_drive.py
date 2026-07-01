@@ -51,6 +51,7 @@ class PufferDrivePlanner(RolloutPlanner):
             sim_cfg=self.sim_cfg,
             goal_offlane_threshold=self.params.goal_offlane_threshold,
             goal_onroad_threshold=self.params.goal_onroad_threshold,
+            gen_invalid=self.params.gen_invalid,
         )
         trajectories = metrics.pop("trajectories", None)
         return RolloutResult(metrics=metrics, trajectories=trajectories)
