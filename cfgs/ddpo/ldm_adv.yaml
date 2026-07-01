@@ -55,7 +55,7 @@ adv_cond_target:
   enabled: true
   type: vehicle            # fixed  [vehicle, pedestrian, cyclist]
   motion: moving           # fixed (a parked adversary violates the condition), [moving, parked]
-  goal_dist: null # sample per scene from {middle, far}, [near, middle, far]
+  goal_dist: [middle, far] # sample per scene from {middle, far}, [near, middle, far]
   ego_dist: null           # sample per scene over {near, middle, far}, [near, middle, far]
 
 # Condition-violation gate (RewardHookGenAgentInvalid): reject a conditionally-
