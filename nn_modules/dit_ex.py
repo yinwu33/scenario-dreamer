@@ -178,16 +178,28 @@ class DiT(nn.Module):
                 parameter.requires_grad_(True)
 
 
-    def _cond_drop_mask(self, num_tokens, store, device):
-        """Per-token (per-agent / per-adv) dropout mask, shared across all of a
-        token's labels so each token is conditioned all-or-nothing (never on a
-        partial label subset). Random while training; otherwise an explicit
-        ``cond_drop`` mask if the caller provides one (inference: drop the agents
-        whose conditions are irrelevant); else ``None`` (use the labels as given)."""
+    def _cond_drop_mask(self, num_tokens, store, device, num_fields=1):
+        """Conditioning dropout mask for a token stream.
+
+        ``num_fields == 1`` (default, normal-agent stream): a single ``[num_tokens]``
+        mask shared across all of a token's labels, so each token is conditioned
+        all-or-nothing (never on a partial label subset).
+
+        ``num_fields > 1`` (adv stream): an independent ``[num_tokens, num_fields]``
+        mask, so each field is dropped iid -- the model then sees partial-null
+        combinations (e.g. type/motion pinned while goal_dist/ego_dist are null),
+        which makes the DDPO per-field null-token target in-distribution.
+
+        Random while training; otherwise an explicit ``cond_drop`` mask if the
+        caller provides one (inference: drop the agents whose conditions are
+        irrelevant; broadcast across fields); else ``None`` (use the labels as
+        given)."""
         if self.training and self.cond_dropout_prob > 0:
-            return (torch.rand(num_tokens, device=device) < self.cond_dropout_prob).long()
+            shape = (num_tokens,) if num_fields == 1 else (num_tokens, num_fields)
+            return (torch.rand(*shape, device=device) < self.cond_dropout_prob).long()
         if "cond_drop" in store:
-            return store.cond_drop.long().to(device)
+            m = store.cond_drop.long().to(device)
+            return m if num_fields == 1 else m.unsqueeze(1).expand(-1, num_fields)
         return None
 
     def forward(self,
@@ -258,16 +270,19 @@ class DiT(nn.Module):
             n_adv = num_context_emb_per_adv.shape[0]
             if "cond" in data["adv"]:
                 adv_cond = data["adv"].cond.long()
-                drop = self._cond_drop_mask(n_adv, data["adv"], device)
+                # Independent per-field dropout (adv stream only): each of the four
+                # labels is dropped iid, so partial-null combinations are trained.
+                drop = self._cond_drop_mask(n_adv, data["adv"], device, num_fields=4)
             else:
                 adv_cond = torch.zeros((n_adv, 4), dtype=torch.long, device=device)
-                drop = torch.ones(n_adv, dtype=torch.long, device=device)
+                drop = torch.ones((n_adv, 4), dtype=torch.long, device=device)
+            drop_col = (lambda _k: None) if drop is None else (lambda k: drop[:, k])
             num_context_emb_per_adv = (
                 num_context_emb_per_adv
-                + self.adv_type_embedder(adv_cond[:, 0], train=self.training, force_drop_ids=drop)
-                + self.adv_motion_embedder(adv_cond[:, 1], train=self.training, force_drop_ids=drop)
-                + self.adv_goaldist_embedder(adv_cond[:, 2], train=self.training, force_drop_ids=drop)
-                + self.adv_egodist_embedder(adv_cond[:, 3], train=self.training, force_drop_ids=drop)
+                + self.adv_type_embedder(adv_cond[:, 0], train=self.training, force_drop_ids=drop_col(0))
+                + self.adv_motion_embedder(adv_cond[:, 1], train=self.training, force_drop_ids=drop_col(1))
+                + self.adv_goaldist_embedder(adv_cond[:, 2], train=self.training, force_drop_ids=drop_col(2))
+                + self.adv_egodist_embedder(adv_cond[:, 3], train=self.training, force_drop_ids=drop_col(3))
             )
 
         # embedding of timestep

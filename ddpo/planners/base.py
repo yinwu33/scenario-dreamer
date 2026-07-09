@@ -36,41 +36,51 @@ from ..reward_hooks import (
     RewardHookEgoAdvMinDist,
     RewardHookEgoCollision,
     RewardHookEgoMinTTC,
+    RewardHookEgoOffroadProxy,
     RewardHookGoalOfflane,
     RewardHookInitOverlap,
     RewardHookParkingMismatch,
     RewardHookReachedGoal,
     RolloutContext,
     RewardHookTrajectory,
+    adv_local_indices,
 )
 from .type_utils import to_puffer_agent_types
 
 
 @dataclass
-class RolloutParams:
-    """Rollout / metric parameters shared by every planner.
+class SimulatorConfig:
+    """Rollout / metric-measurement parameters shared by every planner.
 
-    These are the non-reward-scalar knobs a planner needs to reproduce the
-    metric set the reward consumes. Reward weights (ttc_tau, penalties, ...)
-    stay in ``ddpo.reward`` and never reach the planner.
+    These are the knobs the rollout needs while stepping to produce the metric
+    set the reward consumes (``cfgs/ddpo/<flow>.yaml`` ``simulator:`` section).
+    Reward weights (ttc_tau, penalties, ...) stay in ``ddpo.reward`` and never
+    reach the planner. All fields are required so a missing config key fails
+    loudly at construction.
     """
 
-    sim_steps: int = 91
-    seed: int = 0
-    init_overlap_margin: float = 0.0
-    goal_offlane_threshold: float = 3.0
-    goal_onroad_threshold: float = 2.0
-    pufferdrive_root: str | None = None
-    # Reward-shaping rollout knobs (Phase 2): collision scoring is off by default
-    # (kept disabled until the time-gated reward terms are tuned); the approach
-    # bonus ignores the first ``approach_warmup_time`` seconds when measuring how
-    # much the adversary closed in on the ego.
-    collision_enabled: bool = False
-    approach_warmup_time: float = 0.5
+    sim_steps: int
+    seed: int
+    # Box-inflation margin (metres) for the adversary spawn-overlap check; 0
+    # rejects only true interpenetration and allows bumper-to-bumper spawns.
+    init_overlap_margin: float
+    # Lane-centerline distances (m) above which the adversary's goal / spawn is
+    # flagged off-lane by the diagnostic ``goal_offlane_frac`` metric.
+    goal_offlane_threshold: float
+    goal_onroad_threshold: float
+    # The approach bonus ignores the first ``approach_warmup_time`` seconds when
+    # measuring how much the adversary closed in on the ego.
+    approach_warmup_time: float
     # When set, the conditionally-generated adversary is rejected (hard -1) if its
     # realized labels violate the requested condition; see RewardHookGenAgentInvalid.
     # None keeps the plain parked-adv gate (RewardHookGenAgentParking) only.
+    # Injected by the caller (thresholds come from the dataset config), not yaml.
     gen_invalid: GenInvalidCheck | None = None
+    # Ego off-road proxy: the ego counts as off-road on a step when its centre is
+    # farther than this from every lane centerline (the maps carry no ROAD_EDGE,
+    # so the real off-road check never fires). Diagnostic only; has a default so
+    # existing SimulatorConfig call sites keep working.
+    ego_offroad_threshold: float = 2.75
 
 
 @dataclass
@@ -99,7 +109,7 @@ class NumpyPlanner(RolloutPlanner):
     step of motion to the controlled agents of the active scenes.
     """
 
-    def __init__(self, planner_cfg, params: RolloutParams, *, device: str | None = None):
+    def __init__(self, planner_cfg, params: SimulatorConfig, *, device: str | None = None):
         self.params = params
         self.sim_cfg = load_sim_config(planner_cfg.get("sim", None))
         self.rng = np.random.default_rng(int(params.seed))
@@ -129,6 +139,17 @@ class NumpyPlanner(RolloutPlanner):
                     sim_cfg=self.sim_cfg,
                 )
             )
+        # Per-agent conditioning override: give THE generated adversary its own
+        # collision_factor (0 = reckless, 2 = maximally defensive; see
+        # SimConfig.adv_collision_factor). Policy-conditioning planners read the
+        # factor from each agent's own observation slot, so only the adversary's
+        # driving style changes; rule-based planners ignore it.
+        if self.sim_cfg.adv_collision_factor is not None:
+            adv = adv_local_indices(scenes, scenes.num_scenes)
+            factor = np.float32(self.sim_cfg.adv_collision_factor)
+            for s, sim in enumerate(sims):
+                if adv[s] >= 0:
+                    sim.collision_factor[adv[s]] = factor
         return sims
 
     def _make_hooks(self) -> list:
@@ -138,6 +159,7 @@ class NumpyPlanner(RolloutPlanner):
             RewardHookInitOverlap(p.init_overlap_margin),
             RewardHookEgoCollision(),
             RewardHookEgoMinTTC(),
+            RewardHookEgoOffroadProxy(p.ego_offroad_threshold),
             RewardHookEgoAdvMinDist(p.approach_warmup_time),
             RewardHookTrajectory(),
             RewardHookReachedGoal(self.sim_cfg.goal_radius),
@@ -234,7 +256,7 @@ def register_planner(name: str):
     return deco
 
 
-def build_planner(planner_cfg, params: RolloutParams, *, device: str | None = None) -> RolloutPlanner:
+def build_planner(planner_cfg, params: SimulatorConfig, *, device: str | None = None) -> RolloutPlanner:
     """Instantiate the planner named by ``planner_cfg['name']``.
 
     ``planner_cfg`` is any mapping with a ``name`` key (an OmegaConf node from

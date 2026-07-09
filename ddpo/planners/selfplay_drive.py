@@ -11,12 +11,12 @@ import numpy as np
 import torch
 
 from ..pufferdrive_sim import SimScene
-from .base import NumpyPlanner, RolloutParams, register_planner
+from .base import NumpyPlanner, SimulatorConfig, register_planner
 
 
 @register_planner("selfplay_drive")
 class SelfplayDrivePlanner(NumpyPlanner):
-    def __init__(self, planner_cfg, params: RolloutParams, *, device: str | None = None):
+    def __init__(self, planner_cfg, params: SimulatorConfig, *, device: str | None = None):
         super().__init__(planner_cfg, params, device=device)
         from planner.selfplay_drive.planner import load_planner, load_planner_config
 

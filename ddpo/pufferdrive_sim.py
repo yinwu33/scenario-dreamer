@@ -93,6 +93,15 @@ class SimConfig:
     collision_factor_range: tuple[float, float]
     offroad_factor_range: tuple[float, float]
     lane_width_range: tuple[float, float]
+    # Per-agent conditioning override for THE generated adversary (numpy
+    # planners only): the frozen policy was trained with its collision penalty
+    # scaled by the per-agent collision_factor obs (pacific drive.h:
+    # collision_reward = -collision_factor), so 0 drives recklessly and 2
+    # maximally defensively. None keeps the shared factor. Overriding only the
+    # adversary's slot removes its willingness to yield while the ego keeps the
+    # nominal factor -- two mutually avoidant agents almost never collide, no
+    # matter the initial conditions.
+    adv_collision_factor: float | None = None
 
 
 def _float_pair(value, name: str) -> tuple[float, float]:
@@ -116,6 +125,11 @@ def _build_sim_config(raw) -> SimConfig:
         collision_factor_range=_float_pair(raw.get("collision_factor_range", (0.0, 2.0)), "collision_factor_range"),
         offroad_factor_range=_float_pair(raw.get("offroad_factor_range", (0.0, 2.0)), "offroad_factor_range"),
         lane_width_range=_float_pair(raw.get("lane_width_range", (1.0, 5.0)), "lane_width_range"),
+        adv_collision_factor=(
+            None
+            if raw.get("adv_collision_factor", None) is None
+            else float(raw["adv_collision_factor"])
+        ),
     )
 
 

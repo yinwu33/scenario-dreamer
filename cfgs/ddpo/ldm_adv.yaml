@@ -38,7 +38,11 @@ insert_adv_as_extra: true
 # Each field can be:
 #   * a single value  -> fixed for every scene            (e.g. motion: moving)
 #   * a list          -> sampled uniformly per scene      (e.g. goal_dist: [middle, far])
-#   * null / omitted  -> sampled over ALL buckets         (e.g. ego_dist: null)
+#   * null / omitted  -> the model's NULL TOKEN: generated unconditionally and
+#                        skipped by the invalid-check below (e.g. ego_dist: null).
+#                        (Requires a base ckpt fine-tuned with independent per-field
+#                        adv dropout so partial-null is in-distribution; the older
+#                        all-or-nothing base only saw all-4-null together.)
 # Values accept int bucket ids OR names:
 #   type:      vehicle(0) / pedestrian(1) / cyclist(2)
 #   motion:    parked(0)  / moving(1)
@@ -56,11 +60,12 @@ adv_cond_target:
   type: vehicle            # fixed  [vehicle, pedestrian, cyclist]
   motion: moving           # fixed (a parked adversary violates the condition), [moving, parked]
   goal_dist: [middle, far] # sample per scene from {middle, far}, [near, middle, far]
-  ego_dist: null           # sample per scene over {near, middle, far}, [near, middle, far]
+  ego_dist: null           # null token: unconditional + not checked (use [near, middle, far] to randomize instead)
 
 # Condition-violation gate (RewardHookGenAgentInvalid): reject a conditionally-
-# generated adversary with a HARD reward = -1 if its realized labels fall in a
-# different bucket than the requested adv_cond_target on ANY enabled field. This
+# generated adversary if its realized labels fall in a different bucket than the
+# requested adv_cond_target on ANY enabled field (penalty graded by the metric
+# distance past the bucket boundary -- see reward.invalid_grade_scale). This
 # generalises the parked-adv penalty: with check_motion + motion=moving, a parked
 # adversary is one such violation. Bucket thresholds are taken from the ldm_adv
 # dataset config (cfgs/ldm_adv/dataset.yaml) so they match training's discretization.
@@ -91,55 +96,85 @@ train_split: train
 eval_split: val
 pool_size: 40000
 
-# --- rollout / reward (copied verbatim from dm_fixed_map_agent_goal) --------
-reward_backend: numpy
-pufferdrive_root: ${project_root}/PufferDrive
-sim_steps: 91
-planner_deterministic: true
-ttc_tau: 3.0
-init_overlap_margin: 0.0
-# Soft init-overlap (replaces the old hard init_invalid -1 floor): the adversary's
-# spawn box-IoU with its neighbours adds a graded penalty AND gates out criticality
-# (overlap_gate = smoothstep(IoU, lo, hi)), so an interpenetrating init can never
-# farm a fake near-miss while the policy still gets a "separate the boxes" gradient.
-init_overlap_penalty: 0.5        # weight on the IoU overlap penalty (constraint)
-init_overlap_gate_lo: 0.02       # IoU below which criticality is untouched
-init_overlap_gate_hi: 0.20       # IoU at/above which criticality is fully gated out
-goal_offlane_threshold: 2.75     # = hard end of the continuous lane penalty (m)
-goal_onroad_threshold: 2.75
-# criticality = risk_coef * noisy_OR(R_ttc, R_approach) * (1 - overlap_gate)
-# (collision no longer enters the reward; a contact still surfaces via dense TTC)
-risk_coef: 1.0
-approach_d_safe: 6.0             # adversary "close" scale for the proximity gate (m)
-approach_d_scale: 2.0
-approach_close_delta: 2.0        # min (d0 - dmin) closed-in distance to score (m)
-approach_close_scale: 1.0        # closing-gate sharpness (smaller = crisper gate)
-approach_warmup_time: 0.5        # ignore first N s when measuring closing
-# constraints (subtracted, each >= 0)
-goal_offlane_penalty: 0.25        # weight on the continuous lane-distance penalty
-lane_soft: 1.75                  # lane penalty starts ramping here (m)
-# A parked adversary is now rejected outright (hard reward = -1), so the soft
-# parking penalties below are no longer applied. parking_mismatch is also dropped
-# (only one adversary is generated). Kept for back-compat; inert in the reward.
-parking_mismatch_penalty: 0.0    # REMOVED from reward (single adversary)
-gen_agent_parking_penalty: 0.0  # REMOVED from reward (parked adv -> hard -1)
-# collision: NO LONGER in the reward. Still rolled out so r_collision / c_trivial
-# are logged as diagnostics (collision_enabled keeps populating ego_collision).
-collision_enabled: true
-collision_coef: 0.0              # REMOVED from reward (collision bonus dropped)
-collision_warmup: 0.75
-collision_window: 0.5
-trivial_collision_t: 0.75
-trivial_collision_penalty: 0.0   # REMOVED from reward (trivial-collision penalty dropped)
-# deprecated linear proximity bonus (superseded by the gated approach bonus)
-min_dist_coef: 0.0
-min_dist_dmax: 10.0
+# --- rollout / reward --------------------------------------------------------
+# Three strict configs feed ddpo.reward.PufferSimulator; every key below must
+# match a dataclass field (missing or unknown keys raise at construction).
+#
+# planner: WHICH policy drives the agents. Composed from
+# cfgs/planner/bad_driver.yaml by the entrypoint defaults list
+# (planner@ddpo.planner: bad_driver); swap checkpoints / planners there.
+# Only the adversary-specific override lives here: the frozen policy scales its
+# collision penalty by each agent's own collision_factor obs (0 = reckless,
+# 2 = maximally defensive; others keep sim.fixed_collision_factor = 0.5), so
+# this stops ONLY the adversary from yielding. Two mutually avoidant agents
+# almost never collide (8rlw8ay8: collision rate pinned at ~2% for 3.8k iters
+# with adv_dist plateauing at ~7 m -- the planner's separation, not the
+# model's choice). null restores the shared factor. This key must stay out of
+# bad_driver.yaml: that file merges later and would override this value.
+planner:
+  sim:
+    adv_collision_factor: 0.0
+
+# simulator: HOW the rollout measures metrics while stepping
+# (ddpo.planners.SimulatorConfig; seed and the gen_agent_invalid check are
+# injected by the training loop).
+simulator:
+  sim_steps: 91
+  init_overlap_margin: 0.0         # 0 = flag only true spawn interpenetration (m)
+  goal_offlane_threshold: 2.75     # diagnostic off-lane flag: adv goal lane dist (m)
+  goal_onroad_threshold: 2.75      # diagnostic off-lane flag: adv spawn lane dist (m)
+  approach_warmup_time: 0.5        # ignore first N s when measuring closing
+  ego_offroad_threshold: 2.75      # off-road proxy: ego dist to nearest centerline (m)
+
+# reward: HOW the scalar reward is assembled from the rollout metrics
+# (ddpo.reward.RewardConfig). criticality = risk_coef * noisy_OR(R_ttc,
+# w_app * R_approach), hard-gated to 0 on rejected / overlapping-init scenes;
+# lane constraints are soft-subtracted on the valid branch; a time-ramped
+# collision / ego-fault bonus is added on top (valid branch only).
+reward:
+  ttc_tau: 3.0                     # TTC horizon normalising the dense risk term (s)
+  risk_coef: 1.0
+  approach_d_safe: 6.0             # adversary "close" scale for the proximity gate (m)
+  approach_d_scale: 2.0
+  approach_close_delta: 2.0        # min (d0 - dmin) closed-in distance to score (m)
+  approach_close_scale: 1.0        # closing-gate sharpness (smaller = crisper gate)
+  lane_soft: 1.75                  # lane penalty ramps from lane_soft to lane_hard (m)
+  lane_hard: 2.75
+  lane_penalty: 0.25               # weight on each continuous lane-distance penalty
+  init_overlap_penalty: 0.5        # weight on the graded spawn-overlap fraction
+  # Graded reject penalty: a condition-violating adversary scores
+  # -(base + (1-base) * clip(gap/scale, 0, 1)) instead of a flat -1, where gap
+  # is how many metres it landed outside the target bucket. The flat cliff was
+  # the reward-collapse engine (run 3zjnupnh): the criticality optimum sits
+  # right at the goal_dist bucket edge, and once a GRPO group slid over it the
+  # uniform -1 had zero within-group contrast -> zero restoring gradient.
+  invalid_penalty_base: 0.5        # penalty right at the bucket boundary
+  invalid_grade_scale: 10.0        # metres past the boundary to reach the full -1 (0 = flat -1)
+  collision_warmup: 0.75           # bonus ramp: a contact before this earns nothing (s)
+  collision_window: 0.5            # ramp reaches 1 at warmup + window (s)
+  trivial_collision_t: 0.75        # c_trivial diagnostic flag only
+  # Explicit collision bonus (run 8rlw8ay8 post-mortem): the dense-only reward
+  # paid a real collision only ~0.1 more than a deep near-miss -- ~0.5 sigma of
+  # the within-group std, invisible to GRPO whitening, so ego_collision_rate
+  # stayed flat at ~2% while the approach term absorbed the whole gradient.
+  # 0.5 puts a collision ~2.5 sigma above its group; an ego-fault collision
+  # (the actual target behavior: cut-ins the ego crashes into) earns 1.5 total.
+  collision_bonus: 0.5
+  ego_fault_bonus: 1.0
+  # Approach-weight annealing: keep the dense approach gradient as a bootstrap
+  # (without it the TTC/collision signal has near-zero support early on), then
+  # ramp it down once the policy reliably closes in (~7 m plateau by ~it 1500 in
+  # 8rlw8ay8) so it stops substituting for actual criticality.
+  approach_coef: 1.0
+  approach_coef_final: 0.25
+  approach_anneal_begin: 2000
+  approach_anneal_end: 6000
 
 # --- DDPO ------------------------------------------------------------------
 sampler: ddpm                 # ddim variant overrides this in its entrypoint
 ddim_steps: 30
 ddim_eta: 1.0
-batch_size: 64
+batch_size: 128
 # Per-context (GRPO) grouping: batch_size/group_size distinct contexts, each
 # sampled group_size times; advantages whitened within group.
 group_size: 8
@@ -170,6 +205,25 @@ ddpo:
   adv_mode: zscore
   per_context: true
   group_skip_std: 1.0e-4
+  # Anti-collapse guards (see run 3zjnupnh post-mortem):
+  # A zero-std group no longer vanishes (skip) but is whitened against the
+  # whole batch, so an all-rejected group still gets a repulsive gradient.
+  degenerate_group: global
+  # On-policy log-ratios are ~0; drop sample-steps whose |log ratio| exceeds
+  # this instead of exp()-ing numerical junk into an unbounded repulsion term
+  # (the PPO min() keeps exploded ratios exactly when the advantage is < 0).
+  ratio_drop: 1.0
+  # Adaptive KL-to-base: multiplicative feedback keeping measured KL near the
+  # setpoint (healthy phase of 3zjnupnh sat at 0.005-0.02; collapse blew
+  # through 0.5 within ~100 iters). 0 = fixed kl_coef.
+  kl_target: 0.05
+  kl_adapt_band: 1.5
+  kl_adapt_rate: 1.5
+  kl_coef_min: 0.01
+  kl_coef_max: 100.0
+  # Clip pg and KL gradients separately (each to grad_clip): a single global
+  # clip lets an exploding pg term scale the KL pullback to nothing.
+  decouple_kl_grad: true
 
 # --- logging / eval --------------------------------------------------------
 wandb:
@@ -178,7 +232,11 @@ wandb:
   entity: null
   run_name: ${experiment.run_name}
 eval_every: 100
-eval_num_scenes: 8
+# Metric sample size vs media volume are decoupled: rates over 8 scenes have a
+# 0.125 resolution (a true ~2% collision rate reads as a constant 0), so the
+# metrics use 64 scenes while only the first eval_media_scenes get GIFs.
+eval_num_scenes: 64
+eval_media_scenes: 8
 eval_visualize_before_rl: true
 eval_visualize_no_adv: true
 eval_static_baselines_once: true

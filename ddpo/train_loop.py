@@ -9,7 +9,7 @@ taken (train.py imports this module lazily inside its dispatch branch).
 Pipeline per iteration:
     ConditioningPool.sample_batch(B)          # real conditioning graphs
     policy.sample(cond)                       # record denoising trajectory + logprob
-    PufferDriveReward.evaluate(scenes)        # numpy sim port + frozen planner
+    PufferSimulator.evaluate(scenes)          # numpy sim port + frozen planner
     compute_advantages -> ddpo_loss over k random denoising steps (+ optional KL)
 """
 
@@ -21,11 +21,12 @@ import torch
 from omegaconf import OmegaConf
 
 from ddpo.conditioning import ConditioningPool, LDMAdvConditioningPool, LDMGoalConditioningPool
-from ddpo.ddpo_loss import DDPOConfig, compute_advantages, ddpo_loss
+from ddpo.ddpo_loss import AdaptiveKLController, DDPOConfig, compute_advantages, ddpo_loss
 from ddpo.policy import DMFixedMapAgentGoalDDPOPolicy, DMGoalDDPOPolicy
 from ddpo.policy_ldm import LDMGoalDDPOPolicy
 from ddpo.policy_ldm_adv import LDMAdvDDPOPolicy
-from ddpo.reward import PufferDriveReward
+from ddpo.planners import SimulatorConfig
+from ddpo.reward import PufferSimulator, RewardConfig
 from ddpo.reward_hooks import GenInvalidCheck
 from ddpo.interfaces import GeneratedScenes
 from datasets.waymo.dataset_dm_fixed_map_agent_goal_waymo import WaymoDatasetDMFixedMapAgentGoal
@@ -166,18 +167,18 @@ def _build_gen_invalid(cfg, dataset_cfg):
     per-field toggles come from ``cfg.gen_agent_invalid``. Returns ``None`` when
     the block is absent or ``enabled=false`` (falls back to the parked-adv gate).
     """
-    spec = cfg.get("gen_agent_invalid", None)
-    if spec is None or not bool(spec.get("enabled", False)):
+    spec = cfg.gen_agent_invalid
+    if not bool(spec.enabled):
         return None
     return GenInvalidCheck(
         goaldist_near=float(dataset_cfg.cond_goaldist_near_threshold),
         goaldist_far=float(dataset_cfg.cond_goaldist_far_threshold),
         egodist_near=float(dataset_cfg.cond_egodist_near_threshold),
         egodist_far=float(dataset_cfg.cond_egodist_far_threshold),
-        check_type=bool(spec.get("check_type", True)),
-        check_motion=bool(spec.get("check_motion", True)),
-        check_goal_dist=bool(spec.get("check_goal_dist", True)),
-        check_ego_dist=bool(spec.get("check_ego_dist", True)),
+        check_type=bool(spec.check_type),
+        check_motion=bool(spec.check_motion),
+        check_goal_dist=bool(spec.check_goal_dist),
+        check_ego_dist=bool(spec.check_ego_dist),
     )
 
 
@@ -245,6 +246,7 @@ _ADV_TABLE_COLUMNS = [
 _REWARD_COMPONENT_KEYS = (
     "criticality", "r_ttc", "r_approach",
     "constraint", "c_spawn_lane", "c_goal_lane", "c_overlap", "c_parking", "c_invalid",
+    "c_invalid_sev",
     "spawn_lane_dist", "goal_lane_dist", "init_overlap_frac",
     "ego_adv_init_dist", "ego_adv_min_dist_warmup",
 )
@@ -409,7 +411,7 @@ def _visualize_train_group_diversity(
     rewards: torch.Tensor,
     advantages: torch.Tensor,
     group_ids: torch.Tensor | None,
-    reward_model: PufferDriveReward,
+    reward_model: PufferSimulator,
     cfg,
     ddpo_cfg: DDPOConfig,
     it: int,
@@ -584,12 +586,19 @@ def evaluate_and_visualize(
     """Roll out the first ``eval_num_scenes`` fixed scenes of ``eval_pool`` and
     build trajectory media. ``media_tag`` namespaces the on-disk GIF directory so
     callers that pass different pools (e.g. val vs. a train-scene subset) don't
-    overwrite each other's frames."""
+    overwrite each other's frames.
+
+    Metrics are computed over all ``eval_num_scenes`` scenes; GIF/figure media
+    are only rendered for the first ``eval_media_scenes`` of them (default: all),
+    so the metric sample size can grow without inflating render time or wandb
+    media volume. With 8 scenes a ~2% collision rate is indistinguishable from
+    0 (resolution 0.125); rates need >= 64 scenes to be readable."""
     import matplotlib.pyplot as plt
 
     from ddpo.viz import CONTROL_COLOR, render_rollout, render_rollout_frames, save_gif
 
     n = min(int(cfg.eval_num_scenes), len(eval_pool))
+    media_n = min(n, int(cfg.get("eval_media_scenes", n)))
     cond = eval_pool.batch_from_indices(list(range(n)))
 
     save_gif_mode = bool(cfg.get("save_gif", False))
@@ -652,6 +661,10 @@ def evaluate_and_visualize(
                     name, s, states[a_sel], types[a_sel], gen_agent_s,
                     metrics["trajectories"][s], metrics["reward"][s],
                 ))
+            # Every scene contributes metrics + a table row; only the first
+            # eval_media_scenes get the (expensive) GIF/figure rendering.
+            if s >= media_n:
+                continue
             # Full Phase 2 reward breakdown overlaid on the GIF/figure.
             components = {
                 k: metrics[k][s]
@@ -782,41 +795,21 @@ def run_ddpo(cfg_root):
     np.random.seed(int(cfg.seed))
 
     model_type, policy, pool, eval_dataset_cfg = _build_policy_and_pool(cfg_root, cfg, device)
-    reward = PufferDriveReward(
-        planner_cfg=cfg.get("planner", None),
-        sim_steps=cfg.sim_steps,
-        deterministic=cfg.get("planner_deterministic", None),
-        ttc_tau=cfg.get("ttc_tau", 3.0),
-        init_overlap_margin=cfg.get("init_overlap_margin", 0.0),
-        init_overlap_penalty=cfg.get("init_overlap_penalty", 1.0),
-        init_overlap_gate_lo=cfg.get("init_overlap_gate_lo", 0.02),
-        init_overlap_gate_hi=cfg.get("init_overlap_gate_hi", 0.20),
-        goal_offlane_threshold=cfg.get("goal_offlane_threshold", 3.0),
-        goal_onroad_threshold=cfg.get("goal_onroad_threshold", 2.0),
-        goal_offlane_penalty=cfg.get("goal_offlane_penalty", 0.5),
-        parking_mismatch_penalty=cfg.get("parking_mismatch_penalty", 0.5),
-        min_dist_coef=cfg.get("min_dist_coef", 0.0),
-        min_dist_dmax=cfg.get("min_dist_dmax", 20.0),
-        gen_agent_parking_penalty=cfg.get("gen_agent_parking_penalty", 0.0),
-        risk_coef=cfg.get("risk_coef", 1.0),
-        approach_d_safe=cfg.get("approach_d_safe", 6.0),
-        approach_d_scale=cfg.get("approach_d_scale", 2.0),
-        approach_close_delta=cfg.get("approach_close_delta", 2.0),
-        approach_close_scale=cfg.get("approach_close_scale", 1.0),
-        approach_warmup_time=cfg.get("approach_warmup_time", 0.5),
-        lane_soft=cfg.get("lane_soft", 0.5),
-        collision_enabled=cfg.get("collision_enabled", False),
-        collision_coef=cfg.get("collision_coef", 0.0),
-        collision_warmup=cfg.get("collision_warmup", 0.75),
-        collision_window=cfg.get("collision_window", 0.5),
-        trivial_collision_t=cfg.get("trivial_collision_t", 0.75),
-        trivial_collision_penalty=cfg.get("trivial_collision_penalty", 0.5),
-        seed=cfg.seed,
-        backend=cfg.get("reward_backend", "numpy"),
-        pufferdrive_root=cfg.get("pufferdrive_root", None),
-        gen_invalid=_build_gen_invalid(cfg, eval_dataset_cfg),
+    # Strict three-config construction: every yaml key under simulator:/reward:
+    # must match a dataclass field (missing or unknown keys raise a TypeError).
+    reward = PufferSimulator(
+        planner_cfg=cfg.planner,
+        simulator_cfg=SimulatorConfig(
+            seed=int(cfg.seed),
+            gen_invalid=_build_gen_invalid(cfg, eval_dataset_cfg),
+            **OmegaConf.to_container(cfg.simulator, resolve=True),
+        ),
+        reward_cfg=RewardConfig(**OmegaConf.to_container(cfg.reward, resolve=True)),
     )
     ddpo_cfg = DDPOConfig(**OmegaConf.to_container(cfg.ddpo, resolve=True))
+    # Adaptive KL-to-base coefficient (inert unless ddpo.kl_target > 0); its
+    # current coef is checkpointed so a resume keeps the adapted trust region.
+    kl_ctrl = AdaptiveKLController(ddpo_cfg)
     trainable_params = list(policy.trainable_parameters())
     opt = torch.optim.AdamW(trainable_params, lr=cfg.lr, weight_decay=cfg.weight_decay)
 
@@ -844,6 +837,7 @@ def run_ddpo(cfg_root):
         _rng_restore(rs.get("rng", {}), device)
         start_it = int(rs.get("it", 0))
         resume_wandb_id = rs.get("wandb_id", None)
+        kl_ctrl.coef = float(rs.get("kl_coef", kl_ctrl.coef))
         print(
             f"[ddpo] resumed from {resume_path} at it={start_it} "
             f"(opt={'yes' if 'opt' in rs else 'no'}, "
@@ -945,6 +939,10 @@ def run_ddpo(cfg_root):
             cond = pool.sample_batch(cfg.batch_size)
             group_ids = None
         scenes, traj = policy.sample(cond)
+        # Advance the approach-weight annealing schedule (no-op unless the
+        # reward config enables it); the periodic evals below reuse the same
+        # weight so train and val rewards stay comparable.
+        reward.set_train_iteration(it)
         metrics = reward.evaluate(scenes)
 
         rewards = torch.as_tensor(metrics["reward"], device=device)
@@ -961,25 +959,69 @@ def run_ddpo(cfg_root):
             # on-policy ratio drift far from 1 even with inner_epochs == 1.
             with _bf16_autocast(device, enabled=cfg.get("logprob_bf16", False)):
                 new_lp, kl_term = policy.trajectory_logprob(
-                    traj, cond, k_idx, with_kl=ddpo_cfg.kl_coef > 0
+                    traj, cond, k_idx,
+                    with_kl=kl_ctrl.coef > 0 or ddpo_cfg.kl_target > 0,
                 )
                 old_lp = traj.old_logprob[:, k_idx]
                 kl_term = kl_term.float() if kl_term is not None else None
-                loss, log = ddpo_loss(new_lp.float(), old_lp.float(), advantages.float(), ddpo_cfg, kl_term)
+                loss, log, parts = ddpo_loss(
+                    new_lp.float(), old_lp.float(), advantages.float(), ddpo_cfg,
+                    kl_term, kl_coef=kl_ctrl.coef,
+                )
             loss = loss.float()
             opt.zero_grad(set_to_none=True)
             if not torch.isfinite(loss):
                 skipped_updates += 1
                 continue
-            loss.backward()
-            grad_norm = torch.nn.utils.clip_grad_norm_(
-                trainable_params, cfg.grad_clip, error_if_nonfinite=False
-            )
-            if not torch.isfinite(grad_norm):
+            if ddpo_cfg.decouple_kl_grad and parts["kl"] is not None:
+                # Clip the pg and KL gradients to grad_clip SEPARATELY: with a
+                # single global clip, an exploding pg term rescales the KL
+                # pullback to nothing exactly when the trust region is needed
+                # most. Each term gets its own norm budget; the step uses the
+                # sum of the two clipped directions.
+                parts["pg"].backward(retain_graph=True)
+                pg_norm = torch.nn.utils.clip_grad_norm_(
+                    trainable_params, cfg.grad_clip, error_if_nonfinite=False
+                )
+                if not torch.isfinite(pg_norm):
+                    opt.zero_grad(set_to_none=True)
+                    skipped_updates += 1
+                    continue
+                pg_grads = [
+                    None if p.grad is None else p.grad.detach().clone()
+                    for p in trainable_params
+                ]
                 opt.zero_grad(set_to_none=True)
-                skipped_updates += 1
-                continue
+                (kl_ctrl.coef * parts["kl"]).backward()
+                kl_norm = torch.nn.utils.clip_grad_norm_(
+                    trainable_params, cfg.grad_clip, error_if_nonfinite=False
+                )
+                if not torch.isfinite(kl_norm):
+                    opt.zero_grad(set_to_none=True)
+                    skipped_updates += 1
+                    continue
+                for p, g in zip(trainable_params, pg_grads):
+                    if g is None:
+                        continue
+                    if p.grad is None:
+                        p.grad = g
+                    else:
+                        p.grad.add_(g)
+                log["pg_grad_norm"] = float(pg_norm)
+                log["kl_grad_norm"] = float(kl_norm)
+            else:
+                loss.backward()
+                grad_norm = torch.nn.utils.clip_grad_norm_(
+                    trainable_params, cfg.grad_clip, error_if_nonfinite=False
+                )
+                if not torch.isfinite(grad_norm):
+                    opt.zero_grad(set_to_none=True)
+                    skipped_updates += 1
+                    continue
             opt.step()
+        # One controller nudge per iteration, from the last measured KL (with
+        # inner_epochs == 1 this is THE update's KL).
+        kl_ctrl.update(log.get("kl_to_base", float("nan")))
 
         crit = float(rewards.gt(0).float().mean())
         inval = float(metrics["init_invalid"].mean())
@@ -1001,13 +1043,18 @@ def run_ddpo(cfg_root):
         else:
             grp_std = float("nan")
         near_miss = float((metrics["r_risk"] > 0.5).mean())
+        coll_rate = float(metrics["ego_collision"].mean())
+        fault_rate = float(metrics["ego_fault_collision"].mean())
         print(
             f"[it {it:04d}] reward={rewards.mean():.3f} pos_reward_rate={crit:.3f} "
-            f"near_miss={near_miss:.3f} risk={float(metrics['r_risk'].mean()):.3f} "
-            f"approach={float(metrics['r_approach'].mean()):.3f} min_ttc={mean_ttc:.2f} "
+            f"near_miss={near_miss:.3f} coll={coll_rate:.3f} fault={fault_rate:.3f} "
+            f"risk={float(metrics['r_risk'].mean()):.3f} "
+            f"approach={float(metrics['r_approach'].mean()):.3f} "
+            f"w_app={reward.approach_coef:.2f} min_ttc={mean_ttc:.2f} "
             f"adv_dist={mean_adv_dist:.2f} parked={parked:.3f} cond_invalid={invalid_cond:.3f} "
             f"init_invalid={inval:.3f} loss={log['loss']:.4f} grp_std={grp_std:.3f} "
             f"ratio={log.get('ratio_mean', 1.0):.3f} kl={log.get('kl_to_base', 0.0):.4f} "
+            f"kl_coef={kl_ctrl.coef:.3g} drop={log.get('ratio_dropped_frac', 0.0):.3f} "
             f"skipped_updates={skipped_updates}"
         )
 
@@ -1026,7 +1073,8 @@ def run_ddpo(cfg_root):
                 "train/ego_adv_min_dist": mean_adv_dist,
                 "train/gen_agent_is_parked": parked,
                 "train/gen_agent_is_invalid": invalid_cond,
-                "train/ego_collision_rate": float(metrics["ego_collision"].mean()),
+                "train/ego_collision_rate": coll_rate,
+                "train/ego_fault_collision_rate": fault_rate,
                 "train/ego_offroad_rate": float(metrics["ego_offroad"].mean()),
                 "train/reached_goal_rate": float(metrics["reached_goal"].mean()),
                 "train/goal_offlane_frac": float(metrics["goal_offlane_frac"].mean()),
@@ -1034,6 +1082,9 @@ def run_ddpo(cfg_root):
                 # Phase 2 reward components (mean over batch).
                 "train/r_ttc": float(metrics["r_ttc"].mean()),
                 "train/r_approach": float(metrics["r_approach"].mean()),
+                "train/approach_coef": float(reward.approach_coef),
+                "train/r_collision": float(metrics["r_collision"].mean()),
+                "train/r_bonus": float(metrics["r_bonus"].mean()),
                 "train/r_risk": float(metrics["r_risk"].mean()),
                 "train/criticality": float(metrics["criticality"].mean()),
                 "train/c_lane": float(metrics["c_lane"].mean()),
@@ -1043,10 +1094,15 @@ def run_ddpo(cfg_root):
                 "train/loss": log["loss"],
                 "train/pg_loss": log.get("pg_loss", log["loss"]),
                 "train/ratio_mean": log.get("ratio_mean", 1.0),
+                "train/ratio_dropped_frac": log.get("ratio_dropped_frac", 0.0),
                 "train/kl_to_base": log.get("kl_to_base", 0.0),
+                "train/kl_coef": kl_ctrl.coef,
                 "train/adv_std": float(advantages.std(unbiased=False)),
                 "train/skipped_updates": skipped_updates,
             }
+            if "pg_grad_norm" in log:
+                log_payload["train/pg_grad_norm"] = log["pg_grad_norm"]
+                log_payload["train/kl_grad_norm"] = log["kl_grad_norm"]
             log_payload.update(group_log)
             log_payload.update(group_viz_log)
             wandb.log(log_payload)
@@ -1104,6 +1160,7 @@ def run_ddpo(cfg_root):
                     "opt": opt.state_dict(),
                     "rng": _rng_snapshot(device),
                     "wandb_id": wandb_run_id,
+                    "kl_coef": kl_ctrl.coef,
                     "base_ckpt": cfg.get("ldm_adv_ckpt")
                     or cfg.get("ldm_ckpt")
                     or cfg.get("model_ckpt"),

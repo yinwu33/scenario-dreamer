@@ -14,6 +14,11 @@ rnn:
   hidden_size: 256
 
 # Env/observation settings translated from PufferDrive/pufferlib/config/pacific/bad_driver.ini.
+# sim.adv_collision_factor (per-agent override for the generated adversary;
+# 0 = reckless .. 2 = maximally defensive, null = shared factor) is deliberately
+# NOT defined here: this file merges after the ddpo flow yaml in the defaults
+# list, so defining it (even as null) would clobber the flow's value. Set it in
+# the ddpo flow config (e.g. cfgs/ddpo/ldm_adv.yaml planner.sim) instead.
 sim:
   dt: 0.1
   goal_radius: 2.0

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from .base import (
     NumpyPlanner,
-    RolloutParams,
+    SimulatorConfig,
     RolloutPlanner,
     RolloutResult,
     build_planner,
@@ -21,7 +21,7 @@ from . import dummy, centerline_dummy, selfplay_drive, bad_driver, puffer_drive 
 
 __all__ = [
     "NumpyPlanner",
-    "RolloutParams",
+    "SimulatorConfig",
     "RolloutPlanner",
     "RolloutResult",
     "build_planner",

@@ -6,6 +6,9 @@ from nn_modules.dit_ex import DiT
 from utils.diffusion_helpers import cosine_beta_schedule, extract
 from utils.losses import GeometricLosses
 
+# Per-scene mode codes for train_mode="mixed"; order matches train.mode_probs.
+MODE_INIT_SCENE, MODE_INIT_AGENT, MODE_INIT_ADV = 0, 1, 2
+
 
 class LDMAdv(nn.Module):
     """Latent diffusion over the goal-autoencoder latents with normal agents plus
@@ -23,6 +26,17 @@ class LDMAdv(nn.Module):
       init_scene: generate lane, normal-agent, and adv latents.
       init_agent: condition on lane latents, generate normal-agent and adv latents.
       init_adv:   condition on lane and normal-agent latents, generate adv only.
+
+    Training modes (``train.train_mode``):
+      all:      lane / agent / adv share one timestep per scene, so only the
+                init_scene sampling configuration is covered.
+      adv_only: clean scene context, only the adv latent is noised, non-adv
+                branches frozen (covers init_adv).
+      mixed:    per scene, draw one of the three sampling configurations from
+                ``train.mode_probs`` -- streams acting as conditioning get their
+                exact latents at t=0 (matching ``p_sample_loop``) and their
+                epsilon loss masked -- so one run covers all three generation
+                modes. No new parameters, so "all" checkpoints warm-start.
     """
 
     def __init__(self, cfg):
@@ -44,8 +58,30 @@ class LDMAdv(nn.Module):
         self.train_mode = self.cfg.train.get("train_mode", "all")
         if bool(self.cfg.train.get("adv_only", False)):
             self.train_mode = "adv_only"
-        if self.train_mode not in ("all", "adv_only"):
+        if self.train_mode not in ("all", "adv_only", "mixed"):
             raise ValueError(f"Unsupported ldm_adv train_mode: {self.train_mode!r}")
+        if self.train_mode == "mixed":
+            probs_cfg = self.cfg.train.get("mode_probs", None)
+            if probs_cfg is None:
+                raise ValueError(
+                    "train_mode=mixed requires train.mode_probs with "
+                    "init_scene / init_agent / init_adv entries"
+                )
+            mode_probs = torch.tensor(
+                [
+                    float(probs_cfg["init_scene"]),
+                    float(probs_cfg["init_agent"]),
+                    float(probs_cfg["init_adv"]),
+                ],
+                dtype=torch.float32,
+            )
+            if (mode_probs < 0).any() or mode_probs.sum() <= 0:
+                raise ValueError(
+                    f"Invalid ldm_adv mode_probs {mode_probs.tolist()}: "
+                    "entries must be non-negative and sum to > 0"
+                )
+            # persistent=False keeps "all"-trained checkpoints loadable (strict)
+            self.register_buffer("mode_probs", mode_probs / mode_probs.sum(), persistent=False)
 
         self.register_buffer("betas", betas)
         self.register_buffer("alphas_cumprod", alphas_cumprod)
@@ -96,8 +132,12 @@ class LDMAdv(nn.Module):
             raise ValueError(f"Unsupported LDMAdv generation mode: {mode!r}")
         return mode
 
-    def _zero_scene_loss(self, data, dtype, device):
-        return torch.zeros(int(data.batch_size), device=device, dtype=dtype)
+    @staticmethod
+    def _supervised_mean(per_scene_loss, supervised):
+        """Mean over the scenes whose stream is supervised (masked scenes hold
+        zeros), so the logged magnitude stays comparable across train modes."""
+        count = supervised.float().sum().clamp(min=1.0)
+        return per_scene_loss.sum() / count
 
     def predict_start_from_noise(self, x_t, t, noise):
         return extract(self.sqrt_recip_alphas_cumprod, t, x_t.shape) * x_t - extract(
@@ -223,18 +263,23 @@ class LDMAdv(nn.Module):
             self.sqrt_one_minus_alphas_cumprod, t, x_start.shape
         ) * noise
 
-    def p_losses(self, x_agent, x_lane, x_adv, data, t_agent, t_lane, t_adv):
+    def p_losses(self, x_agent, x_lane, x_adv, data, t_agent, t_lane, t_adv, agent_cond, lane_cond):
+        """``agent_cond`` / ``lane_cond`` are per-scene bool masks marking the
+        scenes whose stream acts as clean conditioning: those tokens get their
+        exact latents (matching what ``p_sample_loop`` feeds in the init_agent /
+        init_adv modes) and their epsilon loss is masked out."""
+        agent_batch = data["agent"].batch
+        lane_batch = data["lane"].batch
+        adv_batch = self._adv_batch(data)
+
         agent_noise = torch.randn_like(x_agent)
         lane_noise = torch.randn_like(x_lane)
         adv_noise = torch.randn_like(x_adv)
-        if self.train_mode == "adv_only":
-            x_agent_noisy = x_agent
-            x_lane_noisy = x_lane
-            agent_noise = torch.zeros_like(agent_noise)
-            lane_noise = torch.zeros_like(lane_noise)
-        else:
-            x_agent_noisy = self.q_sample(x_start=x_agent, t=t_agent, noise=agent_noise)
-            x_lane_noisy = self.q_sample(x_start=x_lane, t=t_lane, noise=lane_noise)
+
+        agent_is_ctx = agent_cond[agent_batch].view(-1, 1, 1)
+        lane_is_ctx = lane_cond[lane_batch].view(-1, 1, 1)
+        x_agent_noisy = torch.where(agent_is_ctx, x_agent, self.q_sample(x_start=x_agent, t=t_agent, noise=agent_noise))
+        x_lane_noisy = torch.where(lane_is_ctx, x_lane, self.q_sample(x_start=x_lane, t=t_lane, noise=lane_noise))
         x_adv_noisy = self.q_sample(x_start=x_adv, t=t_adv, noise=adv_noise)
 
         agent_noise_pred, lane_noise_pred, adv_noise_pred = self.model(
@@ -247,17 +292,10 @@ class LDMAdv(nn.Module):
             t_adv,
         )
 
-        adv_batch = self._adv_batch(data)
         adv_loss = self.adv_loss_fn(adv_noise_pred, adv_noise, adv_batch)
-
-        if self.train_mode == "adv_only":
-            agent_loss = self._zero_scene_loss(data, adv_loss.dtype, adv_loss.device)
-            lane_loss = self._zero_scene_loss(data, adv_loss.dtype, adv_loss.device)
-            loss = self.adv_weight * adv_loss
-        else:
-            agent_loss = self.agent_loss_fn(agent_noise_pred, agent_noise, data["agent"].batch)
-            lane_loss = self.lane_loss_fn(lane_noise_pred, lane_noise, data["lane"].batch)
-            loss = agent_loss + self.adv_weight * adv_loss + self.cfg.train.lane_weight * lane_loss
+        agent_loss = self.agent_loss_fn(agent_noise_pred, agent_noise, agent_batch) * (~agent_cond).float()
+        lane_loss = self.lane_loss_fn(lane_noise_pred, lane_noise, lane_batch) * (~lane_cond).float()
+        loss = agent_loss + self.adv_weight * adv_loss + self.cfg.train.lane_weight * lane_loss
         return loss, agent_loss, lane_loss, adv_loss
 
     def loss(self, data):
@@ -269,19 +307,35 @@ class LDMAdv(nn.Module):
         lane_batch = data["lane"].batch
         adv_batch = self._adv_batch(data)
         batch_size = data.batch_size
-        t = torch.randint(0, self.n_timesteps, (batch_size,), device=x_agent.device).long()
+        device = x_agent.device
+        t = torch.randint(0, self.n_timesteps, (batch_size,), device=device).long()
+
+        # Per-scene masks marking which streams act as clean conditioning:
+        #   all:      none (joint denoising, shared t -- the init_scene config)
+        #   adv_only: lane + agent (frozen scene is pure context -- init_adv)
+        #   mixed:    drawn per scene from mode_probs, covering init_scene,
+        #             init_agent (clean lanes) and init_adv (clean lanes+agents)
         if self.train_mode == "adv_only":
-            t_agent = torch.zeros_like(t[agent_batch])
-            t_lane = torch.zeros_like(t[lane_batch])
-        else:
-            t_agent = t[agent_batch]
-            t_lane = t[lane_batch]
+            lane_cond = torch.ones(batch_size, dtype=torch.bool, device=device)
+            agent_cond = torch.ones(batch_size, dtype=torch.bool, device=device)
+        elif self.train_mode == "mixed":
+            mode = torch.multinomial(self.mode_probs, batch_size, replacement=True).to(device)
+            lane_cond = mode != MODE_INIT_SCENE
+            agent_cond = mode == MODE_INIT_ADV
+        else:  # "all"
+            lane_cond = torch.zeros(batch_size, dtype=torch.bool, device=device)
+            agent_cond = torch.zeros(batch_size, dtype=torch.bool, device=device)
+
+        t_agent = torch.where(agent_cond, torch.zeros_like(t), t)[agent_batch]
+        t_lane = torch.where(lane_cond, torch.zeros_like(t), t)[lane_batch]
         t_adv = t[adv_batch]
 
-        loss, agent_loss, lane_loss, adv_loss = self.p_losses(x_agent, x_lane, x_adv, data, t_agent, t_lane, t_adv)
+        loss, agent_loss, lane_loss, adv_loss = self.p_losses(
+            x_agent, x_lane, x_adv, data, t_agent, t_lane, t_adv, agent_cond, lane_cond
+        )
         return {
             "loss": loss.mean(),
-            "agent_loss": agent_loss.mean().detach(),
-            "lane_loss": lane_loss.mean().detach(),
+            "agent_loss": self._supervised_mean(agent_loss, ~agent_cond).detach(),
+            "lane_loss": self._supervised_mean(lane_loss, ~lane_cond).detach(),
             "adv_loss": adv_loss.mean().detach(),
         }

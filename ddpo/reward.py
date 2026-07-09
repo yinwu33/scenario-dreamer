@@ -1,49 +1,75 @@
 """DDPO reward: roll generated scenes out with a planner, score the ego.
 
-The rollout itself is delegated to a pluggable ``RolloutPlanner`` (see
-``ddpo.planners``); this module only assembles the scalar reward from the
-per-scene metrics the planner returns:
+``PufferSimulator`` is configured by three separate configs, each owning one
+concern (see ``cfgs/ddpo/ldm_adv.yaml``):
+
+  * ``planner_cfg``    -- WHICH policy drives the agents (``cfgs/planner/<name>.yaml``:
+    name, checkpoint, net arch, determinism, sim dynamics). Swapping planner
+    weights or models means editing/adding a planner yaml, nothing here.
+  * ``simulator_cfg``  -- HOW the rollout measures metrics while stepping
+    (``ddpo.planners.SimulatorConfig``: sim_steps, seed, overlap margin, lane
+    thresholds, approach warmup, optional condition-violation check).
+  * ``reward_cfg``     -- HOW the scalar reward is assembled from those metrics
+    (``RewardConfig`` below: weights and ramps only).
+
+Configs are strict: every field is required and unknown keys raise, so a typo
+or a stale yaml fails at construction instead of silently using a default.
+
+The rollout is delegated to the pluggable ``RolloutPlanner`` selected by
+``planner_cfg`` (see ``ddpo.planners``); this module only assembles the scalar
+reward from the per-scene metrics the planner returns:
 
   * only the ego (scene agent 0) is scored;
-  * the reward is assembled in three ordered branches -- park / invalid / valid:
-      - park    (parked adversary): hard -1, not a critical scene;
-      - invalid (adversary interpenetrates a neighbour at spawn): no criticality
-        is credited, reward = -R_constraint <= 0;
-      - valid:  ``clip(R_criticality - R_constraint, -1, 1)`` with
-        R_criticality = risk_coef * noisy_OR(R_ttc, R_approach), where
+  * the reward is assembled in three ordered branches -- reject / init_invalid /
+    valid:
+      - reject  (adversary violates its condition, or is parked when no
+        condition check is configured): not a critical scene; graded
+        -(base + (1-base) * gap/scale) down to -1 when ``invalid_grade_scale``
+        is set (flat -1 otherwise, but a flat cliff gives GRPO no
+        within-group contrast once a group is mostly rejected);
+      - init_invalid (adversary interpenetrates a neighbour at spawn): no
+        criticality is credited, reward = -R_constraint <= 0;
+      - valid:  ``clip(R_criticality - R_constraint, -1, 1) + R_bonus`` with
+        R_criticality = risk_coef * noisy_OR(R_ttc, w_app * R_approach), where
         R_ttc = clip(1 - min_TTC/tau, 0, 1) (dense near-miss gradient) and
         R_approach only fires when the adversary both gets close AND actually
         closed in over the rollout (d0 - dmin), so spawning it next to the ego
-        is not rewarded;
+        is not rewarded. ``w_app`` is the annealable approach weight (see
+        ``approach_coef*``): the approach term is a bootstrap gradient that
+        would otherwise substitute for the sparse TTC/collision signal forever;
       - R_constraint = continuous lane-distance penalty + a graded init-overlap
-        penalty ``init_overlap_penalty * frac`` (frac = intersection / adv area);
-  * the criticality validity gate is hard (an invalid init earns zero
-    criticality), but the overlap fraction still feeds the graded R_constraint
-    penalty on every branch, so the policy keeps a smooth "separate the boxes"
-    gradient;
-  * collision does NOT enter the reward (a contact still surfaces implicitly via
-    the dense TTC term); ``r_collision`` / ``c_trivial`` are logged diagnostics;
+        penalty ``init_overlap_penalty * frac`` (frac = intersection / adv area),
+        subtracted softly on the valid branch (an off-lane spawn loses reward
+        but keeps its criticality gradient);
+  * only true spawn interpenetration (overlap frac > 0) hard-gates criticality
+    to zero; the overlap fraction also feeds the graded R_constraint penalty on
+    every branch, so the policy keeps a smooth "separate the boxes" gradient;
+  * collision enters the reward only through the opt-in ``R_bonus``:
+    ``r_collision * (collision_bonus + ego_fault_bonus * ego_fault)``, where
+    ``r_collision`` is time-ramped (a trivial early contact earns nothing) and
+    the bonus is only paid on the valid branch. Sized >> the GRPO within-group
+    reward std, it makes a real collision decisively win its group where the
+    dense-TTC-only reward left it ~0.1 above a deep near-miss (invisible under
+    per-group whitening);
   * ``ego_offroad`` is kept for interface compatibility but is always 0: the
     generated maps carry no road edges (see pufferdrive_sim docstring);
   * a scene stops being stepped/scored once its ego reaches its goal;
   * ``evaluate`` also returns each reward component for diagnostics.
 
-Which rollout policy runs (rule-based ``dummy``, frozen ``selfplay_drive`` net,
-or PufferDrive's ``puffer_drive`` C env) is selected by ``planner_cfg`` /
-``cfgs/planner/<name>.yaml``.
+Metric access is strict: a planner must emit every metric the reward consumes
+(the numpy ``SimScene`` planners always do, via the hooks in
+``ddpo.reward_hooks``); a missing key raises instead of silently zeroing a term.
 """
 
 from __future__ import annotations
+
+from dataclasses import dataclass
 
 import numpy as np
 import torch
 
 from .interfaces import GeneratedScenes
-from .planners import RolloutParams, build_planner
-
-# Legacy ``backend=`` values map onto planner names so existing callers keep
-# working without a planner config.
-_BACKEND_TO_PLANNER = {"numpy": "selfplay_drive", "puffer": "puffer_drive"}
+from .planners import SimulatorConfig, build_planner
 
 
 def _sigmoid(x: np.ndarray) -> np.ndarray:
@@ -57,261 +83,267 @@ def _smoothstep(x: np.ndarray, lo: float, hi: float) -> np.ndarray:
     return (t * t * (3.0 - 2.0 * t)).astype(np.float32)
 
 
-class PufferDriveReward:
-    """Evaluate generated scenes by rolling them out with the configured planner.
+@dataclass
+class RewardConfig:
+    """Scalar-assembly weights (``reward:`` section of the ddpo config).
 
-    The reward object converts batched ``GeneratedScenes`` into rollout metrics
-    via the planner and returns the collision reward plus goal validity
-    penalties used by DDPO training.
+    Pure post-rollout knobs: nothing here reaches the planner or the metric
+    hooks. All fields are required -- a missing yaml key raises at construction.
+    """
+
+    # --- criticality ------------------------------------------------------
+    # Time-to-collision horizon (s) normalising the dense criticality reward
+    # ``clip(1 - min_TTC/ttc_tau, 0, 1)``.
+    ttc_tau: float
+    # Weight on the noisy-OR risk term (the positive branch of the reward).
+    risk_coef: float
+    # Gated approach bonus: fires when the adversary gets close (dmin below
+    # ``approach_d_safe``, ramp sharpness ``approach_d_scale``) AND closed in
+    # over the rollout (d0 - dmin above ``approach_close_delta``, sharpness
+    # ``approach_close_scale``), so spawning next to the ego scores nothing.
+    approach_d_safe: float
+    approach_d_scale: float
+    approach_close_delta: float
+    approach_close_scale: float
+    # --- constraints (>= 0, subtracted on every branch) ---------------------
+    # Continuous lane penalty: smoothstep ramp of the adversary's spawn/goal
+    # lane-centerline distance from ``lane_soft`` (m) to ``lane_hard`` (m),
+    # each weighted by ``lane_penalty``.
+    lane_soft: float
+    lane_hard: float
+    lane_penalty: float
+    # Weight on the graded adversary spawn-overlap fraction (intersection area /
+    # adversary area vs its neighbours).
+    init_overlap_penalty: float
+    # --- collision bonus (valid branch only) ---------------------------------
+    # r_collision ramps up over [collision_warmup, collision_warmup +
+    # collision_window] (s); c_trivial flags collisions earlier than
+    # ``trivial_collision_t`` (s). With collision_bonus/ego_fault_bonus at 0
+    # these stay logged diagnostics; otherwise they gate the bonus below.
+    collision_warmup: float
+    collision_window: float
+    trivial_collision_t: float
+    # --- graded condition-violation (reject) penalty -------------------------
+    # A rejected adversary is penalised on a ramp instead of a flat -1:
+    #   reward = -(invalid_penalty_base
+    #              + (1 - invalid_penalty_base) * clip(gap / invalid_grade_scale, 0, 1))
+    # where ``gap`` is the metric distance (m) to the nearest valid bucket
+    # (``gen_agent_invalid_gap``; inf for a categorical type violation). A flat
+    # cliff starves GRPO's within-group whitening of contrast once most of a
+    # group is rejected (uniform -1 -> zero std -> zero gradient), so nothing
+    # pulls the policy back over the boundary; the ramp keeps a "how far past
+    # the boundary" ordering all the way down. invalid_grade_scale is the
+    # distance (m) at which the penalty saturates at the full -1; 0 disables
+    # grading (legacy flat -1). Defaulted (unlike the fields above) so configs
+    # for flows without the condition-violation gate keep working unchanged.
+    invalid_penalty_base: float = 0.5
+    invalid_grade_scale: float = 0.0
+    # --- explicit collision / ego-fault bonus (0 = legacy, no bonus) ---------
+    # Paid on the valid branch only, scaled by the time-ramped ``r_collision``
+    # (so a spawn-on-top contact inside the warmup earns nothing):
+    #   R_bonus = r_collision * (collision_bonus + ego_fault_bonus * ego_fault)
+    # Size against GRPO group noise: with within-group reward std ~0.2, a bonus
+    # of 0.5 puts a collision ~2.5 sigma above its near-miss siblings; the dense
+    # terms alone leave that margin at ~0.1 (0.5 sigma, i.e. invisible).
+    collision_bonus: float = 0.0
+    ego_fault_bonus: float = 0.0
+    # --- approach-weight annealing (bootstrap -> sparse signal hand-off) -----
+    # Effective risk term: noisy_OR(r_ttc, w_app * r_approach) with w_app moving
+    # linearly from ``approach_coef`` to ``approach_coef_final`` over train
+    # iterations [approach_anneal_begin, approach_anneal_end] (end <= begin
+    # disables annealing; w_app then stays at approach_coef). The approach term
+    # is dense and trivially farmable (spawn far, drive to ~7 m, planner keeps
+    # separation), so left at full weight it absorbs the whole gradient; fully
+    # removing it would leave only near-zero-support TTC/collision signal.
+    approach_coef: float = 1.0
+    approach_coef_final: float = 1.0
+    approach_anneal_begin: int = 0
+    approach_anneal_end: int = 0
+
+    def __post_init__(self):
+        self.approach_d_scale = max(float(self.approach_d_scale), 1e-6)
+        self.approach_close_scale = max(float(self.approach_close_scale), 1e-6)
+        self.collision_window = max(float(self.collision_window), 1e-6)
+
+
+class PufferSimulator:
+    """Evaluate generated scenes: planner rollout + scalar reward assembly.
+
+    ``evaluate`` converts batched ``GeneratedScenes`` into per-scene rollout
+    metrics via the configured planner and assembles the DDPO training reward
+    plus per-component diagnostics.
     """
 
     def __init__(
         self,
-        *,
-        planner_cfg=None,
-        sim_steps: int = 91,
-        deterministic: bool | None = None,
-        ttc_tau: float = 3.0,
-        init_overlap_margin: float = 0.0,
-        init_overlap_penalty: float = 0.5,
-        init_overlap_gate_lo: float = 0.02,
-        init_overlap_gate_hi: float = 0.20,
-        goal_offlane_threshold: float = 3.0,
-        goal_onroad_threshold: float = 2.0,
-        goal_offlane_penalty: float = 0.25,
-        parking_mismatch_penalty: float = 0.5,
-        min_dist_coef: float = 0.0,
-        min_dist_dmax: float = 20.0,
-        gen_agent_parking_penalty: float = 0.0,
-        risk_coef: float = 1.0,
-        approach_d_safe: float = 6.0,
-        approach_d_scale: float = 2.0,
-        approach_close_delta: float = 2.0,
-        approach_close_scale: float = 1.0,
-        approach_warmup_time: float = 0.5,
-        lane_soft: float = 0.5,
-        collision_enabled: bool = False,
-        collision_coef: float = 0.0,
-        collision_warmup: float = 0.75,
-        collision_window: float = 0.5,
-        trivial_collision_t: float = 0.75,
-        trivial_collision_penalty: float = 0.5,
-        seed: int = 0,
-        backend: str = "numpy",
-        pufferdrive_root: str | None = None,
-        gen_invalid=None,
+        planner_cfg,
+        simulator_cfg: SimulatorConfig,
+        reward_cfg: RewardConfig,
     ):
-        """Initialize planner-backed reward evaluation.
-
-        Args:
+        """Args:
             planner_cfg: Mapping (OmegaConf node or dict) selecting the rollout
-                planner, e.g. ``{"name": "dummy"}``. When ``None``, a planner is
-                synthesised from the legacy ``backend`` / ``deterministic`` /
-                ``pufferdrive_root`` arguments (``numpy`` -> ``selfplay_drive``,
-                ``puffer`` -> ``puffer_drive``).
-            sim_steps: Maximum number of simulator steps per scene.
-            deterministic: Whether planner actions should be deterministic. If
-                ``None``, use the planner config default. Ignored when
-                ``planner_cfg`` is provided (set it there instead).
-            ttc_tau: Time-to-collision horizon (seconds) normalising the dense
-                criticality reward ``clip(1 - min_TTC/ttc_tau, 0, 1)``.
-            init_overlap_margin: Box-inflation margin (metres) for the t=0
-                vehicle-overlap (init_invalid) check; 0 rejects only true overlap
-                and allows bumper-to-bumper traffic-jam spawns.
-            goal_offlane_threshold: Lane-centerline distance in meters above
-                which a moving car's goal is considered off-lane.
-            goal_onroad_threshold: Lane-centerline distance in meters above which
-                a moving car's *spawn* is considered off-lane (folded into the
-                same off-lane penalty as the goal; no longer an exemption gate).
-            goal_offlane_penalty: Penalty scale applied to the off-lane
-                fraction (moving cars off-lane at spawn or goal) for each scene.
-            parking_mismatch_penalty: Penalty scale applied when generated
-                parking/static state disagrees with ``meta["gt_parking_mask"]``.
-            seed: RNG seed passed into the planner / simulator scenes.
-            backend: Legacy rollout backend selector used only when
-                ``planner_cfg`` is ``None``.
-            pufferdrive_root: Optional path to the PufferDrive checkout for the
-                ``puffer_drive`` planner. Defaults to ``<repo>/PufferDrive``.
+                planner by ``name`` plus its own settings, from
+                ``cfgs/planner/<name>.yaml``.
+            simulator_cfg: Rollout / metric-measurement parameters shared by
+                every planner.
+            reward_cfg: Scalar-assembly weights (this module only).
         """
-        self.ttc_tau = float(ttc_tau)
-        self.goal_offlane_penalty = float(goal_offlane_penalty)
-        # Init-overlap shaping. The overlap fraction (intersection / adv area)
-        # feeds a graded penalty: constraint += init_overlap_penalty * frac. An
-        # *invalid* init (adversary interpenetrating a neighbour, flagged by the
-        # init_invalid metric) additionally hard-gates out criticality, so overlap
-        # can never manufacture a fake near-miss / collision reward.
-        self.init_overlap_penalty = float(init_overlap_penalty)
-        # DEPRECATED: the smoothstep criticality gate was replaced by the hard
-        # init_invalid gate; these are kept for config back-compat but unused.
-        self.init_overlap_gate_lo = float(init_overlap_gate_lo)
-        self.init_overlap_gate_hi = float(init_overlap_gate_hi)
-        # DEPRECATED: parking is now a hard -1 (a parked adversary is rejected
-        # outright), so the gt-mismatch fraction penalty is no longer applied.
-        self.parking_mismatch_penalty = float(parking_mismatch_penalty)
-        # DEPRECATED (Phase 2): the old linear proximity bonus
-        # ``min_dist_coef * clip(1 - ego_adv_min_dist/min_dist_dmax, 0, 1)`` is
-        # superseded by the gated approach bonus below. Still accepted so legacy
-        # callers/configs do not break, but no longer drives the reward.
-        self.min_dist_coef = float(min_dist_coef)
-        self.min_dist_dmax = max(float(min_dist_dmax), 1e-6)
-        # Penalise a generated adversary that is parked (goal within
-        # MIN_DISTANCE_TO_GOAL of spawn) to force it to drive.
-        self.gen_agent_parking_penalty = float(gen_agent_parking_penalty)
+        self.cfg = reward_cfg
+        # Reject gate source: with a condition-violation check configured, the
+        # realized-vs-target metric supersedes the plain parked-adv gate (it
+        # already rejects a parked adversary whenever the target is
+        # motion=moving, and correctly ACCEPTS one when the target is
+        # motion=parked, which the raw parking gate would misflag).
+        self.gen_invalid_enabled = simulator_cfg.gen_invalid is not None
+        self.planner = build_planner(planner_cfg, simulator_cfg)
+        self._approach_coef = float(reward_cfg.approach_coef)
 
-        # --- Phase 2 shaping params ------------------------------------------
-        # Risk = noisy-OR of dense TTC and a *gated approach* bonus. The approach
-        # bonus only fires when the adversary both gets close (dmin < d_safe) AND
-        # actually closed in during the rollout (d0 - dmin > close_delta), so the
-        # policy cannot farm it by spawning the adversary next to the ego.
-        self.risk_coef = float(risk_coef)
-        self.approach_d_safe = float(approach_d_safe)
-        self.approach_d_scale = max(float(approach_d_scale), 1e-6)
-        self.approach_close_delta = float(approach_close_delta)
-        self.approach_close_scale = max(float(approach_close_scale), 1e-6)
-        # Continuous lane penalty ramps from lane_soft to goal_offlane_threshold
-        # (replaces the binary off-lane fraction, which is {0,1} for one agent).
-        self.lane_soft = float(lane_soft)
-        self.goal_offlane_threshold = float(goal_offlane_threshold)
-        # Collision is an extra *bonus* gated on collision time, not an override:
-        # late collisions ramp up, trivial early collisions (< trivial_collision_t)
-        # incur a penalty instead. Disabled by default (collision_enabled=False).
-        self.collision_enabled = bool(collision_enabled)
-        self.collision_coef = float(collision_coef)
-        self.collision_warmup = float(collision_warmup)
-        self.collision_window = max(float(collision_window), 1e-6)
-        self.trivial_collision_t = float(trivial_collision_t)
-        self.trivial_collision_penalty = float(trivial_collision_penalty)
+    @property
+    def approach_coef(self) -> float:
+        """Current (possibly annealed) weight on the approach term."""
+        return self._approach_coef
 
-        if planner_cfg is None:
-            name = _BACKEND_TO_PLANNER.get(backend, backend)
-            planner_cfg = {
-                "name": name,
-                "deterministic": deterministic,
-                "pufferdrive_root": pufferdrive_root,
-            }
-        params = RolloutParams(
-            sim_steps=int(sim_steps),
-            seed=int(seed),
-            init_overlap_margin=float(init_overlap_margin),
-            goal_offlane_threshold=float(goal_offlane_threshold),
-            goal_onroad_threshold=float(goal_onroad_threshold),
-            pufferdrive_root=pufferdrive_root,
-            collision_enabled=bool(collision_enabled),
-            approach_warmup_time=float(approach_warmup_time),
-            gen_invalid=gen_invalid,
+    def set_train_iteration(self, it: int) -> None:
+        """Advance the approach-weight annealing schedule to iteration ``it``.
+
+        Called by the training loop once per iteration (eval calls between
+        iterations reuse the latest weight, so train and eval rewards stay
+        comparable). A no-op unless the config enables annealing.
+        """
+        cfg = self.cfg
+        if cfg.approach_anneal_end <= cfg.approach_anneal_begin:
+            self._approach_coef = float(cfg.approach_coef)
+            return
+        t = (it - cfg.approach_anneal_begin) / (
+            cfg.approach_anneal_end - cfg.approach_anneal_begin
         )
-        self.planner = build_planner(planner_cfg, params)
-        # Back-compat: expose the native C backend for callers that poke at it
-        # directly (e.g. scripts/benchmark_ddpo_rollout_backends.py).
-        self.native_backend = getattr(self.planner, "backend", None)
+        t = min(max(t, 0.0), 1.0)
+        self._approach_coef = float(
+            cfg.approach_coef + t * (cfg.approach_coef_final - cfg.approach_coef)
+        )
 
     def _assemble_reward(self, m: dict) -> tuple[np.ndarray, dict]:
         """Compose the per-scene reward from rollout metrics.
 
         Three mutually exclusive branches, checked in order:
 
-          * park    (gen_agent_is_parked > 0): hard -1 -- a parked adversary
-            is not a critical scene.
-          * invalid (init_invalid: adversary interpenetrates a neighbour at
-            spawn): no criticality is credited, so reward = -R_constraint <= 0 --
-            an overlapping init can never manufacture a fake near-miss.
-          * valid:  ``reward = clip(R_criticality - R_constraint, -1, 1)``, with
-              R_criticality = risk_coef * [1 - (1-R_ttc)(1-R_approach)]  in [0, 1]
-              R_constraint  = goal_offlane_penalty * c_lane
+          * reject  (condition violation, or parked adversary when no condition
+            check is configured): not a critical scene; graded from
+            -invalid_penalty_base at the bucket boundary to -1 at
+            gap >= invalid_grade_scale (flat -1 when grading is disabled).
+          * init_invalid (adversary truly interpenetrates a neighbour at spawn,
+            overlap frac > 0): no criticality is credited, so reward =
+            -R_constraint <= 0 -- an overlapping init can never manufacture a
+            fake near-miss.
+          * valid:  ``reward = clip(R_criticality - R_constraint, -1, 1) + R_bonus``:
+              R_criticality = risk_coef * [1 - (1-R_ttc)(1-w_app*R_approach)]
+              R_constraint  = lane_penalty * (c_spawn_lane + c_goal_lane)
                               + init_overlap_penalty * init_overlap_frac
+              R_bonus       = r_collision * (collision_bonus
+                                             + ego_fault_bonus * ego_fault)
+            with w_app the annealed approach weight (``set_train_iteration``).
 
-        The overlap fraction still feeds the graded ``R_constraint`` penalty on
-        every branch, so the policy keeps a smooth "separate the boxes" gradient
-        even though the criticality validity gate is now hard. Collision does not
-        enter the reward (a contact still surfaces via the dense TTC term). All
-        components are returned so the training loop can log / normalise them.
+        Only true interpenetration hard-gates criticality; lane penalties are
+        soft-subtracted on the valid branch (gating them zeroed the reward of
+        every off-lane spawn geometry -- cut-ins, merges -- and taught the
+        policy to stay conservatively on-lane). The time-ramped collision bonus
+        is paid on the valid branch only, so a rejected or overlapping init
+        cannot buy reward with a crash. All components are returned so the
+        training loop can log / normalise them.
         """
+        cfg = self.cfg
         n = len(m["init_invalid"])
-        zeros = np.zeros(n, dtype=np.float32)
 
         # --- criticality ----------------------------------------------------
-        r_ttc = np.clip(1.0 - m["ego_min_ttc"] / self.ttc_tau, 0.0, 1.0).astype(np.float32)
+        r_ttc = np.clip(1.0 - m["ego_min_ttc"] / cfg.ttc_tau, 0.0, 1.0).astype(np.float32)
 
-        d0 = m.get("ego_adv_init_dist")
-        dmin = m.get("ego_adv_min_dist_warmup")
-        if dmin is None:
-            dmin = m.get("ego_adv_min_dist")
-        if d0 is not None and dmin is not None:
-            prox = _sigmoid((self.approach_d_safe - dmin) / self.approach_d_scale)
-            closing = _sigmoid(
-                (d0 - dmin - self.approach_close_delta) / self.approach_close_scale
-            )
-            r_approach = (prox * closing).astype(np.float32)
-            finite = np.isfinite(d0) & np.isfinite(dmin)
-            r_approach = np.where(finite, r_approach, 0.0).astype(np.float32)
-        else:
-            r_approach = zeros.copy()
+        # Approach bonus on the warmup-filtered min distance, so an adversary
+        # that only starts close (d0 - dmin == 0) scores low. Non-finite
+        # distances (no adversary in the scene) contribute nothing.
+        d0 = m["ego_adv_init_dist"]
+        dmin = m["ego_adv_min_dist_warmup"]
+        prox = _sigmoid((cfg.approach_d_safe - dmin) / cfg.approach_d_scale)
+        closing = _sigmoid((d0 - dmin - cfg.approach_close_delta) / cfg.approach_close_scale)
+        finite = np.isfinite(d0) & np.isfinite(dmin)
+        r_approach = np.where(finite, prox * closing, 0.0).astype(np.float32)
 
-        r_risk = (1.0 - (1.0 - r_ttc) * (1.0 - r_approach)).astype(np.float32)
+        w_app = self._approach_coef
+        r_risk = (1.0 - (1.0 - r_ttc) * (1.0 - w_app * r_approach)).astype(np.float32)
         # Raw criticality (positive term, [0, risk_coef]); hard-gated to 0 for
-        # parked / invalid scenes when the reward is assembled below.
-        criticality_raw = (self.risk_coef * r_risk).astype(np.float32)
+        # rejected / invalid scenes when the reward is assembled below.
+        criticality_raw = (cfg.risk_coef * r_risk).astype(np.float32)
 
-        # Collision is not rewarded; r_collision / c_trivial are kept purely as
-        # logged diagnostics (a contact still surfaces via the dense TTC term).
+        # Time-ramped collision indicator: 0 inside the warmup (a spawn-on-top
+        # contact earns nothing), 1 past warmup+window. Feeds the explicit
+        # collision / ego-fault bonus below; with both bonus weights at 0 it is
+        # a logged diagnostic only.
         collision = m["ego_collision"].astype(np.float32)
-        ctime = m.get("ego_collision_time")
-        if ctime is None:
-            ctime = np.full(n, np.inf, dtype=np.float32)
+        ctime = m["ego_collision_time"]
         r_collision = (
             collision
-            * _smoothstep(ctime, self.collision_warmup, self.collision_warmup + self.collision_window)
+            * _smoothstep(ctime, cfg.collision_warmup, cfg.collision_warmup + cfg.collision_window)
         ).astype(np.float32)
-        c_trivial = (collision * (ctime < self.trivial_collision_t)).astype(np.float32)
+        c_trivial = (collision * (ctime < cfg.trivial_collision_t)).astype(np.float32)
+        ego_fault = np.asarray(m["ego_fault_collision"], dtype=np.float32)
+        r_bonus = (
+            r_collision * (cfg.collision_bonus + cfg.ego_fault_bonus * ego_fault)
+        ).astype(np.float32)
 
         # --- constraints (>= 0, subtracted on every branch) -----------------
         # Continuous adversary overlap fraction (intersection / adversary area)
         # vs neighbours at spawn feeds the graded overlap penalty.
-        init_overlap_frac = np.asarray(m.get("init_overlap_frac", zeros), dtype=np.float32)
-        c_overlap = init_overlap_frac
-        
-        spawn_lane_d = np.asarray(m.get("spawn_lane_dist", zeros), dtype=np.float32)
-        c_spawn_lane = _smoothstep(spawn_lane_d, self.lane_soft, self.goal_offlane_threshold)
-        
-        goal_lane_d = np.asarray(m.get("goal_lane_dist", zeros), dtype=np.float32)
-        c_goal_lane = _smoothstep(goal_lane_d, self.lane_soft, self.goal_offlane_threshold)
-        
+        c_overlap = np.asarray(m["init_overlap_frac"], dtype=np.float32)
+        c_spawn_lane = _smoothstep(m["spawn_lane_dist"], cfg.lane_soft, cfg.lane_hard)
+        c_goal_lane = _smoothstep(m["goal_lane_dist"], cfg.lane_soft, cfg.lane_hard)
         constraint = (
-            self.goal_offlane_penalty * c_spawn_lane
-            + self.goal_offlane_penalty * c_goal_lane
-            + self.init_overlap_penalty * c_overlap
+            cfg.lane_penalty * (c_spawn_lane + c_goal_lane)
+            + cfg.init_overlap_penalty * c_overlap
         ).astype(np.float32)
 
         # --- assemble: reject -> init_invalid -> valid ----------------------
-        # reject:       a parked / condition-violating adversary is not a critical
-        #               scene -> hard -1. The condition-violation metric
-        #               (``gen_agent_is_invalid``, from RewardHookGenAgentInvalid)
-        #               supersedes the plain parked-adv gate when present: it
-        #               already rejects a parked adversary whenever the target is
-        #               motion=moving, and correctly ACCEPTS one when the target is
-        #               motion=parked (which the raw parking gate would misflag).
-        # init_invalid: an interpenetrating init can never earn criticality, so the
-        #               reward is just the (negative) constraint (always <= 0).
-        # valid:        reward = clip(criticality - constraint, -1, 1).
-        c_parking = np.asarray(m.get("gen_agent_is_parked", zeros), dtype=np.float32)
-        c_invalid = m.get("gen_agent_is_invalid")
-        if c_invalid is not None:
-            c_reject = np.asarray(c_invalid, dtype=np.float32)
+        c_parking = np.asarray(m["gen_agent_is_parked"], dtype=np.float32)
+        if self.gen_invalid_enabled:
+            c_reject = np.asarray(m["gen_agent_is_invalid"], dtype=np.float32)
+            reject_reason = m["gen_agent_invalid_reason"]
         else:
             c_reject = c_parking
+            reject_reason = np.full(n, "", dtype=object)
         reject = c_reject > 0
-        init_invalid = constraint > 0.0
+        # Hard gate on true spawn interpenetration only. Gating on ANY nonzero
+        # constraint (as before) zeroed criticality for every off-lane spawn as
+        # well, adding a ~risk_coef-high reward cliff at lane_soft and pruning
+        # exactly the aggressive geometries (cut-ins, merges) a critical
+        # adversary needs; those now keep their gradient and pay the soft
+        # lane penalty instead.
+        init_invalid = c_overlap > 0.0
         valid = ~(reject | init_invalid)
+
+        # Graded reject penalty: ramp from -invalid_penalty_base at the bucket
+        # boundary down to -1 at gap >= invalid_grade_scale, so rejected
+        # samples keep a within-group ordering ("less invalid is better")
+        # instead of a contrast-free flat -1. Grading needs the gap metric,
+        # which only the condition-violation check emits.
+        if self.gen_invalid_enabled and cfg.invalid_grade_scale > 0.0:
+            gap = np.asarray(m["gen_agent_invalid_gap"], dtype=np.float32)
+            c_invalid_sev = np.clip(gap / cfg.invalid_grade_scale, 0.0, 1.0).astype(np.float32)
+            base_pen = float(np.clip(cfg.invalid_penalty_base, 0.0, 1.0))
+            r_reject = -(base_pen + (1.0 - base_pen) * c_invalid_sev)
+        else:
+            c_invalid_sev = c_reject
+            r_reject = np.full(n, -1.0, dtype=np.float32)
 
         # Hard validity gate: criticality is only credited on valid scenes.
         criticality = np.where(valid, criticality_raw, 0.0).astype(np.float32)
+        # Valid branch: soft-subtract constraints, then pay the collision bonus
+        # OUTSIDE the clip so it can never be absorbed by an already-saturated
+        # dense reward (max valid reward = 1 + collision_bonus + ego_fault_bonus).
         total = np.select(
             [reject, init_invalid],
             [
-                np.full(n, -1.0, dtype=np.float32),
+                r_reject.astype(np.float32),
                 np.clip(-constraint, -1.0, 0.0),
             ],
-            default=np.clip(criticality_raw, 0.0, 1.0),
+            default=np.clip(criticality_raw - constraint, -1.0, 1.0) + r_bonus,
         ).astype(np.float32)
 
         components = {
@@ -319,13 +351,15 @@ class PufferDriveReward:
             "r_approach": r_approach,
             "r_risk": r_risk,
             "r_collision": r_collision,
+            "r_bonus": np.where(valid, r_bonus, 0.0).astype(np.float32),
             "criticality": criticality,
             "c_lane": c_spawn_lane + c_goal_lane,
             "c_spawn_lane": c_spawn_lane,
             "c_goal_lane": c_goal_lane,
             "c_parking": c_parking,
             "c_invalid": c_reject,
-            "c_invalid_reason": m.get("gen_agent_invalid_reason", np.full(n, "", dtype=object)),
+            "c_invalid_sev": c_invalid_sev,
+            "c_invalid_reason": reject_reason,
             "c_trivial": c_trivial,
             "c_overlap": c_overlap,
             "constraint": constraint,
@@ -347,44 +381,50 @@ class PufferDriveReward:
                 suitable for rollout visualization.
 
         Returns:
-            Dictionary of per-scene numpy arrays for reward, collision, offroad,
-            initial invalid state, goal completion, goal off-lane fraction, and
-            parking mismatch fraction. When ``record_trajectories`` is true, the
-            dictionary also contains a ``trajectories`` list.
+            Dictionary of per-scene numpy arrays: the assembled ``reward``, the
+            raw rollout metrics, and each reward component (r_ttc, r_approach,
+            criticality, c_lane, constraint, ...) for diagnostics / logging.
+            When ``record_trajectories`` is true, the dictionary also contains
+            a ``trajectories`` list.
         """
         result = self.planner.rollout(scenes, record_trajectories=record_trajectories)
         metrics = result.metrics
-        trajectories = result.trajectories
 
         rewards, components = self._assemble_reward(metrics)
 
-        n = scenes.num_scenes
-        inf = np.full(n, np.inf, dtype=np.float32)
-        zeros = np.zeros(n, dtype=np.float32)
         out = {
             "reward": rewards,
             "ego_collision": metrics["ego_collision"],
-            "ego_fault_collision": metrics.get("ego_fault_collision", zeros.copy()),
-            "ego_collision_time": metrics.get("ego_collision_time", inf.copy()),
+            "ego_fault_collision": metrics["ego_fault_collision"],
+            "ego_collision_time": metrics["ego_collision_time"],
             "ego_min_ttc": metrics["ego_min_ttc"],
             "ego_offroad": metrics["ego_offroad"],
+            # Off-road proxy (numpy planners only; the legacy C backend does not
+            # measure it, so these fall back to NaN instead of raising).
+            "ego_offroad_proxy": metrics.get(
+                "ego_offroad_proxy", np.full(len(rewards), np.nan, dtype=np.float32)
+            ),
+            "ego_offroad_frac": metrics.get(
+                "ego_offroad_frac", np.full(len(rewards), np.nan, dtype=np.float32)
+            ),
+            "ego_lane_dist_max": metrics.get(
+                "ego_lane_dist_max", np.full(len(rewards), np.nan, dtype=np.float32)
+            ),
             "init_invalid": metrics["init_invalid"],
-            "init_overlap_frac": metrics.get("init_overlap_frac", zeros.copy()),
+            "init_overlap_frac": metrics["init_overlap_frac"],
             "reached_goal": metrics["reached_goal"],
             "goal_offlane_frac": metrics["goal_offlane_frac"],
-            "goal_lane_dist": metrics.get("goal_lane_dist", zeros.copy()),
-            "spawn_lane_dist": metrics.get("spawn_lane_dist", zeros.copy()),
+            "goal_lane_dist": metrics["goal_lane_dist"],
+            "spawn_lane_dist": metrics["spawn_lane_dist"],
             "parking_mismatch_frac": metrics["parking_mismatch_frac"],
-            "ego_adv_min_dist": metrics.get("ego_adv_min_dist", inf.copy()),
-            "ego_adv_init_dist": metrics.get("ego_adv_init_dist", inf.copy()),
-            "ego_adv_min_dist_warmup": metrics.get("ego_adv_min_dist_warmup", inf.copy()),
-            "gen_agent_is_parked": metrics.get("gen_agent_is_parked", zeros.copy()),
-            "gen_agent_is_invalid": metrics.get("gen_agent_is_invalid", zeros.copy()),
+            "ego_adv_min_dist": metrics["ego_adv_min_dist"],
+            "ego_adv_init_dist": metrics["ego_adv_init_dist"],
+            "ego_adv_min_dist_warmup": metrics["ego_adv_min_dist_warmup"],
+            "gen_agent_is_parked": metrics["gen_agent_is_parked"],
         }
-        # Per-component reward arrays (r_ttc, r_approach, r_risk, criticality,
-        # c_lane, constraint, ...) for diagnostics / future per-component
-        # advantage normalisation.
+        if self.gen_invalid_enabled:
+            out["gen_agent_is_invalid"] = metrics["gen_agent_is_invalid"]
         out.update(components)
-        if trajectories is not None:
-            out["trajectories"] = trajectories
+        if result.trajectories is not None:
+            out["trajectories"] = result.trajectories
         return out

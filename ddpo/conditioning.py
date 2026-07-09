@@ -329,6 +329,13 @@ _ADV_COND_VOCAB = {
     "ego_dist": {"near": 0, "middle": 1, "mid": 1, "far": 2},
 }
 _ADV_COND_NUM = {"type": 3, "motion": 2, "goal_dist": 3, "ego_dist": 3}
+# Per-field null-token id = that field's bucket count. The conditioned DiT's
+# LabelEmbedder adds an unconditional row at index ``num_classes`` (trained via
+# cond_dropout_prob > 0); a field set to null in adv_cond_target draws this id, so
+# the frozen embedder looks it up as the trained null embedding (genuinely
+# unconstrained) and the reward invalid-check skips the field. MUST match
+# ``_ADV_COND_NULL`` in ddpo/reward_hooks.py.
+_ADV_COND_NULL = {f: n for f, n in _ADV_COND_NUM.items()}
 
 
 def _resolve_adv_label(field: str, value) -> int:
@@ -351,14 +358,19 @@ def _resolve_adv_label(field: str, value) -> int:
 
 
 def _parse_adv_field(field: str, spec) -> list:
-    """One field's config value -> list of candidate bucket ids that the per-scene
-    draw samples from. ``None`` (or an empty list) -> every bucket (unconstrained);
-    a list/tuple -> that explicit set; a scalar -> a single fixed value."""
+    """One field's config value -> list of candidate label ids that the per-scene
+    draw samples from.
+
+    ``None`` (or an empty list) -> the null token (``_ADV_COND_NULL[field]``): the
+    field is fed the model's trained unconditional embedding and is skipped by the
+    reward invalid-check, i.e. genuinely unconstrained. A non-empty list/tuple ->
+    that explicit set of concrete buckets, sampled uniformly per scene. A scalar ->
+    a single fixed concrete bucket."""
     if spec is None:
-        return list(range(_ADV_COND_NUM[field]))
+        return [_ADV_COND_NULL[field]]
     if isinstance(spec, (list, tuple)):
         if len(spec) == 0:
-            return list(range(_ADV_COND_NUM[field]))
+            return [_ADV_COND_NULL[field]]
         return [_resolve_adv_label(field, v) for v in spec]
     return [_resolve_adv_label(field, spec)]
 
@@ -435,13 +447,17 @@ class LDMAdvConditioningPool:
         # from noise, so the real adv's labels are irrelevant -- a per-scene draw
         # from these candidates overrides them so the conditioned base model samples
         # the requested adversary category. Each field can be fixed (a single
-        # value), randomized over a set (a list), or unconstrained (null -> all
-        # buckets); see _parse_adv_cond_target. None (or enabled=false) keeps each
-        # scene's real adv labels.
+        # value), randomized over a set (a list), or unconstrained (null -> the
+        # model's null token, skipped by the reward check); see
+        # _parse_adv_cond_target. None (or enabled=false) keeps each scene's real
+        # adv labels.
         self.adv_cond_target = self._parse_adv_cond_target(adv_cond_target)
         n = min(int(pool_size), len(self.dataset))
         self.pool_indices = self.rng.permutation(len(self.dataset))[:n]
         self._cache: dict[int, object] = {}
+        # pool slot -> dataset index the slot actually resolved to after the
+        # driving-ego probing in _get (for reproducibility manifests).
+        self.resolved_scene_idx: dict[int, int] = {}
 
     def __len__(self) -> int:
         return len(self.pool_indices)
@@ -455,8 +471,9 @@ class LDMAdvConditioningPool:
 
         Accepts an OmegaConf/dict node with ``enabled`` plus the four fields. Each
         field may be a single value (fixed), a list (sampled uniformly per scene),
-        or null / omitted (sampled uniformly over all buckets). Values may be int
-        bucket ids or symbolic names -- type: vehicle/pedestrian/cyclist; motion:
+        or null / omitted (the null token: unconditional and skipped by the reward
+        invalid-check). Values may be int bucket ids or symbolic names -- type:
+        vehicle/pedestrian/cyclist; motion:
         parked/moving; goal_dist & ego_dist: near/middle/far. The per-scene draw
         itself happens in ``_apply_target_cond`` so it stays constant within a GRPO
         group. ``enabled=false`` keeps each scene's real adv labels (returns None).
@@ -578,6 +595,7 @@ class LDMAdvConditioningPool:
             d = self.build_scene(scene_idx, require_driving_ego=True)
             if d is not None:
                 self._cache[pool_idx] = d
+                self.resolved_scene_idx[pool_idx] = scene_idx
                 return d
         raise RuntimeError("no valid (driving-ego) conditioning graphs in dataset")
 

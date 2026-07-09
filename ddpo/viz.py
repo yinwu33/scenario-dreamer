@@ -96,7 +96,7 @@ def _fmt_float(value, *, signed: bool = False, digits: int = 2, inf: str = "inf"
 
 # Reward-component breakdown rendered (one list == one line, in order) under the
 # summary line when the caller passes a ``components`` dict (e.g. from
-# PufferDriveReward.evaluate). Each field is (short label, component key); missing
+# PufferSimulator.evaluate). Each field is (short label, component key); missing
 # keys are skipped so this degrades gracefully as new components are added. The
 # leading field of each line is that line's total. Layout mirrors the reward
 # assembly: constraint + its penalty terms, then criticality + its terms, then the

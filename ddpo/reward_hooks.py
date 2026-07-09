@@ -20,6 +20,13 @@ from .pufferdrive_sim import (
 
 TTC_SWEEP_HORIZON = 10.0
 
+# Per-field null-token id for the adv conditioning ([type, motion, goal_dist,
+# ego_dist]) = that field's bucket count (the LabelEmbedder's unconditional row).
+# A target equal to this means the field was set to null in adv_cond_target (fed
+# the model's null token, genuinely unconstrained), so the realized-vs-target
+# check skips it. MUST match ``_ADV_COND_NULL`` in ddpo/conditioning.py.
+_ADV_COND_NULL = (3, 2, 3, 3)  # (type, motion, goal_dist, ego_dist)
+
 
 @dataclass
 class GenInvalidCheck:
@@ -41,6 +48,84 @@ class GenInvalidCheck:
     check_motion: bool = True
     check_goal_dist: bool = True
     check_ego_dist: bool = True
+
+
+def _bucket_gap(dist: float, bucket: int, near: float, far: float) -> float:
+    """Metres from ``dist`` to the near(0)/middle(1)/far(2) target ``bucket``.
+
+    0.0 when ``dist`` already falls inside the bucket's interval
+    ([0, near) / [near, far) / [far, inf))."""
+    if bucket == 0:
+        return max(dist - near, 0.0)
+    if bucket == 1:
+        return max(near - dist, dist - far, 0.0)
+    return max(far - dist, 0.0)
+
+
+def gen_invalid_gap(
+    check,               # GenInvalidCheck or any object with the same fields
+    tgt,                 # [type, motion, goal_dist, ego_dist] target bucket ids
+    realized_type: int,  # condition-space type id (vehicle=0 / ped=1 / cyc=2)
+    goal_dist: float,    # ||goal - spawn|| of the adversary (m)
+    ego_dist: float,     # ||adv spawn - ego spawn|| (m)
+) -> tuple[bool, str, float]:
+    """Realized-vs-target condition check with a graded distance-to-valid gap.
+
+    Shared by ``RewardHookGenAgentInvalid`` (numpy SimScene backends) and
+    ``add_static_metrics`` (backends that own their loop) so both emit identical
+    ``gen_agent_is_invalid`` / ``gen_agent_invalid_reason`` /
+    ``gen_agent_invalid_gap`` metrics. A field whose target is the null token
+    was generated unconditionally (``adv_cond_target: null``) and is skipped.
+
+    Returns ``(invalid, reason, gap)`` where ``gap`` is how many metres the
+    realized scalar sits outside the target bucket, maximised over the violated
+    distance checks (motion / goal_dist / ego_dist); a wrong TYPE is categorical
+    -- no metric distance exists -- and yields ``inf`` (full severity). A valid
+    adversary returns ``(False, "", 0.0)``. The reward turns the gap into the
+    graded reject penalty (``RewardConfig.invalid_grade_scale``) so GRPO keeps a
+    "how far past the boundary" ordering instead of a flat -1 cliff.
+    """
+    bad = False
+    reason = []
+    gap = 0.0
+    if check.check_type and int(tgt[0]) != _ADV_COND_NULL[0]:
+        is_wrong_type = int(realized_type) != int(tgt[0])
+        bad |= is_wrong_type
+        if is_wrong_type:
+            reason.append(f"type:{int(realized_type)}!={int(tgt[0])}")
+            gap = float("inf")
+    if check.check_motion and int(tgt[1]) != _ADV_COND_NULL[1]:
+        realized_motion = 0 if goal_dist < check.min_distance_to_goal else 1
+        is_wrong_motion = realized_motion != int(tgt[1])
+        bad |= is_wrong_motion
+        if is_wrong_motion:
+            reason.append(f"motion:{realized_motion}!={int(tgt[1])}")
+            gap = max(gap, abs(goal_dist - check.min_distance_to_goal))
+    if check.check_goal_dist and int(tgt[2]) != _ADV_COND_NULL[2]:
+        realized_gd = _bucket_id(goal_dist, check.goaldist_near, check.goaldist_far)
+        is_wrong_goal_dist = realized_gd != int(tgt[2])
+        bad |= is_wrong_goal_dist
+        if is_wrong_goal_dist:
+            reason.append(f"goal_dist:{realized_gd}!={int(tgt[2])}")
+            gap = max(gap, _bucket_gap(goal_dist, int(tgt[2]), check.goaldist_near, check.goaldist_far))
+    if check.check_ego_dist and int(tgt[3]) != _ADV_COND_NULL[3]:
+        realized_ed = _bucket_id(ego_dist, check.egodist_near, check.egodist_far)
+        is_wrong_ego_dist = realized_ed != int(tgt[3])
+        bad |= is_wrong_ego_dist
+        if is_wrong_ego_dist:
+            reason.append(f"ego_dist:{realized_ed}!={int(tgt[3])}")
+            gap = max(gap, _bucket_gap(ego_dist, int(tgt[3]), check.egodist_near, check.egodist_far))
+    return bad, " ".join(reason), gap if bad else 0.0
+
+
+def _bucket_id(dist: float, near: float, far: float) -> int:
+    """Discretize a physical distance into near(0)/middle(1)/far(2). Matches
+    ``WaymoDatasetLDMAdv._bucket``."""
+    if dist < near:
+        return 0
+    if dist < far:
+        return 1
+    return 2
 
 
 @dataclass
@@ -421,6 +506,21 @@ class RewardHookTrajectory(RewardHook):
             tr["done"] = np.asarray(tr["done"], dtype=bool)
 
 
+def dist_to_lane_centerline(sim: SimScene, points: np.ndarray) -> np.ndarray:
+    """Distance from each point to the nearest lane-centerline segment."""
+    points = np.atleast_2d(np.asarray(points, dtype=np.float32))
+    if sim.seg_start.shape[0] == 0:
+        return np.full(points.shape[0], np.inf, dtype=np.float32)
+    a, b = sim.seg_start, sim.seg_end
+    ab = b - a
+    denom = np.maximum((ab * ab).sum(-1), 1e-9)
+    ap = points[:, None, :] - a[None]
+    t = np.clip((ap * ab[None]).sum(-1) / denom[None], 0.0, 1.0)
+    proj = a[None] + t[..., None] * ab[None]
+    d = points[:, None, :] - proj
+    return np.sqrt((d * d).sum(-1)).min(axis=1)
+
+
 class RewardHookGoalOfflane(RewardHook):
     """Penalty feature for the DDPO-generated adversary placed off the lane graph.
 
@@ -438,18 +538,7 @@ class RewardHookGoalOfflane(RewardHook):
         self.onroad_threshold = float(onroad_threshold)
 
     def _dist_to_lane_centerline(self, sim: SimScene, points: np.ndarray) -> np.ndarray:
-        """Distance from each point to the nearest lane-centerline segment."""
-        points = np.atleast_2d(np.asarray(points, dtype=np.float32))
-        if sim.seg_start.shape[0] == 0:
-            return np.full(points.shape[0], np.inf, dtype=np.float32)
-        a, b = sim.seg_start, sim.seg_end
-        ab = b - a
-        denom = np.maximum((ab * ab).sum(-1), 1e-9)
-        ap = points[:, None, :] - a[None]
-        t = np.clip((ap * ab[None]).sum(-1) / denom[None], 0.0, 1.0)
-        proj = a[None] + t[..., None] * ab[None]
-        d = points[:, None, :] - proj
-        return np.sqrt((d * d).sum(-1)).min(axis=1)
+        return dist_to_lane_centerline(sim, points)
 
     def after_rollout(self, ctx: RolloutContext) -> None:
         frac = np.zeros(ctx.num_scenes, dtype=np.float32)
@@ -477,6 +566,55 @@ class RewardHookGoalOfflane(RewardHook):
         ctx.metrics["goal_offlane_frac"] = frac
         ctx.metrics["goal_lane_dist"] = goal_lane_dist
         ctx.metrics["spawn_lane_dist"] = spawn_lane_dist
+
+
+class RewardHookEgoOffroadProxy(RewardHook):
+    """Ego off-road proxy: per-step ego distance to the nearest lane centerline.
+
+    The maps carry lane centerlines only (no ROAD_EDGE entities), so the sim's
+    real off-road check never fires (``ego_offroad`` is always 0). This hook is
+    the cross-source-comparable substitute: the ego counts as off-road on a step
+    when its centre is farther than ``threshold`` metres from every lane
+    centerline. Steps after the scene finishes (goal reached) are not measured;
+    non-finite distances (scene without lane geometry) are skipped.
+
+    Metrics:
+      * ``ego_offroad_proxy``  -- 1.0 if any measured step was off-road
+      * ``ego_offroad_frac``   -- off-road fraction of the measured steps
+      * ``ego_lane_dist_max``  -- max centerline distance over measured steps
+    """
+
+    def __init__(self, threshold: float):
+        self.threshold = float(threshold)
+
+    def before_rollout(self, ctx: RolloutContext) -> None:
+        n = ctx.num_scenes
+        ctx.metrics["ego_offroad_proxy"] = np.zeros(n, dtype=np.float32)
+        ctx.metrics["ego_offroad_frac"] = np.zeros(n, dtype=np.float32)
+        ctx.metrics["ego_lane_dist_max"] = np.zeros(n, dtype=np.float32)
+        ctx.extras["ego_offroad_steps"] = np.zeros(n, dtype=np.int64)
+        ctx.extras["ego_offroad_measured"] = np.zeros(n, dtype=np.int64)
+
+    def before_step_scene(
+        self, ctx: RolloutContext, scene_idx: int, sim: SimScene
+    ) -> None:
+        if sim.n == 0:
+            return
+        d = float(dist_to_lane_centerline(sim, np.array([[sim.x[0], sim.y[0]]]))[0])
+        if not np.isfinite(d):
+            return
+        ctx.extras["ego_offroad_measured"][scene_idx] += 1
+        if d > ctx.metrics["ego_lane_dist_max"][scene_idx]:
+            ctx.metrics["ego_lane_dist_max"][scene_idx] = d
+        if d > self.threshold:
+            ctx.extras["ego_offroad_steps"][scene_idx] += 1
+            ctx.metrics["ego_offroad_proxy"][scene_idx] = 1.0
+
+    def after_rollout(self, ctx: RolloutContext) -> None:
+        measured = np.maximum(ctx.extras["ego_offroad_measured"], 1)
+        ctx.metrics["ego_offroad_frac"] = (
+            ctx.extras["ego_offroad_steps"] / measured
+        ).astype(np.float32)
 
 
 class RewardHookParkingMismatch(RewardHook):
@@ -607,10 +745,13 @@ class RewardHookGenAgentInvalid(RewardHook):
     generation is imperfect, so the realized adversary sometimes lands in a
     different bucket than requested. This recomputes the realized labels from the
     decoded scene (physical metres, same thresholds as the dataset) and flags a
-    mismatch on any *enabled* field, writing the per-scene 0/1 metric
-    ``gen_agent_is_invalid`` (a hard reward = -1, like the parked-adv gate it
-    generalises: when ``check_motion`` is on and the target is motion=moving, a
-    parked adversary is one such violation).
+    mismatch on any *enabled* field whose target is a concrete bucket (a field
+    whose target is the null token -- ``adv_cond_target: null`` -- was generated
+    unconditionally and is skipped), writing the per-scene 0/1 metric
+    ``gen_agent_is_invalid`` plus ``gen_agent_invalid_gap`` (metres outside the
+    target bucket; feeds the graded reject penalty, see ``gen_invalid_gap``).
+    Like the parked-adv gate it generalises: when ``check_motion`` is on and the
+    target is motion=moving, a parked adversary is one such violation.
 
     The condition target is carried in ``ctx.scenes.meta['adv_cond']`` (a
     ``[num_scenes, 4]`` long array set by the policy decode); scenes with no
@@ -643,29 +784,21 @@ class RewardHookGenAgentInvalid(RewardHook):
 
     @classmethod
     def from_check(cls, check: GenInvalidCheck) -> "RewardHookGenAgentInvalid":
-        """Build from the typed ``GenInvalidCheck`` carried on ``RolloutParams``."""
+        """Build from the typed ``GenInvalidCheck`` carried on ``SimulatorConfig``."""
         from dataclasses import asdict
 
         return cls(**asdict(check))
-
-    @staticmethod
-    def _bucket(dist: float, near: float, far: float) -> int:
-        """Discretize a physical distance into near(0)/middle(1)/far(2). Matches
-        ``WaymoDatasetLDMAdv._bucket``."""
-        if dist < near:
-            return 0
-        if dist < far:
-            return 1
-        return 2
 
     def before_rollout(self, ctx: RolloutContext) -> None:
         n = ctx.num_scenes
         is_invalid = np.zeros(n, dtype=np.float32)
         reasons = np.full(n, "", dtype=object)
+        gaps = np.zeros(n, dtype=np.float32)
         cond = ctx.scenes.meta.get("adv_cond")
         if cond is None:
             ctx.metrics["gen_agent_is_invalid"] = is_invalid
             ctx.metrics["gen_agent_invalid_reason"] = reasons
+            ctx.metrics["gen_agent_invalid_gap"] = gaps
             return
         if isinstance(cond, torch.Tensor):
             cond = cond.detach().cpu().numpy()
@@ -684,34 +817,13 @@ class RewardHookGenAgentInvalid(RewardHook):
                 sim.spawn[a, 0] - sim.spawn[0, 0],
                 sim.spawn[a, 1] - sim.spawn[0, 1],
             ))
-            bad = False
-            reason = []
-            if self.check_type:
-                # sim type ids are 1/2/3 (veh/ped/cyc); condition ids are 0/1/2.
-                realized_type = int(sim.ptype[a]) - 1
-                is_wrong_type = realized_type != int(tgt[0])
-                bad |= is_wrong_type
-                if is_wrong_type:
-                    reason.append(f"type:{realized_type}!={int(tgt[0])}")
-            if self.check_motion:
-                realized_motion = 0 if goal_dist < self.min_distance_to_goal else 1
-                is_wrong_motion = realized_motion != int(tgt[1])
-                bad |= is_wrong_motion
-                if is_wrong_motion:
-                    reason.append(f"motion:{realized_motion}!={int(tgt[1])}")
-            if self.check_goal_dist:
-                realized_gd = self._bucket(goal_dist, self.goaldist_near, self.goaldist_far)
-                is_wrong_goal_dist = realized_gd != int(tgt[2])
-                bad |= is_wrong_goal_dist
-                if is_wrong_goal_dist:
-                    reason.append(f"goal_dist:{realized_gd}!={int(tgt[2])}")
-            if self.check_ego_dist:
-                realized_ed = self._bucket(ego_dist, self.egodist_near, self.egodist_far)
-                is_wrong_ego_dist = realized_ed != int(tgt[3])
-                bad |= is_wrong_ego_dist
-                if is_wrong_ego_dist:
-                    reason.append(f"ego_dist:{realized_ed}!={int(tgt[3])}")
+            # sim type ids are 1/2/3 (veh/ped/cyc); condition ids are 0/1/2.
+            bad, reason, gap = gen_invalid_gap(
+                self, tgt, int(sim.ptype[a]) - 1, goal_dist, ego_dist
+            )
             is_invalid[s] = 1.0 if bad else 0.0
-            reasons[s] = " ".join(reason)
+            reasons[s] = reason
+            gaps[s] = gap
         ctx.metrics["gen_agent_is_invalid"] = is_invalid
         ctx.metrics["gen_agent_invalid_reason"] = reasons  # for logging / eval, not the reward
+        ctx.metrics["gen_agent_invalid_gap"] = gaps  # feeds the graded reject penalty

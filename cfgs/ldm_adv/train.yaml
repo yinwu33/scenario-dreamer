@@ -29,4 +29,16 @@ adv_weight: 1.0
 # "adv_only": freeze the base scene model and train only the adversary branch
 #             (LDMAdv -> DiT.freeze_non_adv_parameters); load base weights via
 #             the resume/ckpt path before switching to this mode.
-train_mode: all
+# "mixed": per scene, draw one of the sampling configurations (init_scene /
+#          init_agent / init_adv) from mode_probs, so the conditioned modes'
+#          (clean context, noisy target) inputs are in the training
+#          distribution. No new weights: warm-starting from an "all"
+#          checkpoint is supported and recommended over training from scratch.
+train_mode: mixed
+# Only used when train_mode == mixed. init_agent (lane-conditioned generation)
+# is off by default -- the DDPO critical-scene pipeline only needs init_adv;
+# give it mass only if lane-conditioned generation is actually used.
+mode_probs:
+  init_scene: 0.7
+  init_agent: 0.0
+  init_adv: 0.3

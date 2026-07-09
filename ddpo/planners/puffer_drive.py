@@ -11,13 +11,13 @@ import torch
 
 from ..interfaces import GeneratedScenes
 from ..pufferdrive_sim import load_sim_config
-from .base import RolloutParams, RolloutPlanner, RolloutResult, register_planner
+from .base import SimulatorConfig, RolloutPlanner, RolloutResult, register_planner
 from .static_metrics import add_static_metrics
 
 
 @register_planner("puffer_drive")
 class PufferDrivePlanner(RolloutPlanner):
-    def __init__(self, planner_cfg, params: RolloutParams, *, device: str | None = None):
+    def __init__(self, planner_cfg, params: SimulatorConfig, *, device: str | None = None):
         from planner.selfplay_drive.planner import load_planner, load_planner_config
 
         from ..native_pufferdrive import PufferBackend
@@ -30,7 +30,7 @@ class PufferDrivePlanner(RolloutPlanner):
         deterministic = (
             bool(load_planner_config().deterministic) if det is None else bool(det)
         )
-        root = planner_cfg.get("pufferdrive_root", None) or params.pufferdrive_root
+        root = planner_cfg.get("pufferdrive_root", None)
         self.backend = PufferBackend(
             planner=self.planner,
             device=self.device,

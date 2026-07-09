@@ -16,7 +16,7 @@ import numpy as np
 import torch
 
 from ..pufferdrive_sim import MAX_SPEED, SimScene
-from .base import NumpyPlanner, RolloutParams, register_planner
+from .base import NumpyPlanner, SimulatorConfig, register_planner
 
 PRED_CONN = 1
 SUCC_CONN = 2
@@ -55,7 +55,7 @@ class Projection:
 class CenterlineDummyPlanner(NumpyPlanner):
     """Rule planner that moves each controlled agent along lane centerlines."""
 
-    def __init__(self, planner_cfg, params: RolloutParams, *, device: str | None = None):
+    def __init__(self, planner_cfg, params: SimulatorConfig, *, device: str | None = None):
         super().__init__(planner_cfg, params, device=device)
         self.candidate_lanes = int(planner_cfg.get("candidate_lanes", 5))
         self.connect_radius = float(planner_cfg.get("connect_radius", 2.5))

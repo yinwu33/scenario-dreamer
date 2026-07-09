@@ -81,7 +81,7 @@ def main():
             traj, cond, k_idx, with_kl=ddpo_cfg.kl_coef > 0
         )
         old_lp = traj.old_logprob[:, k_idx]
-        loss, log = ddpo_loss(new_lp, old_lp, adv, ddpo_cfg, kl_term)
+        loss, log, _parts = ddpo_loss(new_lp, old_lp, adv, ddpo_cfg, kl_term)
         loss.backward()
         gnorm = torch.nn.utils.clip_grad_norm_(list(policy.trainable_parameters()), 1.0)
         # ratio should be ~1 on the same parameters; grads must be finite
