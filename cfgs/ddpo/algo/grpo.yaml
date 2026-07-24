@@ -1,0 +1,41 @@
+# GRPO: group-relative PPO-style DDPO update (per-context whitened advantages).
+#
+# The RL-algorithm axis of the DDPO flow, composed at ddpo.algo
+# (ddpo/algo@ddpo.algo: grpo). Every key maps 1:1 onto ddpo.ddpo_loss.DDPOConfig
+# (strict: unknown/missing keys raise). A future variant (e.g. ppo with a
+# non-group baseline) is a sibling yaml in this directory; switch with
+# `ddpo/algo@ddpo.algo=ppo` -- code reads cfg.algo either way.
+
+# Per-context (GRPO) grouping: batch_size/group_size distinct contexts, each
+# sampled group_size times; advantages whitened within group. 1 = legacy
+# global whitening.
+group_size: 8
+
+estimator: is
+clip_range: 1.0e-4
+kl_coef: 0.2
+adv_clip: 5.0
+adv_eps: 1.0e-6
+logratio_clip: 20.0
+adv_mode: zscore
+per_context: true
+group_skip_std: 1.0e-4
+# Anti-collapse guards (see run 3zjnupnh post-mortem):
+# A zero-std group no longer vanishes (skip) but is whitened against the
+# whole batch, so an all-rejected group still gets a repulsive gradient.
+degenerate_group: global
+# On-policy log-ratios are ~0; drop sample-steps whose |log ratio| exceeds
+# this instead of exp()-ing numerical junk into an unbounded repulsion term
+# (the PPO min() keeps exploded ratios exactly when the advantage is < 0).
+ratio_drop: 1.0
+# Adaptive KL-to-base: multiplicative feedback keeping measured KL near the
+# setpoint (healthy phase of 3zjnupnh sat at 0.005-0.02; collapse blew
+# through 0.5 within ~100 iters). 0 = fixed kl_coef.
+kl_target: 0.05
+kl_adapt_band: 1.5
+kl_adapt_rate: 1.5
+kl_coef_min: 0.01
+kl_coef_max: 100.0
+# Clip pg and KL gradients separately (each to grad_clip): a single global
+# clip lets an exploding pg term scale the KL pullback to nothing.
+decouple_kl_grad: true

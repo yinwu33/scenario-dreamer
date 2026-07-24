@@ -1,5 +1,5 @@
 defaults:
-- base
+- /train/base@_here_
 
 run_name: scenario_dreamer_ae_goal_waymo
 max_steps: 350000

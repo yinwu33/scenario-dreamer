@@ -3,9 +3,10 @@
 ``PufferSimulator`` is configured by three separate configs, each owning one
 concern (see ``cfgs/ddpo/ldm_adv.yaml``):
 
-  * ``planner_cfg``    -- WHICH policy drives the agents (``cfgs/planner/<name>.yaml``:
-    name, checkpoint, net arch, determinism, sim dynamics). Swapping planner
-    weights or models means editing/adding a planner yaml, nothing here.
+  * ``planner_cfg``    -- WHICH policy drives each role (``sut`` / ``env`` /
+    ``adv``, one ``cfgs/planner/<name>.yaml`` per role) plus the shared ``sim``
+    dynamics section. Swapping planner weights or models means editing/adding a
+    planner yaml or re-pointing a role default, nothing here.
   * ``simulator_cfg``  -- HOW the rollout measures metrics while stepping
     (``ddpo.planners.SimulatorConfig``: sim_steps, seed, overlap margin, lane
     thresholds, approach warmup, optional condition-violation check).
@@ -15,9 +16,9 @@ concern (see ``cfgs/ddpo/ldm_adv.yaml``):
 Configs are strict: every field is required and unknown keys raise, so a typo
 or a stale yaml fails at construction instead of silently using a default.
 
-The rollout is delegated to the pluggable ``RolloutPlanner`` selected by
-``planner_cfg`` (see ``ddpo.planners``); this module only assembles the scalar
-reward from the per-scene metrics the planner returns:
+The rollout is delegated to the ``RolloutRunner`` built from ``planner_cfg``
+(see ``ddpo.planners``); this module builds the metric hooks, injects them into
+the runner, and assembles the scalar reward from the per-scene metrics:
 
   * only the ego (scene agent 0) is scored;
   * the reward is assembled in three ordered branches -- reject / init_invalid /
@@ -57,8 +58,8 @@ reward from the per-scene metrics the planner returns:
   * ``evaluate`` also returns each reward component for diagnostics.
 
 Metric access is strict: a planner must emit every metric the reward consumes
-(the numpy ``SimScene`` planners always do, via the hooks in
-``ddpo.reward_hooks``); a missing key raises instead of silently zeroing a term.
+(the ``SimScene`` rollout always does, via the hooks in ``ddpo.reward_hooks``);
+a missing key raises instead of silently zeroing a term.
 """
 
 from __future__ import annotations
@@ -69,7 +70,20 @@ import numpy as np
 import torch
 
 from .interfaces import GeneratedScenes
-from .planners import SimulatorConfig, build_planner
+from .planners import RolloutRunner, SimulatorConfig
+from .reward_hooks import (
+    RewardHookGenAgentInvalid,
+    RewardHookGenAgentParking,
+    RewardHookEgoAdvMinDist,
+    RewardHookEgoCollision,
+    RewardHookEgoMinTTC,
+    RewardHookEgoOffroadProxy,
+    RewardHookGoalOfflane,
+    RewardHookInitOverlap,
+    RewardHookParkingMismatch,
+    RewardHookReachedGoal,
+    RewardHookTrajectory,
+)
 
 
 def _sigmoid(x: np.ndarray) -> np.ndarray:
@@ -170,8 +184,10 @@ class PufferSimulator:
     """Evaluate generated scenes: planner rollout + scalar reward assembly.
 
     ``evaluate`` converts batched ``GeneratedScenes`` into per-scene rollout
-    metrics via the configured planner and assembles the DDPO training reward
-    plus per-component diagnostics.
+    metrics via the per-role planners and assembles the DDPO training reward
+    plus per-component diagnostics. This module owns the metric set: it builds
+    the rollout hooks (``_make_hooks``) and injects them into the runner, so
+    WHAT is measured lives next to HOW the reward consumes it.
     """
 
     def __init__(
@@ -181,22 +197,46 @@ class PufferSimulator:
         reward_cfg: RewardConfig,
     ):
         """Args:
-            planner_cfg: Mapping (OmegaConf node or dict) selecting the rollout
-                planner by ``name`` plus its own settings, from
-                ``cfgs/planner/<name>.yaml``.
+            planner_cfg: Mapping (OmegaConf node or dict) with the shared
+                ``sim`` dynamics section plus one planner config per role
+                (``sut`` / ``env`` / ``adv``, each composed from
+                ``cfgs/planner/<name>.yaml``).
             simulator_cfg: Rollout / metric-measurement parameters shared by
                 every planner.
             reward_cfg: Scalar-assembly weights (this module only).
         """
         self.cfg = reward_cfg
+        self.simulator_cfg = simulator_cfg
         # Reject gate source: with a condition-violation check configured, the
         # realized-vs-target metric supersedes the plain parked-adv gate (it
         # already rejects a parked adversary whenever the target is
         # motion=moving, and correctly ACCEPTS one when the target is
         # motion=parked, which the raw parking gate would misflag).
         self.gen_invalid_enabled = simulator_cfg.gen_invalid is not None
-        self.planner = build_planner(planner_cfg, simulator_cfg)
+        self.runner = RolloutRunner(planner_cfg, simulator_cfg)
         self._approach_coef = float(reward_cfg.approach_coef)
+
+    def _make_hooks(self) -> list:
+        """Fresh metric hooks for one rollout: exactly the metric set
+        ``_assemble_reward`` / ``evaluate`` consume (strict access)."""
+        p = self.simulator_cfg
+        hooks = [
+            RewardHookInitOverlap(p.init_overlap_margin),
+            RewardHookEgoCollision(),
+            RewardHookEgoMinTTC(),
+            RewardHookEgoOffroadProxy(p.ego_offroad_threshold),
+            RewardHookEgoAdvMinDist(p.approach_warmup_time),
+            RewardHookTrajectory(),
+            RewardHookReachedGoal(self.runner.sim_cfg.goal_radius),
+            RewardHookGoalOfflane(p.goal_offlane_threshold, p.goal_onroad_threshold),
+            RewardHookParkingMismatch(),
+            RewardHookGenAgentParking(),
+        ]
+        # Condition-violation gate (ldm_adv, conditional): computed alongside the
+        # parked-adv diagnostic; the reward uses it in place of the parking gate.
+        if p.gen_invalid is not None:
+            hooks.append(RewardHookGenAgentInvalid.from_check(p.gen_invalid))
+        return hooks
 
     @property
     def approach_coef(self) -> float:
@@ -387,7 +427,9 @@ class PufferSimulator:
             When ``record_trajectories`` is true, the dictionary also contains
             a ``trajectories`` list.
         """
-        result = self.planner.rollout(scenes, record_trajectories=record_trajectories)
+        result = self.runner.rollout(
+            scenes, hooks=self._make_hooks(), record_trajectories=record_trajectories
+        )
         metrics = result.metrics
 
         rewards, components = self._assemble_reward(metrics)
@@ -399,17 +441,9 @@ class PufferSimulator:
             "ego_collision_time": metrics["ego_collision_time"],
             "ego_min_ttc": metrics["ego_min_ttc"],
             "ego_offroad": metrics["ego_offroad"],
-            # Off-road proxy (numpy planners only; the legacy C backend does not
-            # measure it, so these fall back to NaN instead of raising).
-            "ego_offroad_proxy": metrics.get(
-                "ego_offroad_proxy", np.full(len(rewards), np.nan, dtype=np.float32)
-            ),
-            "ego_offroad_frac": metrics.get(
-                "ego_offroad_frac", np.full(len(rewards), np.nan, dtype=np.float32)
-            ),
-            "ego_lane_dist_max": metrics.get(
-                "ego_lane_dist_max", np.full(len(rewards), np.nan, dtype=np.float32)
-            ),
+            "ego_offroad_proxy": metrics["ego_offroad_proxy"],
+            "ego_offroad_frac": metrics["ego_offroad_frac"],
+            "ego_lane_dist_max": metrics["ego_lane_dist_max"],
             "init_invalid": metrics["init_invalid"],
             "init_overlap_frac": metrics["init_overlap_frac"],
             "reached_goal": metrics["reached_goal"],

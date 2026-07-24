@@ -1,51 +1,95 @@
-"""Rollout-planner interface and registry for DDPO reward evaluation.
+"""Per-role planners + rollout runner for DDPO reward evaluation.
 
-A ``RolloutPlanner`` owns one rollout: given a batch of generated scenes it
-advances them, and returns the per-scene reward metrics (and optional
-trajectories). The reward module (``ddpo.reward``) stays planner-agnostic - it
-just asks the configured planner for metrics and assembles the scalar reward.
+``RolloutRunner`` owns the simulation: it groups a batch of ``GeneratedScenes``
+into numpy ``SimScene`` objects, partitions each scene's agents into three
+roles, and steps the scenes while firing externally supplied metric hooks (the
+reward layer decides WHAT to measure; see ``ddpo.reward``):
 
-Two extension points:
+  * ``sut`` -- the system under test: the ego, local agent 0 of every scene;
+  * ``adv`` -- THE generated adversary (``scenes.adv_local_idx``), if any;
+  * ``env`` -- every other controlled agent (real background traffic).
 
-  * ``NumpyPlanner`` - shared base for everything that drives the in-repo numpy
-    ``SimScene`` (the frozen ``selfplay_drive`` net, the rule-based ``dummy``
-    goal-seeker, future ``simpl``). Subclasses implement a single ``_advance``;
-    the SimScene step loop, metric hooks and trajectory recording are shared.
-  * ``RolloutPlanner`` directly - for backends that own their whole loop and do
-    not use ``SimScene`` (e.g. ``puffer_drive``'s C environment).
+Each role is driven by its own ``Planner``, selected per role in
+``cfgs/ddpo/<flow>.yaml`` (``planner.sut`` / ``planner.env`` / ``planner.adv``,
+each composed from ``cfgs/planner/<name>.yaml``). The only planner today is
+``bad_driver``, so all three roles default to it.
 
-Planners are selected by name through a registry; each name has its own
-``cfgs/planner/<name>.yaml``.
+A ``Planner`` is a two-phase policy over an agent subset: ``plan`` decides
+actions from the current world state WITHOUT mutating it, ``apply`` integrates
+them. The runner plans every role first and applies afterwards, so no role
+observes another role's same-step movement -- with identical role configs this
+reproduces the old single-planner batched semantics exactly.
 """
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Sequence
 
 import numpy as np
 import torch
+from omegaconf import OmegaConf
 
 from ..interfaces import GeneratedScenes
-from ..pufferdrive_sim import SimScene, load_sim_config
-from ..reward_hooks import (
-    GenInvalidCheck,
-    RewardHookGenAgentInvalid,
-    RewardHookGenAgentParking,
-    RewardHookEgoAdvMinDist,
-    RewardHookEgoCollision,
-    RewardHookEgoMinTTC,
-    RewardHookEgoOffroadProxy,
-    RewardHookGoalOfflane,
-    RewardHookInitOverlap,
-    RewardHookParkingMismatch,
-    RewardHookReachedGoal,
-    RolloutContext,
-    RewardHookTrajectory,
-    adv_local_indices,
-)
-from .type_utils import to_puffer_agent_types
+from ..pufferdrive_sim import TYPE_CYCLIST, TYPE_VEHICLE, SimScene, load_sim_config
+from ..reward_hooks import GenInvalidCheck, RolloutContext, adv_local_indices
+
+ROLES = ("sut", "env", "adv")
+
+# Per-agent conditioning obs slots of the frozen PufferDrive policy family
+# (trailing ego features; see SimScene). The values are policy inputs -- how
+# defensively THIS role's policy drives -- so they live in each role's planner
+# yaml (``conditioning:``), not in the shared rollout dynamics.
+CONDITIONING_FIELDS = ("collision_factor", "offroad_factor", "lane_width")
+
+
+def _parse_conditioning(role: str, cfg):
+    """Validate one role's ``conditioning`` node.
+
+    Returns ``None`` (``conditioning: null``: the policy ignores the
+    conditioning obs, its agents' slots stay 0) or a dict mapping each field to
+    a float (fixed value) or a (lo, hi) pair (per-agent uniform sample).
+    Strict: exactly the CONDITIONING_FIELDS keys.
+    """
+    if cfg is None:
+        return None
+    m = OmegaConf.to_container(cfg, resolve=True) if OmegaConf.is_config(cfg) else dict(cfg)
+    unknown = sorted(set(m) - set(CONDITIONING_FIELDS))
+    missing = sorted(set(CONDITIONING_FIELDS) - set(m))
+    if unknown or missing:
+        raise ValueError(
+            f"planner.{role}.conditioning: unknown keys {unknown}, missing keys {missing}; "
+            f"expected exactly {list(CONDITIONING_FIELDS)}"
+        )
+    out = {}
+    for key in CONDITIONING_FIELDS:
+        v = m[key]
+        if isinstance(v, (list, tuple)):
+            if len(v) != 2:
+                raise ValueError(
+                    f"planner.{role}.conditioning.{key}: a range must be [lo, hi], got {v!r}"
+                )
+            out[key] = (float(v[0]), float(v[1]))
+        else:
+            out[key] = float(v)
+    return out
+
+# One plan/apply work unit: the scene sim + the agent ids this role currently
+# drives in it (a subset of ``sim.controlled``).
+PlanItem = tuple[SimScene, np.ndarray]
+
+
+def to_puffer_agent_types(agent_types) -> np.ndarray:
+    """Convert dataset/model ids (0 veh, 1 ped, 2 cyc) to PufferDrive ids.
+
+    ``GeneratedScenes.agent_types`` deliberately keeps the model-side convention.
+    PufferDrive observations and collision logic use entity ids 1..3, so planners
+    convert at the boundary before constructing a sim scene or planner metrics.
+    """
+    return (
+        np.asarray(agent_types, dtype=np.int64) + 1
+    ).clip(TYPE_VEHICLE, TYPE_CYCLIST)
 
 
 @dataclass
@@ -85,34 +129,65 @@ class SimulatorConfig:
 
 @dataclass
 class RolloutResult:
-    """Output of a planner rollout consumed by the reward."""
+    """Output of a runner rollout consumed by the reward."""
 
     metrics: dict[str, np.ndarray]
     trajectories: list[dict[str, Any]] | None = None
 
 
-class RolloutPlanner(ABC):
-    """Advance generated scenes and return per-scene reward metrics."""
+class Planner(ABC):
+    """Two-phase action policy for one role's agents.
+
+    ``plan`` must not mutate world state (planner-internal state such as an
+    LSTM carry is fine): the runner calls every role's ``plan`` from the same
+    pre-step state before any ``apply`` runs.
+    """
+
+    def __init__(self, planner_cfg, params: SimulatorConfig, *, role: str, device: str | None = None):
+        self.params = params
+        self.role = role
 
     @abstractmethod
-    def rollout(
-        self, scenes: GeneratedScenes, *, record_trajectories: bool = False
-    ) -> RolloutResult:
-        """Roll ``scenes`` out and return the populated metrics / trajectories."""
+    def plan(self, items: Sequence[PlanItem]) -> list:
+        """Decide actions for every ``(sim, agent_ids)`` item; return them aligned."""
+
+    @abstractmethod
+    def apply(self, items: Sequence[PlanItem], plans: list) -> None:
+        """Integrate the actions previously returned by ``plan`` (in place)."""
 
 
-class NumpyPlanner(RolloutPlanner):
-    """Shared base for numpy ``SimScene`` rollouts (selfplay_drive, dummy, ...).
+class RolloutRunner:
+    """Advance generated scenes with per-role planners and return metrics.
 
-    The SimScene step loop, metric-hook lifecycle and trajectory recording are
-    fixed here; a subclass only implements ``_advance`` to decide and apply one
-    step of motion to the controlled agents of the active scenes.
+    The SimScene step loop, role partition and trajectory recording are fixed
+    here; the metric hooks are injected per rollout by the caller (the reward
+    layer owns the metric set).
     """
 
     def __init__(self, planner_cfg, params: SimulatorConfig, *, device: str | None = None):
         self.params = params
-        self.sim_cfg = load_sim_config(planner_cfg.get("sim", None))
+        # Simulation dynamics / conditioning shared by the whole rollout
+        # (the cfgs/rollout group, composed at ddpo.planner.sim) -- a property
+        # of the sim, not of any single role's policy. Strict: must be present
+        # and complete.
+        self.sim_cfg = load_sim_config(planner_cfg["sim"])
         self.rng = np.random.default_rng(int(params.seed))
+        self.planners: dict[str, Planner] = {}
+        self.conditioning: dict[str, dict | None] = {}
+        for role in ROLES:
+            role_cfg = planner_cfg.get(role)
+            if role_cfg is None:
+                raise ValueError(
+                    f"planner config must define '{role}' (per-role planners: {ROLES}); "
+                    "compose it via planner@ddpo.planner.<role>: <name> in the entry config"
+                )
+            if "conditioning" not in role_cfg:
+                raise ValueError(
+                    f"planner config for role '{role}' must define 'conditioning' "
+                    "(set conditioning: null if the policy ignores the conditioning obs)"
+                )
+            self.conditioning[role] = _parse_conditioning(role, role_cfg.get("conditioning"))
+            self.planners[role] = build_planner(role_cfg, params, role=role, device=device)
 
     # ------------------------------------------------------------------ build
     def _build_scenes(self, scenes: GeneratedScenes) -> list[SimScene]:
@@ -135,60 +210,73 @@ class NumpyPlanner(RolloutPlanner):
                     states[a_idx == s],
                     ptypes[a_idx == s],
                     lanes[l_idx == s],
-                    rng=self.rng,
                     sim_cfg=self.sim_cfg,
                 )
             )
-        # Per-agent conditioning override: give THE generated adversary its own
-        # collision_factor (0 = reckless, 2 = maximally defensive; see
-        # SimConfig.adv_collision_factor). Policy-conditioning planners read the
-        # factor from each agent's own observation slot, so only the adversary's
-        # driving style changes; rule-based planners ignore it.
-        if self.sim_cfg.adv_collision_factor is not None:
-            adv = adv_local_indices(scenes, scenes.num_scenes)
-            factor = np.float32(self.sim_cfg.adv_collision_factor)
-            for s, sim in enumerate(sims):
-                if adv[s] >= 0:
-                    sim.collision_factor[adv[s]] = factor
         return sims
 
-    def _make_hooks(self) -> list:
-        """Metric hooks shared by all numpy planners (identical metric set)."""
-        p = self.params
-        hooks = [
-            RewardHookInitOverlap(p.init_overlap_margin),
-            RewardHookEgoCollision(),
-            RewardHookEgoMinTTC(),
-            RewardHookEgoOffroadProxy(p.ego_offroad_threshold),
-            RewardHookEgoAdvMinDist(p.approach_warmup_time),
-            RewardHookTrajectory(),
-            RewardHookReachedGoal(self.sim_cfg.goal_radius),
-            RewardHookGoalOfflane(p.goal_offlane_threshold, p.goal_onroad_threshold),
-            RewardHookParkingMismatch(),
-            RewardHookGenAgentParking(),
-        ]
-        # Condition-violation gate (ldm_adv, conditional): computed alongside the
-        # parked-adv diagnostic; the reward uses it in place of the parking gate.
-        if p.gen_invalid is not None:
-            hooks.append(RewardHookGenAgentInvalid.from_check(p.gen_invalid))
-        return hooks
+    def _apply_conditioning(
+        self, sims: list[SimScene], role_ids: list[dict[str, np.ndarray]]
+    ) -> None:
+        """Fill each agent's conditioning obs slots from its role's planner cfg.
 
-    # --------------------------------------------------------------- advance
-    @abstractmethod
-    def _advance(self, sims: list[SimScene], active: list[int]) -> None:
-        """Decide + apply one step of motion to every active scene (in place).
-
-        The runner has already fired ``before_step_scene`` hooks; afterwards it
-        runs ``update_metrics`` / ``goal_step`` / ``after_step_scene`` per scene.
+        The conditioned frozen policy reads the factors from each agent's own
+        observation slot, so per-role values change only that role's driving
+        style; rule-based planners ignore the slots (conditioning: null). E.g.
+        the adv role runs the reckless bad_driver variant (collision_factor 0)
+        so ONLY the adversary stops yielding -- two mutually avoidant agents
+        almost never collide (8rlw8ay8: collision rate pinned at ~2% with
+        adv_dist plateauing at ~7 m -- the planner's separation, not the
+        model's choice).
         """
+        for s, sim in enumerate(sims):
+            for role, cond in self.conditioning.items():
+                if cond is None:
+                    continue
+                ids = role_ids[s][role]
+                if not len(ids):
+                    continue
+                for field, value in cond.items():
+                    arr = getattr(sim, field)
+                    if isinstance(value, tuple):
+                        lo, hi = value
+                        arr[ids] = self.rng.uniform(lo, hi, len(ids)).astype(np.float32)
+                    else:
+                        arr[ids] = np.float32(value)
+
+    def _assign_roles(
+        self, scenes: GeneratedScenes, sims: list[SimScene]
+    ) -> list[dict[str, np.ndarray]]:
+        """Static per-scene agent-id sets for each role.
+
+        The sets partition ALL agent ids; per step they are intersected with the
+        scene's current ``controlled`` (agents can retire mid-rollout).
+        """
+        adv = adv_local_indices(scenes, scenes.num_scenes)
+        out = []
+        for s, sim in enumerate(sims):
+            a = int(adv[s])
+            sut = np.array([0], dtype=np.int64)
+            adv_ids = (
+                np.array([a], dtype=np.int64) if a > 0 else np.empty(0, dtype=np.int64)
+            )
+            env = np.setdiff1d(np.arange(sim.n, dtype=np.int64), np.concatenate([sut, adv_ids]))
+            out.append({"sut": sut, "env": env, "adv": adv_ids})
+        return out
 
     # --------------------------------------------------------------- rollout
     @torch.no_grad()
     def rollout(
-        self, scenes: GeneratedScenes, *, record_trajectories: bool = False
+        self,
+        scenes: GeneratedScenes,
+        *,
+        hooks: list,
+        record_trajectories: bool = False,
     ) -> RolloutResult:
+        """Roll ``scenes`` out under ``hooks`` and return metrics / trajectories."""
         sims = self._build_scenes(scenes)
-        hooks = self._make_hooks()
+        role_ids = self._assign_roles(scenes, sims)
+        self._apply_conditioning(sims, role_ids)
         m = len(sims)
         ctx = RolloutContext(
             scenes=scenes,
@@ -221,7 +309,20 @@ class NumpyPlanner(RolloutPlanner):
             if not active:
                 break
 
-            self._advance(sims, active)
+            # Two-phase advance: every role plans from the same pre-step state,
+            # then all actions are applied (no role sees another role's
+            # same-step movement).
+            staged = []
+            for role, planner in self.planners.items():
+                items: list[PlanItem] = []
+                for s in active:
+                    ids = np.intersect1d(role_ids[s][role], sims[s].controlled)
+                    if len(ids):
+                        items.append((sims[s], ids))
+                if items:
+                    staged.append((planner, items, planner.plan(items)))
+            for planner, items, plans in staged:
+                planner.apply(items, plans)
 
             for s in active:
                 sims[s].update_metrics()
@@ -242,33 +343,19 @@ class NumpyPlanner(RolloutPlanner):
         return RolloutResult(metrics=ctx.metrics, trajectories=ctx.trajectories)
 
 
-# ---------------------------------------------------------------- registry
-_REGISTRY: dict[str, Callable[..., RolloutPlanner]] = {}
-
-
-def register_planner(name: str):
-    """Class decorator registering a planner under ``name``."""
-
-    def deco(cls):
-        _REGISTRY[name] = cls
-        return cls
-
-    return deco
-
-
-def build_planner(planner_cfg, params: SimulatorConfig, *, device: str | None = None) -> RolloutPlanner:
-    """Instantiate the planner named by ``planner_cfg['name']``.
+# ---------------------------------------------------------------- factory
+def build_planner(
+    planner_cfg, params: SimulatorConfig, *, role: str, device: str | None = None
+) -> Planner:
+    """Instantiate the planner named by ``planner_cfg['name']`` for one role.
 
     ``planner_cfg`` is any mapping with a ``name`` key (an OmegaConf node from
-    ``cfgs/planner/<name>.yaml`` or a plain dict). Importing this module's
-    package registers the built-in planners.
+    ``cfgs/planner/<name>.yaml`` or a plain dict). ``bad_driver`` is the only
+    planner; the explicit check keeps stale configs failing loudly.
     """
+    from .bad_driver import BadDriverPlanner
+
     name = planner_cfg.get("name")
-    if name is None:
-        raise ValueError("planner config must define a 'name'")
-    name = str(name)
-    if name not in _REGISTRY:
-        raise ValueError(
-            f"unknown planner '{name}'; registered: {sorted(_REGISTRY)}"
-        )
-    return _REGISTRY[name](planner_cfg, params, device=device)
+    if str(name) != "bad_driver":
+        raise ValueError(f"unknown planner {name!r}; only 'bad_driver' is available")
+    return BadDriverPlanner(planner_cfg, params, role=role, device=device)

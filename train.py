@@ -260,10 +260,10 @@ def train_autoencoder(cfg, save_dir=None, model_cls=ScenarioDreamerAutoEncoder):
 @hydra.main(version_base=None, config_path=CONFIG_PATH, config_name="config")
 def main(cfg):
     # DDPO fine-tuning has its own RL training loop (not PyTorch Lightning) and
-    # needs the full root cfg (both cfg.ddpo and cfg.dm_goal), so it is dispatched
+    # needs the full root cfg (both cfg.ddpo and cfg.ldm_adv), so it is dispatched
     # before the generic registry collapse below. The import is lazy because it
     # pulls in PufferDrive-specific deps only needed on this path.
-    #   python train.py --config-name config_critical_scene_dm_goal_ddpm
+    #   python train.py --config-name config_critical_scene_ldm_adv_ddpo
     if cfg.model_name == 'ddpo':
         from ddpo.train_loop import run_ddpo
         run_ddpo(cfg)

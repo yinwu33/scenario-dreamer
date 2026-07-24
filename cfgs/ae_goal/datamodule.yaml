@@ -1,5 +1,5 @@
 defaults:
-- base
+- /datamodule/base@_here_
 
 _target_: datamodules.waymo.waymo_datamodule_ae_goal.WaymoDataModuleAEGoal
 

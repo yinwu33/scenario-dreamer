@@ -1,5 +1,5 @@
 defaults:
-- waymo_base
+- /dataset/waymo_base@_here_
 
 # reuse the SDC-centered selfplay pickles (same source as the dm_goal pipeline)
 dataset_path: ${dataset_root}/scene_goal_preprocess_waymo # source of preprocessed goal-augmented scenes

@@ -1,29 +1,31 @@
-"""Pluggable rollout planners for DDPO reward evaluation.
+"""Per-role rollout planners for DDPO reward evaluation.
 
-Importing this package registers the built-in planners (``dummy``,
-``centerline_dummy``, ``selfplay_drive``, ``bad_driver``, ``puffer_drive``);
-pick one by name via ``build_planner``.
+``RolloutRunner`` steps the scenes with one ``Planner`` per role (``sut`` /
+``env`` / ``adv``; ``BadDriverPlanner`` is the only implementation) and fires
+the metric hooks injected by the reward layer. Roles are composed per flow via
+``planner@ddpo.planner.<role>: <name>``.
 """
 
 from __future__ import annotations
 
 from .base import (
-    NumpyPlanner,
-    SimulatorConfig,
-    RolloutPlanner,
+    ROLES,
+    Planner,
     RolloutResult,
+    RolloutRunner,
+    SimulatorConfig,
     build_planner,
-    register_planner,
+    to_puffer_agent_types,
 )
-
-# Side-effect imports: register the built-in planners.
-from . import dummy, centerline_dummy, selfplay_drive, bad_driver, puffer_drive  # noqa: E402,F401
+from .bad_driver import BadDriverPlanner
 
 __all__ = [
-    "NumpyPlanner",
-    "SimulatorConfig",
-    "RolloutPlanner",
+    "ROLES",
+    "BadDriverPlanner",
+    "Planner",
     "RolloutResult",
+    "RolloutRunner",
+    "SimulatorConfig",
     "build_planner",
-    "register_planner",
+    "to_puffer_agent_types",
 ]

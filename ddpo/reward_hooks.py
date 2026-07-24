@@ -71,8 +71,7 @@ def gen_invalid_gap(
 ) -> tuple[bool, str, float]:
     """Realized-vs-target condition check with a graded distance-to-valid gap.
 
-    Shared by ``RewardHookGenAgentInvalid`` (numpy SimScene backends) and
-    ``add_static_metrics`` (backends that own their loop) so both emit identical
+    Used by ``RewardHookGenAgentInvalid`` to emit the
     ``gen_agent_is_invalid`` / ``gen_agent_invalid_reason`` /
     ``gen_agent_invalid_gap`` metrics. A field whose target is the null token
     was generated unconditionally (``adv_cond_target: null``) and is skipped.

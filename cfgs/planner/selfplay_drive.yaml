@@ -1,3 +1,0 @@
-# Frozen PufferDrive selfplay_drive network + in-repo numpy classic dynamics.
-name: selfplay_drive
-deterministic: true   # null -> use the planner checkpoint's config default

@@ -1,13 +1,13 @@
-"""DDPO fine-tuning loops against a frozen PufferDrive planner.
+"""DDPO fine-tuning loop against a frozen PufferDrive planner.
 
 This module holds the actual training loop. It is dispatched from train.py when
 ``model_name == 'ddpo'`` (e.g. ``python train.py --config-name
-config_critical_scene_dm_goal_ddpm``). Heavy / PufferDrive-specific imports live
+config_critical_scene_ldm_adv_ddpo``). Heavy / PufferDrive-specific imports live
 at module top level here so they are only paid when the ddpo path is actually
 taken (train.py imports this module lazily inside its dispatch branch).
 
 Pipeline per iteration:
-    ConditioningPool.sample_batch(B)          # real conditioning graphs
+    LDMAdvConditioningPool.sample_batch(B)    # real conditioning graphs
     policy.sample(cond)                       # record denoising trajectory + logprob
     PufferSimulator.evaluate(scenes)          # numpy sim port + frozen planner
     compute_advantages -> ddpo_loss over k random denoising steps (+ optional KL)
@@ -20,16 +20,13 @@ import numpy as np
 import torch
 from omegaconf import OmegaConf
 
-from ddpo.conditioning import ConditioningPool, LDMAdvConditioningPool, LDMGoalConditioningPool
+from ddpo.conditioning import LDMAdvConditioningPool
 from ddpo.ddpo_loss import AdaptiveKLController, DDPOConfig, compute_advantages, ddpo_loss
-from ddpo.policy import DMFixedMapAgentGoalDDPOPolicy, DMGoalDDPOPolicy
-from ddpo.policy_ldm import LDMGoalDDPOPolicy
 from ddpo.policy_ldm_adv import LDMAdvDDPOPolicy
 from ddpo.planners import SimulatorConfig
 from ddpo.reward import PufferSimulator, RewardConfig
 from ddpo.reward_hooks import GenInvalidCheck
 from ddpo.interfaces import GeneratedScenes
-from datasets.waymo.dataset_dm_fixed_map_agent_goal_waymo import WaymoDatasetDMFixedMapAgentGoal
 from utils.train_helpers import cache_latent_stats, set_latent_stats
 
 
@@ -47,57 +44,10 @@ def _cfg_get_renamed(cfg, key: str, legacy_key: str, default):
 
 
 def _build_policy_and_pool(cfg_root, cfg, device: str):
-    model_type = cfg.get("model_type", "dm_goal")
+    model_type = cfg.get("model_type", "ldm_adv")
     dataset_name = cfg_root.dataset_name.name
 
-    if model_type == "dm_goal":
-        _set_dataset_name(cfg_root.dm_goal, dataset_name)
-        policy = DMGoalDDPOPolicy(
-            cfg_root.dm_goal,
-            ckpt_path=cfg.model_ckpt,
-            mode=cfg.mode,
-            device=device,
-            use_ema_weights=cfg.get("use_ema_weights", True),
-            inpaint_noised=cfg.get("inpaint_noised", True),
-            control_ego=cfg.get("control_ego", True),
-            control_agent_num=cfg.get("control_agent_num", -1),
-            sampler=cfg.get("sampler", "ddpm"),
-            ddim_steps=cfg.get("ddim_steps", None),
-            ddim_eta=cfg.get("ddim_eta", 1.0),
-        )
-        pool = ConditioningPool(
-            cfg_root.dm_goal.dataset,
-            split_name=cfg.train_split,
-            pool_size=cfg.pool_size,
-            device=device,
-            seed=cfg.seed,
-            control_agent_num=cfg.get("control_agent_num", -1),
-            ego_goal_override=cfg.get("ego_goal_override", None),
-        )
-        eval_dataset_cfg = cfg_root.dm_goal.dataset
-    elif model_type == "ldm_goal":
-        _set_dataset_name(cfg_root.ldm_goal, dataset_name)
-        _set_dataset_name(cfg_root.ae_goal, dataset_name)
-        if not Path(cfg_root.ldm_goal.dataset.latent_stats_path).exists():
-            cache_latent_stats(cfg_root.ldm_goal)
-        ldm_cfg = set_latent_stats(cfg_root.ldm_goal)
-        policy = LDMGoalDDPOPolicy(
-            ldm_cfg,
-            cfg_root.ae_goal,
-            ldm_ckpt=cfg.ldm_ckpt,
-            ae_ckpt=cfg.ae_ckpt,
-            device=device,
-            use_ema_weights=cfg.get("use_ema_weights", True),
-        )
-        pool = LDMGoalConditioningPool(
-            ldm_cfg.dataset,
-            split_name=cfg.train_split,
-            pool_size=cfg.pool_size,
-            device=device,
-            seed=cfg.seed,
-        )
-        eval_dataset_cfg = ldm_cfg.dataset
-    elif model_type == "ldm_adv":
+    if model_type == "ldm_adv":
         _set_dataset_name(cfg_root.ldm_adv, dataset_name)
         _set_dataset_name(cfg_root.ae_goal, dataset_name)
         if not Path(cfg_root.ldm_adv.dataset.latent_stats_path).exists():
@@ -126,33 +76,6 @@ def _build_policy_and_pool(cfg_root, cfg, device: str):
             adv_cond_target=cfg.get("adv_cond_target", None),
         )
         eval_dataset_cfg = ldm_cfg.dataset
-    elif model_type == "dm_fixed_map_agent_goal":
-        _set_dataset_name(cfg_root.dm_fixed_map_agent_goal, dataset_name)
-        policy = DMFixedMapAgentGoalDDPOPolicy(
-            cfg_root.dm_fixed_map_agent_goal,
-            ckpt_path=cfg.model_ckpt,
-            mode=cfg.mode,
-            device=device,
-            use_ema_weights=cfg.get("use_ema_weights", True),
-            inpaint_noised=cfg.get("inpaint_noised", True),
-            control_ego=cfg.get("control_ego", True),
-            control_agent_num=cfg.get("control_agent_num", -1),
-            sampler=cfg.get("sampler", "ddpm"),
-            ddim_steps=cfg.get("ddim_steps", None),
-            ddim_eta=cfg.get("ddim_eta", 1.0),
-            force_driving=cfg.get("force_driving", True),
-        )
-        pool = ConditioningPool(
-            cfg_root.dm_fixed_map_agent_goal.dataset,
-            split_name=cfg.train_split,
-            pool_size=cfg.pool_size,
-            device=device,
-            seed=cfg.seed,
-            control_agent_num=cfg.get("control_agent_num", -1),
-            ego_goal_override=cfg.get("ego_goal_override", None),
-            dataset_cls=WaymoDatasetDMFixedMapAgentGoal,
-        )
-        eval_dataset_cfg = cfg_root.dm_fixed_map_agent_goal.dataset
     else:
         raise ValueError(f"Unsupported ddpo.model_type: {model_type}")
 
@@ -183,12 +106,6 @@ def _build_gen_invalid(cfg, dataset_cfg):
 
 
 def _default_run_name(cfg, model_type: str) -> str:
-    if model_type == "dm_goal":
-        if cfg.get("sampler", "ddpm") == "ddim":
-            return f"ddpo_dm_goal_{cfg.mode}_ddim{cfg.ddim_steps}_eta{cfg.ddim_eta}"
-        return f"ddpo_dm_goal_{cfg.mode}"
-    if model_type == "dm_fixed_map_agent_goal":
-        return f"ddpo_dm_fixed_map_agent_goal_{cfg.mode}"
     if model_type == "ldm_adv":
         if cfg.get("sampler", "ddpm") == "ddim":
             return f"ddpo_ldm_adv_ddim{cfg.ddim_steps}_eta{cfg.ddim_eta}"
@@ -806,7 +723,7 @@ def run_ddpo(cfg_root):
         ),
         reward_cfg=RewardConfig(**OmegaConf.to_container(cfg.reward, resolve=True)),
     )
-    ddpo_cfg = DDPOConfig(**OmegaConf.to_container(cfg.ddpo, resolve=True))
+    ddpo_cfg = DDPOConfig(**OmegaConf.to_container(cfg.algo, resolve=True))
     # Adaptive KL-to-base coefficient (inert unless ddpo.kl_target > 0); its
     # current coef is checkpointed so a resume keeps the adapted trust region.
     kl_ctrl = AdaptiveKLController(ddpo_cfg)
@@ -872,37 +789,16 @@ def run_ddpo(cfg_root):
     eval_every = int(cfg.get("eval_every", 0))
     eval_pool = None
     if eval_every > 0:
-        if model_type == "ldm_goal":
-            pool_cls = LDMGoalConditioningPool
-            prune_kwargs = {}
-            pool_kwargs = {}
-        elif model_type == "ldm_adv":
-            pool_cls = LDMAdvConditioningPool
-            prune_kwargs = {}
-            pool_kwargs = {
-                "min_ego_drive": cfg.get("min_ego_drive", 10.0),
-                "prune_base_to_ego": cfg.get("prune_base_to_ego", False),
-                "insert_adv_as_extra": cfg.get("insert_adv_as_extra", False),
-                "adv_cond_target": cfg.get("adv_cond_target", None),
-            }
-        else:
-            pool_cls = ConditioningPool
-            prune_kwargs = {
-                "control_agent_num": cfg.get("control_agent_num", -1),
-                "ego_goal_override": cfg.get("ego_goal_override", None),
-            }
-            pool_kwargs = {}
-            if model_type == "dm_fixed_map_agent_goal":
-                pool_kwargs["dataset_cls"] = WaymoDatasetDMFixedMapAgentGoal
-
-        eval_pool = pool_cls(
+        eval_pool = LDMAdvConditioningPool(
             eval_dataset_cfg,
             split_name=cfg.eval_split,
             pool_size=cfg.eval_num_scenes,
             device=device,
             seed=cfg.seed,
-            **prune_kwargs,
-            **pool_kwargs,
+            min_ego_drive=cfg.get("min_ego_drive", 10.0),
+            prune_base_to_ego=cfg.get("prune_base_to_ego", False),
+            insert_adv_as_extra=cfg.get("insert_adv_as_extra", False),
+            adv_cond_target=cfg.get("adv_cond_target", None),
         )
 
     min_diffusion_t = int(cfg.get("min_diffusion_t", 5))  # TODO: understand the priciple
@@ -921,7 +817,7 @@ def run_ddpo(cfg_root):
     # Per-context (GRPO) grouping: each batch is num_groups distinct contexts,
     # each replicated group_size times, and advantages are whitened within group
     # (see compute_advantages). group_size=1 -> legacy global whitening.
-    group_size = int(cfg.get("group_size", 1))
+    group_size = int(ddpo_cfg.group_size)
     if group_size > 1 and cfg.batch_size % group_size != 0:
         raise ValueError(
             f"batch_size ({cfg.batch_size}) must be divisible by group_size ({group_size})"
@@ -1161,9 +1057,7 @@ def run_ddpo(cfg_root):
                     "rng": _rng_snapshot(device),
                     "wandb_id": wandb_run_id,
                     "kl_coef": kl_ctrl.coef,
-                    "base_ckpt": cfg.get("ldm_adv_ckpt")
-                    or cfg.get("ldm_ckpt")
-                    or cfg.get("model_ckpt"),
+                    "base_ckpt": cfg.get("ldm_adv_ckpt"),
                 },
             }
             tmp_path = out_dir / "last.ckpt.tmp"

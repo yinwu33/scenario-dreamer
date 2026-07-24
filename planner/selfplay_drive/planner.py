@@ -255,8 +255,17 @@ def _load_state_dict(planner: nn.Module, state_dict: dict[str, torch.Tensor], *,
         )
 
 
+# Loaded nets keyed by their resolved (frozen, hashable) config: the per-role
+# rollout planners typically share one checkpoint, and the net is frozen/eval
+# with all recurrent state held by the caller, so sharing one instance is safe.
+_PLANNER_CACHE: dict[PlannerConfig, "DrivePlanner | RecurrentDrivePlanner"] = {}
+
+
 def load_planner(overrides: Any | None = None) -> DrivePlanner | RecurrentDrivePlanner:
     cfg = load_planner_config(overrides)
+    cached = _PLANNER_CACHE.get(cfg)
+    if cached is not None:
+        return cached
     planner: DrivePlanner | RecurrentDrivePlanner
     planner = RecurrentDrivePlanner(cfg) if cfg.recurrent else DrivePlanner(cfg)
     planner = planner.to(cfg.device)
@@ -271,4 +280,5 @@ def load_planner(overrides: Any | None = None) -> DrivePlanner | RecurrentDriveP
     planner.eval()
     for p in planner.parameters():
         p.requires_grad_(False)
+    _PLANNER_CACHE[cfg] = planner
     return planner

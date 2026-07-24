@@ -2,7 +2,7 @@
 
 Ported from PufferDrive/scene_init_ddpo/interfaces.py, trimmed to what the
 scenario-dreamer-hosted trainer needs (plain dataclasses, no ABC: the only policy
-today is ``ddpo.policy.DMGoalDDPOPolicy``).
+today is ``ddpo.policy_ldm_adv.LDMAdvDDPOPolicy``).
 """
 
 from __future__ import annotations
@@ -43,7 +43,7 @@ def single_adv_local_idx(gen_agent_mask, agent_scene_idx, num_scenes):
 
     Returns a ``[num_scenes]`` long tensor; ``-1`` marks a scene with no generated
     adversary. The local index is the agent's *order of appearance* within its
-    scene (ego is local 0), which is exactly how ``RolloutPlanner._build_scenes``
+    scene (ego is local 0), which is exactly how ``Planner._build_scenes``
     slices each ``SimScene`` -- so it doubles as the sim-local index downstream.
 
     Enforces the single-adversary contract: at most one generated non-ego agent

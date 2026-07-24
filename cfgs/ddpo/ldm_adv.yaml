@@ -97,24 +97,17 @@ eval_split: val
 pool_size: 40000
 
 # --- rollout / reward --------------------------------------------------------
-# Three strict configs feed ddpo.reward.PufferSimulator; every key below must
-# match a dataclass field (missing or unknown keys raise at construction).
+# Strict configs feed ddpo.reward.PufferSimulator; every key must match a
+# dataclass field (missing or unknown keys raise at construction). Two of the
+# four sections are composed by the entrypoint defaults list, not defined here:
 #
-# planner: WHICH policy drives the agents. Composed from
-# cfgs/planner/bad_driver.yaml by the entrypoint defaults list
-# (planner@ddpo.planner: bad_driver); swap checkpoints / planners there.
-# Only the adversary-specific override lives here: the frozen policy scales its
-# collision penalty by each agent's own collision_factor obs (0 = reckless,
-# 2 = maximally defensive; others keep sim.fixed_collision_factor = 0.5), so
-# this stops ONLY the adversary from yielding. Two mutually avoidant agents
-# almost never collide (8rlw8ay8: collision rate pinned at ~2% for 3.8k iters
-# with adv_dist plateauing at ~7 m -- the planner's separation, not the
-# model's choice). null restores the shared factor. This key must stay out of
-# bad_driver.yaml: that file merges later and would override this value.
-planner:
-  sim:
-    adv_collision_factor: 0.0
-
+# planner (WHICH policy drives each role + that policy's conditioning obs):
+# one cfgs/planner/<name>.yaml per role (planner@ddpo.planner.sut / .env /
+# .adv; the adv runs bad_driver_reckless); swap a role's checkpoint /
+# conditioning there or re-point its default.
+# planner.sim (SHARED rollout dynamics: dt, goal lifecycle, map extent):
+# cfgs/rollout/base.yaml, composed at rollout@ddpo.planner.sim.
+#
 # simulator: HOW the rollout measures metrics while stepping
 # (ddpo.planners.SimulatorConfig; seed and the gen_agent_invalid check are
 # injected by the training loop).
@@ -171,13 +164,14 @@ reward:
   approach_anneal_end: 6000
 
 # --- DDPO ------------------------------------------------------------------
+# The RL-algorithm knobs (advantage whitening, group_size, clip / KL trust
+# region) are NOT here: they live in the swappable ddpo.algo group
+# (cfgs/ddpo/algo/grpo.yaml, composed by the entrypoint). Below is what every
+# algorithm shares: sampler, optimiser, batch / iteration schedule.
 sampler: ddpm                 # ddim variant overrides this in its entrypoint
 ddim_steps: 30
 ddim_eta: 1.0
 batch_size: 128
-# Per-context (GRPO) grouping: batch_size/group_size distinct contexts, each
-# sampled group_size times; advantages whitened within group.
-group_size: 8
 num_iterations: 40000
 inner_epochs: 1
 k_steps: 16
@@ -192,38 +186,8 @@ save_every: 500
 # the AdamW state, the global RNG, the iteration counter and the wandb run id. The
 # KL reference always stays anchored to ldm_adv_ckpt (the base manifold), never the
 # resumed weights. Set false to always start a fresh DDPO run from the base ckpt.
+# output_dir is wired by the entrypoint (ddpo.output_dir).
 resume: true
-output_dir: ${experiment.output_dir}
-
-ddpo:
-  estimator: is
-  clip_range: 1.0e-4
-  kl_coef: 0.2
-  adv_clip: 5.0
-  adv_eps: 1.0e-6
-  logratio_clip: 20.0
-  adv_mode: zscore
-  per_context: true
-  group_skip_std: 1.0e-4
-  # Anti-collapse guards (see run 3zjnupnh post-mortem):
-  # A zero-std group no longer vanishes (skip) but is whitened against the
-  # whole batch, so an all-rejected group still gets a repulsive gradient.
-  degenerate_group: global
-  # On-policy log-ratios are ~0; drop sample-steps whose |log ratio| exceeds
-  # this instead of exp()-ing numerical junk into an unbounded repulsion term
-  # (the PPO min() keeps exploded ratios exactly when the advantage is < 0).
-  ratio_drop: 1.0
-  # Adaptive KL-to-base: multiplicative feedback keeping measured KL near the
-  # setpoint (healthy phase of 3zjnupnh sat at 0.005-0.02; collapse blew
-  # through 0.5 within ~100 iters). 0 = fixed kl_coef.
-  kl_target: 0.05
-  kl_adapt_band: 1.5
-  kl_adapt_rate: 1.5
-  kl_coef_min: 0.01
-  kl_coef_max: 100.0
-  # Clip pg and KL gradients separately (each to grad_clip): a single global
-  # clip lets an exploding pg term scale the KL pullback to nothing.
-  decouple_kl_grad: true
 
 # --- logging / eval --------------------------------------------------------
 wandb:

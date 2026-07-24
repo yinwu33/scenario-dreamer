@@ -28,6 +28,10 @@ import torch
 
 @dataclass
 class DDPOConfig:
+    # Per-context (GRPO) grouping: batch_size/group_size distinct contexts,
+    # each sampled group_size times; advantages whitened within group.
+    # 1 = legacy global whitening.
+    group_size: int = 1
     estimator: str = "is"          # "sf" | "is"
     clip_range: float = 1e-4       # PPO clip epsilon (diffusion ratios are tiny per step)
     kl_coef: float = 0.0           # weight of KL-to-base penalty (set >0 to enable)

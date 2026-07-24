@@ -1,0 +1,21 @@
+# Goal-conditioned agent autoencoder on Waymo (state_dim 9: [..., goal_x,
+# goal_y]). Stage 0 of the ldm_adv pipeline: ldm_adv diffuses THIS model's
+# latents, and the frozen decoder turns generated latents back into agents.
+#
+# Usage:
+#   python train.py --config-name config_ae_goal
+#   # export the latent cache consumed by ldm_adv training:
+#   python eval.py --config-name config_ae_goal ae_goal.eval.cache_latents.enable_caching=True ae_goal.eval.cache_latents.split_name=train
+#   python eval.py --config-name config_ae_goal ae_goal.eval.cache_latents.enable_caching=True ae_goal.eval.cache_latents.split_name=val
+
+model_name: autoencoder_goal
+
+defaults:
+  - _base
+  - dataset_name: waymo
+  - ae_goal/dataset@ae_goal.dataset
+  - ae_goal/train@ae_goal.train
+  - ae_goal/eval@ae_goal.eval
+  - ae_goal/model@ae_goal.model
+  - ae_goal/datamodule@ae_goal.datamodule
+  - _self_

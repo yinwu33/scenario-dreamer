@@ -22,14 +22,25 @@ defaults:
   - ldm_adv/model@ldm_adv.model
   - ldm_adv/datamodule@ldm_adv.datamodule
   # the (frozen) goal autoencoder cfg, loaded by the LDMAdv policy
-  - dataset@ae_goal.dataset: waymo_ae_goal
-  - train@ae_goal.train: waymo_ae_goal
-  - eval@ae_goal.eval: waymo_ae_goal
-  - model@ae_goal.model: waymo_ae_goal
-  - datamodule@ae_goal.datamodule: waymo_ae_goal
+  - ae_goal/dataset@ae_goal.dataset
+  - ae_goal/train@ae_goal.train
+  - ae_goal/eval@ae_goal.eval
+  - ae_goal/model@ae_goal.model
+  - ae_goal/datamodule@ae_goal.datamodule
   - ddpo/ldm_adv@ddpo
-  - planner@ddpo.planner: bad_driver
-  - sim: base
+  # RL-algorithm axis (advantage whitening, group_size, clip / KL trust
+  # region): swap with e.g. ddpo/algo@ddpo.algo=ppo once a sibling yaml exists.
+  - ddpo/algo@ddpo.algo: grpo
+  # One planner per role: sut = ego (system under test), env = background
+  # traffic, adv = the generated adversary. Each planner yaml also carries its
+  # policy's conditioning obs -- the adv runs the reckless variant
+  # (collision_factor 0) so only the adversary stops yielding.
+  - planner@ddpo.planner.sut: bad_driver
+  - planner@ddpo.planner.env: bad_driver
+  - planner@ddpo.planner.adv: bad_driver
+  # Shared rollout dynamics (dt, goal lifecycle, conditioning ranges) -- a
+  # property of the rollout, not of one role's policy.
+  - rollout@ddpo.planner.sim: base
   - _self_
 
 # DDPO only fine-tunes the adversary branch; freeze the base scene streams.
@@ -37,11 +48,14 @@ ldm_adv:
   train:
     train_mode: adv_only
 
+ddpo:
+  output_dir: ${experiment.output_dir}
+
 experiment:
   project: critical_scene
   stage: ddpo
   generator: ldm_adv
   sampler: ${ddpo.sampler}
-  planner_name: ${oc.select:ddpo.planner.name,none}
+  planner_name: ${oc.select:ddpo.planner.sut.name,none}
   run_name: critical_scene_${experiment.stage}_${experiment.generator}_${experiment.sampler}_${experiment.planner_name}
   output_dir: ${scratch_root}/critical_scene/${experiment.run_name}

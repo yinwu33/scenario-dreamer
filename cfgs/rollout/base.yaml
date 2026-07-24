@@ -1,0 +1,19 @@
+ # Shared rollout dynamics for the DDPO numpy sim (ddpo.pufferdrive_sim.SimConfig).
+#
+# Composed at ddpo.planner.sim (rollout@ddpo.planner.sim: base): the simulation
+# (dt, goal lifecycle, map extent) is a property of the rollout shared by every
+# planner role. WHICH policy drives each role -- and that policy's conditioning
+# obs (collision_factor / offroad_factor / lane_width, policy INPUTS) -- lives
+# in cfgs/planner/<name>.yaml.
+#
+# This file is the COMPLETE config: construction is strict (every SimConfig
+# field must be present, unknown keys raise), there are no hidden defaults.
+dt: 0.1
+goal_radius: 2.0
+goal_speed: 100.0
+# Non-ego agents continue driving past their goal and are only retired when
+# their centre leaves the [-map_extent/2, map_extent/2] square (the generated
+# FOV is 64; the extra margin keeps agents that drift slightly outside alive).
+goal_behavior: continue
+map_extent: 72.0
+max_controlled_agents: 64

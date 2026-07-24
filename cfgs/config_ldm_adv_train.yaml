@@ -19,12 +19,11 @@ defaults:
   - ldm_adv/model@ldm_adv.model
   - ldm_adv/datamodule@ldm_adv.datamodule
   # the (frozen) goal autoencoder cfg, loaded by the LDM lightning module
-  - dataset@ae_goal.dataset: waymo_ae_goal
-  - train@ae_goal.train: waymo_ae_goal
-  - eval@ae_goal.eval: waymo_ae_goal
-  - model@ae_goal.model: waymo_ae_goal
-  - datamodule@ae_goal.datamodule: waymo_ae_goal
-  - sim: base
+  - ae_goal/dataset@ae_goal.dataset
+  - ae_goal/train@ae_goal.train
+  - ae_goal/eval@ae_goal.eval
+  - ae_goal/model@ae_goal.model
+  - ae_goal/datamodule@ae_goal.datamodule
   - _self_
 
 ldm_adv:

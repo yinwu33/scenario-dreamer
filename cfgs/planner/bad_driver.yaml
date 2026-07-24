@@ -1,8 +1,22 @@
 # Recurrent PufferDrive bad_driver policy + in-repo numpy classic dynamics.
+# Composed per role (planner@ddpo.planner.{sut,env,adv}) by the entry config.
+# The shared simulation dynamics (dt, goal behavior, map extent, ...) are a
+# property of the rollout, not of one role's policy: cfgs/rollout/base.yaml.
 name: bad_driver
-checkpoint: ${project_root}/planner/bad_driver/bad_driver_178126787233.pt
+checkpoint: ${project_root}/planner/bad_driver/bad_driver_178352180650.pt
 device: auto
 deterministic: true
+
+# Conditioning obs of THIS policy (trailing ego-feature slots the frozen net
+# was trained on): how defensively this role's agents drive. Per field either
+# a scalar (fixed) or [lo, hi] (per-agent uniform sample). Applied to the
+# role's agents by RolloutRunner; a planner without conditioning slots
+# declares `conditioning: null`. collision_factor 0 = reckless, 2 = maximally
+# defensive.
+conditioning:
+  collision_factor: 2.0
+  offroad_factor: 2.0
+  lane_width: 4.0
 
 policy:
   input_size: 64
@@ -12,25 +26,3 @@ rnn_name: Recurrent
 rnn:
   input_size: 256
   hidden_size: 256
-
-# Env/observation settings translated from PufferDrive/pufferlib/config/pacific/bad_driver.ini.
-# sim.adv_collision_factor (per-agent override for the generated adversary;
-# 0 = reckless .. 2 = maximally defensive, null = shared factor) is deliberately
-# NOT defined here: this file merges after the ddpo flow yaml in the defaults
-# list, so defining it (even as null) would clobber the flow's value. Set it in
-# the ddpo flow config (e.g. cfgs/ddpo/ldm_adv.yaml planner.sim) instead.
-sim:
-  dt: 0.1
-  goal_radius: 2.0
-  goal_speed: 100.0
-  # Non-ego agents continue driving past their goal and are only retired when
-  # their centre leaves the map (map_extent defaults to 64 from config_sim.yaml).
-  goal_behavior: continue
-  max_controlled_agents: 64
-  condition_sample_mode: fixed
-  fixed_collision_factor: 0.5
-  fixed_offroad_factor: 0.5
-  fixed_lane_width: 3.5
-  collision_factor_range: [0.0, 2.0]
-  offroad_factor_range: [0.0, 2.0]
-  lane_width_range: [1.0, 5.0]

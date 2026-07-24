@@ -1,4 +1,0 @@
-# Frozen bad_driver network driven through PufferDrive's vectorized C env.
-name: puffer_drive
-deterministic: true
-pufferdrive_root: ${project_root}/PufferDrive

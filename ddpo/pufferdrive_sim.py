@@ -30,8 +30,6 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from dataclasses import dataclass
-from functools import lru_cache
-from pathlib import Path
 
 import numpy as np
 from omegaconf import OmegaConf
@@ -72,8 +70,6 @@ COLLISION_DIST2_GATE = 225.0       # 15 m
 EGO_AGGRESSOR_MIN_SPEED = 0.5      # m/s; ego counts as the aggressor only when its
                                    # velocity projected onto the ego->other direction
                                    # exceeds this (a passive/slow ego is never at fault)
-CONFIG_SIM_PATH = Path(__file__).with_name("config_sim.yaml")
-
 TYPE_VEHICLE, TYPE_PEDESTRIAN, TYPE_CYCLIST = 1, 2, 3
 ROAD_LANE_TYPE_FEATURE = 0.0       # entity type 4 (ROAD_LANE) - 4
 
@@ -86,65 +82,22 @@ class SimConfig:
     goal_behavior: str
     map_extent: float
     max_controlled_agents: int
-    condition_sample_mode: str
-    fixed_collision_factor: float
-    fixed_offroad_factor: float
-    fixed_lane_width: float
-    collision_factor_range: tuple[float, float]
-    offroad_factor_range: tuple[float, float]
-    lane_width_range: tuple[float, float]
-    # Per-agent conditioning override for THE generated adversary (numpy
-    # planners only): the frozen policy was trained with its collision penalty
-    # scaled by the per-agent collision_factor obs (pacific drive.h:
-    # collision_reward = -collision_factor), so 0 drives recklessly and 2
-    # maximally defensively. None keeps the shared factor. Overriding only the
-    # adversary's slot removes its willingness to yield while the ego keeps the
-    # nominal factor -- two mutually avoidant agents almost never collide, no
-    # matter the initial conditions.
-    adv_collision_factor: float | None = None
 
 
-def _float_pair(value, name: str) -> tuple[float, float]:
-    if len(value) != 2:
-        raise ValueError(f"{name} must contain exactly two values, got {value!r}")
-    return float(value[0]), float(value[1])
+def load_sim_config(cfg) -> SimConfig:
+    """Build the strict SimConfig from the composed ``cfgs/rollout`` group node.
 
-
-def _build_sim_config(raw) -> SimConfig:
-    return SimConfig(
-        dt=float(raw.get("dt", 0.1)),
-        goal_radius=float(raw.get("goal_radius", 2.0)),
-        goal_speed=float(raw.get("goal_speed", 5.0)),
-        goal_behavior=str(raw.get("goal_behavior", "stop")),
-        map_extent=float(raw.get("map_extent", 64.0)),
-        max_controlled_agents=int(raw.get("max_controlled_agents", MAX_CONTROLLED_AGENTS)),
-        condition_sample_mode=str(raw.get("condition_sample_mode", "random")),
-        fixed_collision_factor=float(raw.get("fixed_collision_factor", 2.0)),
-        fixed_offroad_factor=float(raw.get("fixed_offroad_factor", 2.0)),
-        fixed_lane_width=float(raw.get("fixed_lane_width", 3.5)),
-        collision_factor_range=_float_pair(raw.get("collision_factor_range", (0.0, 2.0)), "collision_factor_range"),
-        offroad_factor_range=_float_pair(raw.get("offroad_factor_range", (0.0, 2.0)), "offroad_factor_range"),
-        lane_width_range=_float_pair(raw.get("lane_width_range", (1.0, 5.0)), "lane_width_range"),
-        adv_collision_factor=(
-            None
-            if raw.get("adv_collision_factor", None) is None
-            else float(raw["adv_collision_factor"])
-        ),
-    )
-
-
-@lru_cache(maxsize=1)
-def _load_default_sim_config() -> SimConfig:
-    return _build_sim_config(OmegaConf.load(CONFIG_SIM_PATH))
-
-
-def load_sim_config(overrides=None) -> SimConfig:
-    if overrides is None:
-        return _load_default_sim_config()
-    if OmegaConf.is_config(overrides):
-        overrides = OmegaConf.create(OmegaConf.to_container(overrides, resolve=True))
-    raw = OmegaConf.merge(OmegaConf.load(CONFIG_SIM_PATH), overrides)
-    return _build_sim_config(raw)
+    The yaml must be COMPLETE: a missing or unknown key raises (same contract
+    as SimulatorConfig / RewardConfig). The per-agent conditioning obs
+    (collision_factor / offroad_factor / lane_width) are NOT here: they are
+    policy inputs owned by each role's planner config (``conditioning:`` in
+    ``cfgs/planner/<name>.yaml``, applied by ``RolloutRunner``).
+    """
+    if OmegaConf.is_config(cfg):
+        cfg = OmegaConf.to_container(cfg, resolve=True)
+    raw = dict(cfg)
+    raw["goal_behavior"] = str(raw["goal_behavior"])
+    return SimConfig(**raw)
 
 
 def spiral_offsets(vision_range: int = VISION_RANGE) -> np.ndarray:
@@ -302,10 +255,9 @@ class SimScene:
         agent_ptypes: np.ndarray,    # [N] 1 vehicle / 2 pedestrian / 3 cyclist (PufferDrive ids)
         lane_polylines: np.ndarray,  # [L, P, 2]
         *,
-        rng: np.random.Generator,
-        sim_cfg: SimConfig | None = None,
+        sim_cfg: SimConfig,
     ):
-        cfg = sim_cfg or load_sim_config()
+        cfg = sim_cfg
         s = np.asarray(agent_states, dtype=np.float32)
         n = s.shape[0]
         self.n = n
@@ -331,9 +283,6 @@ class SimScene:
         # same spawn velocities scene_codec wrote into the .bin trajectories
         self.vx = (speed * s[:, 3]).astype(np.float32)
         self.vy = (speed * s[:, 4]).astype(np.float32)
-        # Generated spawn-speed magnitude, kept constant by the dummy goal-seek
-        # planner (step_goal_seek); always >= 0 regardless of the sign of speed.
-        self.speed0 = np.hypot(self.vx, self.vy).astype(np.float32)
         self.length = np.maximum(s[:, 5], 0.5).astype(np.float32)
         self.width = np.maximum(s[:, 6], 0.5).astype(np.float32)
         self.goal = s[:, 7:9].copy()
@@ -379,23 +328,15 @@ class SimScene:
         self.last_ego_fault_partners = np.empty(0, dtype=np.int64)
         self.collision_state = np.zeros(n, dtype=np.int64)
 
-        # Per-agent conditioning inputs fed into the trailing ego observation slots.
-        if cfg.condition_sample_mode == "fixed":
-            self.collision_factor = np.full(n, cfg.fixed_collision_factor, dtype=np.float32)
-            self.offroad_factor = np.full(n, cfg.fixed_offroad_factor, dtype=np.float32)
-            self.lane_width = np.full(n, cfg.fixed_lane_width, dtype=np.float32)
-        elif cfg.condition_sample_mode == "random":
-            lo, hi = cfg.collision_factor_range
-            self.collision_factor = rng.uniform(lo, hi, n).astype(np.float32)
-            lo, hi = cfg.offroad_factor_range
-            self.offroad_factor = rng.uniform(lo, hi, n).astype(np.float32)
-            lo, hi = cfg.lane_width_range
-            self.lane_width = rng.uniform(lo, hi, n).astype(np.float32)
-        else:
-            raise ValueError(
-                "condition_sample_mode must be one of 'random' or 'fixed', "
-                f"got {cfg.condition_sample_mode!r}"
-            )
+        # Per-agent conditioning inputs fed into the trailing ego observation
+        # slots. They parameterize the CONDITIONED frozen policy's driving
+        # style, so their values are owned by each role's planner config
+        # (``conditioning:`` in cfgs/planner/<name>.yaml) and filled in by
+        # ``RolloutRunner._apply_conditioning`` right after role assignment;
+        # a planner that ignores the slots leaves them at 0.
+        self.collision_factor = np.zeros(n, dtype=np.float32)
+        self.offroad_factor = np.zeros(n, dtype=np.float32)
+        self.lane_width = np.zeros(n, dtype=np.float32)
 
         # ---- set_active_agents: controlled vs static --------------------------
         goal_dist0 = np.hypot(self.goal[:, 0] - self.x, self.goal[:, 1] - self.y)
@@ -455,10 +396,16 @@ class SimScene:
         return gy * self.grid_cols + gx
 
     # ----------------------------------------------------------- observations
-    def compute_obs(self) -> np.ndarray:
-        """[n_controlled, OBS_DIM] in active-agent order (drive.h compute_observations)."""
-        obs = np.zeros((len(self.controlled), OBS_DIM), dtype=np.float32)
-        for k, i in enumerate(self.controlled):
+    def compute_obs(self, indices=None) -> np.ndarray:
+        """[n_agents, OBS_DIM] in ``indices`` order (drive.h compute_observations).
+
+        ``indices`` defaults to every controlled agent; a per-role planner passes
+        the subset of agents it drives. Each row only depends on world state, so
+        splitting one call into subset calls yields identical observations.
+        """
+        agents = self.controlled if indices is None else np.asarray(indices, dtype=np.int64)
+        obs = np.zeros((len(agents), OBS_DIM), dtype=np.float32)
+        for k, i in enumerate(agents):
             o = obs[k]
             ch, sh = self.heading_x[i], self.heading_y[i]
             speed_mag = float(np.hypot(self.vx[i], self.vy[i]))
@@ -523,17 +470,22 @@ class SimScene:
         return obs
 
     # -------------------------------------------------------------- dynamics
-    def step_dynamics(self, actions: np.ndarray) -> None:
-        """Classic dynamics for all controlled agents (actions in [0, 91)).
+    def step_dynamics(self, actions: np.ndarray, indices=None) -> None:
+        """Classic dynamics (actions in [0, 91)) for ``indices`` agents.
+
+        ``indices`` defaults to every controlled agent; a per-role planner passes
+        the subset it drives, with ``actions`` aligned to it. Integration is
+        per-agent independent, so disjoint subset calls compose exactly.
 
         Stopped agents (GOAL_STOP) are frozen: drive.h move_dynamics zeroes their
         velocity and returns before integrating. Crashed agents (collision
         response, see latch_ego_crash) are frozen the same way.
         """
-        moving = ~(self.stopped | self.crashed)[self.controlled]
-        self.vx[self.controlled[~moving]] = 0.0
-        self.vy[self.controlled[~moving]] = 0.0
-        idx = self.controlled[moving]
+        agents = self.controlled if indices is None else np.asarray(indices, dtype=np.int64)
+        moving = ~(self.stopped | self.crashed)[agents]
+        self.vx[agents[~moving]] = 0.0
+        self.vy[agents[~moving]] = 0.0
+        idx = agents[moving]
         actions = np.asarray(actions)[moving]
         if len(idx) == 0:
             return
@@ -557,35 +509,6 @@ class SimScene:
         self.heading_y[idx] = np.sin(self.heading[idx])
         self.vx[idx] = new_vx
         self.vy[idx] = new_vy
-
-    def step_goal_seek(self) -> None:
-        """Dummy rule-based motion: translate each controlled agent toward its
-        goal at its generated spawn speed, with NO acceleration/steering
-        integration (the ``DummyPlanner`` rollout).
-
-        Heading (and thus the collision box orientation) is left at the generated
-        value, so an agent whose goal is not straight ahead slides diagonally
-        toward it. The step is not clamped to the goal (it may overshoot);
-        arrival is handled afterwards by ``goal_step``. Stopped / crashed agents
-        are frozen, matching ``step_dynamics``.
-        """
-        idx = self.controlled[~(self.stopped | self.crashed)[self.controlled]]
-        if len(idx) == 0:
-            return
-        gx = self.goal[idx, 0] - self.x[idx]
-        gy = self.goal[idx, 1] - self.y[idx]
-        dist = np.hypot(gx, gy)
-        moving = dist > 1e-6
-        sel = idx[moving]
-        if len(sel) == 0:
-            return
-        inv_speed = self.speed0[sel] / dist[moving]
-        vx = gx[moving] * inv_speed
-        vy = gy[moving] * inv_speed
-        self.vx[sel] = vx
-        self.vy[sel] = vy
-        self.x[sel] += vx * self.dt
-        self.y[sel] += vy * self.dt
 
     # --------------------------------------------------------------- metrics
     def update_metrics(self) -> None:
@@ -620,7 +543,7 @@ class SimScene:
         front, and farms a near-zero ego time-to-collision. To remove the exploit
         at its source, *any* ego<->vehicle overlap (regardless of fault) latches
         both as ``crashed`` - frozen in place (zero velocity, never re-integrated
-        by ``step_dynamics`` / ``step_goal_seek``) and excluded from TTC /
+        by ``step_dynamics``) and excluded from TTC /
         min-distance scoring. A contacting adversary therefore can never pass
         through to the ego's forward path, so it cannot spoof min-TTC.
 
