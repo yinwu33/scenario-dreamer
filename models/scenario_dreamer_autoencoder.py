@@ -61,9 +61,9 @@ class ScenarioDreamerAutoEncoder(pl.LightningModule):
             self.files = test_dataset.files.copy()
         else:
             if use_goal:
-                test_dataset = WaymoDatasetAEGoal(self.cfg_dataset, split_name='test', mode='eval')
+                test_dataset = WaymoDatasetAEGoal(self.cfg_dataset, split_name='val', mode='eval')
             elif self.cfg.dataset_name == 'waymo':
-                test_dataset = WaymoDatasetAutoEncoder(self.cfg_dataset, split_name='test', mode='eval')
+                test_dataset = WaymoDatasetAutoEncoder(self.cfg_dataset, split_name='val', mode='eval')
             else:
                 test_dataset = NuplanDatasetAutoEncoder(self.cfg_dataset, split_name='test', mode='eval')
         test_dataloader = DataLoader(test_dataset, 
