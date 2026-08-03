@@ -1,7 +1,7 @@
 defaults:
 - /eval/base@_here_
 
-run_name: scenario_dreamer_ae_goal_waymo # default run name for evaluation
+run_name: advscene_ae_goal_waymo # default run name for evaluation
 
 num_samples_to_visualize: 50 # number of samples to visualize during evaluation
 visualize_lane_graph: False # visualize lane graph in the evaluation results?
@@ -12,6 +12,6 @@ cache_latents:
   enable_caching: False # cache latents to disk?
   use_nocturne_metadata: False # selfplay data has no nocturne metadata; mark all scenes compatible
   split_name: train # which dataset split to cache latents for
-  latent_dir: ${scratch_root}/scenario_dreamer_ae_goal_latents_waymo # directory to cache latents to
+  latent_dir: ${scratch_root}/advscene_ae_goal_latents_waymo # directory to cache latents to
   nocturne_train_filenames_path: ${project_root}/metadata/nocturne_train_filenames.pkl # unused when use_nocturne_metadata is False
   nocturne_val_filenames_path: ${project_root}/metadata/nocturne_val_filenames.pkl # unused when use_nocturne_metadata is False

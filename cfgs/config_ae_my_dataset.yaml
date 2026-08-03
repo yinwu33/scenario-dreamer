@@ -1,0 +1,31 @@
+# Evaluate the regular 7-D Waymo Scenario Dreamer autoencoder on the
+# goal-preprocessed Waymo dataset.  The goal coordinates are deliberately
+# omitted so the input remains compatible with the regular autoencoder
+# checkpoint.
+#
+# Usage:
+#   python eval.py --config-name config_ae_my_dataset
+
+defaults:
+  - _base
+  - dataset_name: waymo
+  - dataset@ae.dataset: waymo_autoencoder
+  - train@ae.train: waymo_autoencoder
+  - eval@ae.eval: waymo_autoencoder
+  - model@ae.model: waymo_autoencoder
+  - datamodule@ae.datamodule: waymo_autoencoder
+  - _self_
+
+model_name: autoencoder
+
+ae:
+  dataset:
+    dataset_path: ${dataset_root}/scene_goal_preprocess_waymo
+    preprocess_dir: ${dataset_root}/scene_goal_preprocess_waymo
+    use_goal: true
+    include_goal: false
+
+  eval:
+    run_name: scenario_dreamer_autoencoder_waymo
+    split_name: val
+    num_samples_to_visualize: 0

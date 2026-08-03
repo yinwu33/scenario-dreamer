@@ -14,7 +14,8 @@ torch.set_printoptions(threshold=100000)
 
 from cfgs.config import CONFIG_PATH, NON_PARTITIONED
 from utils.data_container import ScenarioDreamerData
-from utils.data_helpers import modify_agent_states, normalize_scene, randomize_indices
+from utils.data_helpers import normalize_scene, randomize_indices
+from utils.goal_runtime import prepare_scene
 from utils.pyg_helpers import get_edge_index_bipartite, get_edge_index_complete_graph
 from utils.torch_helpers import from_numpy
 
@@ -23,11 +24,16 @@ class WaymoDatasetAEGoal(Dataset):
     """Waymo autoencoder dataset that augments each agent state with its goal (final
     in-FOV position).
 
-    Reuses the SDC-centered ``scene_goal_preprocess_waymo`` selfplay pickles (the same
-    source as the dm_goal pipeline). Each agent state becomes 9-dimensional
-    ``[x, y, speed, cosθ, sinθ, length, width, goal_x, goal_y]`` so that the autoencoder
-    learns to encode/decode the goal alongside the initial state. Only non-partitioned
-    scenes are produced (no inpainting), matching the selfplay preprocessing.
+    Reads the **v2** SDC-centered goal records (``utils/goal_preprocess.py``), whose
+    agent set is filtered exactly as the original Scenario Dreamer preprocessing filters
+    it -- including the off-road vehicle removal the v1 pickles were missing. Each agent
+    state becomes 9-dimensional ``[x, y, speed, cosθ, sinθ, length, width, goal_x,
+    goal_y]`` so the autoencoder encodes/decodes the goal alongside the initial state.
+    Only non-partitioned scenes are produced (no inpainting).
+
+    The goal columns and any goal-driven filtering are applied at load time by
+    ``utils.goal_runtime.prepare_scene``; everything else comes off disk, mirroring the
+    baseline autoencoder's fast path.
     """
 
     def __init__(self, cfg: Any, split_name: str = "train", mode: str = "train") -> None:
@@ -35,32 +41,35 @@ class WaymoDatasetAEGoal(Dataset):
         self.cfg = cfg
         self.split_name = split_name
         self.mode = mode
+        self.preprocess = self.cfg.preprocess
         # mirrors the autoencoder dataset interface; preprocess_dir holds the cached pickles
         self.preprocessed_dir = os.path.join(self.cfg.preprocess_dir, f"{self.split_name}")
         self.files = sorted(glob.glob(os.path.join(self.preprocessed_dir, "*.pkl")))
         self.dset_len = len(self.files)
 
     def get_data(self, data: dict, idx: int):
-        valid_goal_mask = data["clipped_final_valid"].astype(bool)
-        if valid_goal_mask.sum() == 0:
-            return None
-
-        # Preprocessed states are raw [x, y, vx, vy, yaw, length, width]; convert to the
-        # [x, y, speed, cosθ, sinθ, length, width] convention, then append the goal (xy).
-        agent_states = modify_agent_states(data["agent_states"][valid_goal_mask])
-        agent_goal_xy = data["clipped_final_states"][valid_goal_mask, :2]
-        agent_states = np.concatenate([agent_states, agent_goal_xy], axis=-1)
-        agent_types = data["agent_types"][valid_goal_mask]
-
-        # keep the max_num_agents closest to the origin (ego sits at the origin -> kept)
-        if len(agent_states) > self.cfg.max_num_agents:
-            dist_to_origin = np.linalg.norm(agent_states[:, :2], axis=-1)
-            closest_agent_ids = np.argsort(dist_to_origin)[: self.cfg.max_num_agents]
-            agent_states = agent_states[closest_agent_ids]
-            agent_types = agent_types[closest_agent_ids]
-
+        # Everything the original preprocessing did (FOV crop, closest-N cap, off-road
+        # vehicle removal, modify_agent_states) is already baked into the v2 record.
+        # prepare_scene only adds the goal-side work, which is deliberately kept at
+        # runtime so goal definitions and goal filters stay adjustable.
+        
+        if not self.preprocess:
+            # TODO: preprocess code
+            raise NotImplementedError("preprocess=False is not implemented for WaymoDatasetAEGoal")
+            return
+        
+        scene = prepare_scene(data, self.cfg)
+        agent_states = scene["agent_states"] # 【N, 9】, includes goal columns
+        agent_types = scene["agent_types"]  # [N, ?]
+        goal_xy = scene["goal_xy"]  # [N, 2]
+        goal_valid = scene["goal_valid"]  # [N,]
+        goal_timestep = scene["goal_timestep"]  # [N,]
+        goal_dist = scene["goal_dist"]  # [N,]
+        
         num_agents = int(len(agent_states))
+        assert num_agents != 0
 
+        # read from data
         road_points = np.array(data["road_points"], copy=True)
         num_lanes = int(data["num_lanes"])
         edge_index_lane_to_lane = np.array(data["edge_index_lane_to_lane"])

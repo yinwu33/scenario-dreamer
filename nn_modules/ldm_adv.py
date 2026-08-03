@@ -245,15 +245,19 @@ class LDMAdv(nn.Module):
 
     @torch.no_grad()
     def forward(self, data, mode="initial_scene"):
-        agent_shape = (data["agent"].latents.shape[0], 1, self.cfg_model.agent_latent_dim)
-        lane_shape = (data["lane"].latents.shape[0], 1, self.cfg_model.lane_latent_dim)
-        adv_shape = (data["adv"].latents.shape[0], 1, self.cfg_model.agent_latent_dim)
+        # Shapes come from ``x`` (present in every mode) rather than ``latents``:
+        # prior-sampled scenes carry only placeholder ``x`` tensors, since there is
+        # no real scene to draw latents from. The conditioned modes still read
+        # ``latents`` inside p_sample_loop, which is where they are required.
+        agent_shape = (data["agent"].x.shape[0], 1, self.cfg_model.agent_latent_dim)
+        lane_shape = (data["lane"].x.shape[0], 1, self.cfg_model.lane_latent_dim)
+        adv_shape = (data["adv"].x.shape[0], 1, self.cfg_model.agent_latent_dim)
         x_agent, x_lane, x_adv = self.p_sample_loop(
             agent_shape,
             lane_shape,
             adv_shape,
             data,
-            device=data["agent"].latents.device,
+            device=data["agent"].x.device,
             mode=mode,
         )
         return x_agent, x_lane, x_adv

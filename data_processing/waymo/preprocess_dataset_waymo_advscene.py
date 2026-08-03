@@ -20,16 +20,14 @@ import tensorflow as tf
 from tqdm import tqdm
 from waymo_open_dataset.protos import scenario_pb2
 
-from cfgs.config import NON_PARTITIONED
 from utils.geometry import apply_se2_transform, normalize_angle
+from utils.goal_preprocess import V2Config, build_v2_record
 from utils.lane_graph_helpers import get_compact_lane_graph, resample_polyline
-from utils.pyg_helpers import get_edge_index_bipartite, get_edge_index_complete_graph
 
 
-DATASET_ROOT = "/mnt/disk/data/public/waymo/motion_v_1_3_1/scenario/"
+DATASET_ROOT = os.environ.get("WAYMO_SCENARIO_ROOT")
 _MAP_RANGE = 64.0
 _NUM_POINTS_PER_LANE = 20
-_MAX_NUM_LANES = 100
 _ERR_VAL = -1e4
 _WAYMO_OBJECT_STR = {
     scenario_pb2.Track.TYPE_UNSET: "unset",
@@ -39,28 +37,54 @@ _WAYMO_OBJECT_STR = {
     scenario_pb2.Track.TYPE_OTHER: "other",
 }
 _SELFPLAY_OBJECT_TYPES = {"vehicle": 0, "pedestrian": 1, "cyclist": 2}
-_LANE_CONNECTION_TYPES = {"none": 0, "pred": 1, "succ": 2, "left": 3, "right": 4, "self": 5}
 
 
 def _parse_args():
     parser = argparse.ArgumentParser(
-        description="Preprocess raw Waymo TFRecords into SDC-centered selfplay data."
+        description="Preprocess raw Waymo TFRecords into SDC-centered goal (v2) scenes."
     )
     parser.add_argument("--split", choices=["train", "val"], required=True)
     parser.add_argument("--max", type=int, default=None, help="Maximum saved scenarios for debugging.")
     parser.add_argument("--num-workers", type=int, default=1, help="Number of TFRecord files to process in parallel.")
+    parser.add_argument("--waymo-dir", type=str, default=None,
+                        help="Directory holding the raw scenario TFRecords "
+                             "(default: $WAYMO_SCENARIO_ROOT/{training,validation}).")
     parser.add_argument("--output-dir", type=str, default=None)
     parser.add_argument("--viz", action="store_true", help="Write debug GIFs next to the output split.")
+    # ---- offline filtering, aligned with the original Scenario Dreamer pipeline ----
+    parser.add_argument("--map-range", type=float, default=_MAP_RANGE, help="Square FOV side length in metres.")
+    parser.add_argument("--max-num-agents", type=int, default=30)
+    parser.add_argument("--max-num-lanes", type=int, default=100)
+    parser.add_argument("--offroad-threshold", type=float, default=1.5,
+                        help="Drop non-ego vehicles further than this from a lane centerline "
+                             "(the original uses 1.5 m). Pass a value <= 0 to keep every agent; "
+                             "a looser value here keeps the runtime threshold adjustable at the "
+                             "cost of the record no longer matching the baseline agent set.")
+    parser.add_argument("--traj-dtype", choices=["float32", "float16"], default="float32",
+                        help="Storage dtype of the goal-block trajectories. float16 halves their "
+                             "size at ~3 cm resolution near the FOV edge.")
     return parser.parse_args()
 
 
-def _default_waymo_folder(split):
-    dataset_root = DATASET_ROOT
-    if dataset_root is None:
-        raise ValueError("DATASET_ROOT must be set when --output-dir is omitted or raw data is read.")
+def _config_from_args(args):
+    return V2Config(
+        map_range=args.map_range,
+        max_num_agents=args.max_num_agents,
+        max_num_lanes=args.max_num_lanes,
+        num_points_per_lane=_NUM_POINTS_PER_LANE,
+        offroad_threshold=args.offroad_threshold,
+        traj_dtype=args.traj_dtype,
+    )
+
+
+def _default_waymo_folder(split, waymo_dir=None):
+    if waymo_dir is not None:
+        return Path(waymo_dir)
+    if DATASET_ROOT is None:
+        raise ValueError("Pass --waymo-dir or set WAYMO_SCENARIO_ROOT to the raw scenario directory.")
 
     split_dir = "training" if split == "train" else "validation"
-    return Path(dataset_root) / split_dir
+    return Path(DATASET_ROOT) / split_dir
 
 
 def _default_output_dir(split):
@@ -90,8 +114,7 @@ def _to_local_vectors(xy, rotation):
     )
 
 
-def _in_map_range(xy):
-    radius = _MAP_RANGE / 2.0
+def _in_map_range(xy, radius):
     return np.logical_and(np.abs(xy[..., 0]) <= radius, np.abs(xy[..., 1]) <= radius)
 
 
@@ -105,11 +128,6 @@ def _object_type_onehot(type_name):
         onehot[_SELFPLAY_OBJECT_TYPES[type_name]] = 1.0
     return onehot
 
-
-def _lane_connection_type_onehot(type_name):
-    onehot = np.zeros(len(_LANE_CONNECTION_TYPES), dtype=np.float32)
-    onehot[_LANE_CONNECTION_TYPES[type_name]] = 1.0
-    return onehot
 
 
 def _extract_track_states(track):
@@ -182,88 +200,8 @@ def _empty_lane_graph():
     }
 
 
-def _get_road_points_adj(lane_graph):
-    if len(lane_graph["lanes"]) == 0:
-        return (
-            np.zeros((0, _NUM_POINTS_PER_LANE, 2), dtype=np.float32),
-            np.zeros((0, 0), dtype=np.float32),
-            np.zeros((0, 0), dtype=np.float32),
-            np.zeros((0, 0), dtype=np.float32),
-            np.zeros((0, 0), dtype=np.float32),
-            0,
-        )
 
-    resampled_lanes = []
-    idx_to_id = {}
-    id_to_idx = {}
-    for idx, lane_id in enumerate(lane_graph["lanes"]):
-        lane = lane_graph["lanes"][lane_id]
-        if len(lane) == 1:
-            sampled = np.repeat(lane[:1], _NUM_POINTS_PER_LANE, axis=0)
-        else:
-            sampled = resample_polyline(lane, num_points=_NUM_POINTS_PER_LANE)
-        resampled_lanes.append(sampled.astype(np.float32))
-        idx_to_id[idx] = lane_id
-        id_to_idx[lane_id] = idx
-
-    resampled_lanes = np.asarray(resampled_lanes, dtype=np.float32)
-    num_lanes = min(len(resampled_lanes), _MAX_NUM_LANES)
-    dist_to_origin = np.linalg.norm(resampled_lanes, axis=-1).min(1)
-    closest_lane_idxs = np.argsort(dist_to_origin)[:num_lanes]
-    resampled_lanes = resampled_lanes[closest_lane_idxs]
-
-    idx_to_new_idx = {old_idx: new_idx for new_idx, old_idx in enumerate(closest_lane_idxs)}
-    new_idx_to_idx = {new_idx: old_idx for new_idx, old_idx in enumerate(closest_lane_idxs)}
-
-    pre_adj = np.zeros((num_lanes, num_lanes), dtype=np.float32)
-    suc_adj = np.zeros((num_lanes, num_lanes), dtype=np.float32)
-    left_adj = np.zeros((num_lanes, num_lanes), dtype=np.float32)
-    right_adj = np.zeros((num_lanes, num_lanes), dtype=np.float32)
-
-    for new_idx_i in range(num_lanes):
-        lane_id = idx_to_id[new_idx_to_idx[new_idx_i]]
-        for other_id in lane_graph["pre_pairs"].get(lane_id, []):
-            old_idx = id_to_idx.get(other_id)
-            if old_idx in idx_to_new_idx:
-                pre_adj[new_idx_i, idx_to_new_idx[old_idx]] = 1.0
-        for other_id in lane_graph["suc_pairs"].get(lane_id, []):
-            old_idx = id_to_idx.get(other_id)
-            if old_idx in idx_to_new_idx:
-                suc_adj[new_idx_i, idx_to_new_idx[old_idx]] = 1.0
-        for other_id in lane_graph["left_pairs"].get(lane_id, []):
-            old_idx = id_to_idx.get(other_id)
-            if old_idx in idx_to_new_idx:
-                left_adj[new_idx_i, idx_to_new_idx[old_idx]] = 1.0
-        for other_id in lane_graph["right_pairs"].get(lane_id, []):
-            old_idx = id_to_idx.get(other_id)
-            if old_idx in idx_to_new_idx:
-                right_adj[new_idx_i, idx_to_new_idx[old_idx]] = 1.0
-
-    return resampled_lanes, pre_adj, suc_adj, left_adj, right_adj, num_lanes
-
-
-def _build_road_connection_types(edge_index_lane_to_lane, pre_adj, suc_adj, left_adj, right_adj):
-    road_connection_types = []
-    for i in range(edge_index_lane_to_lane.shape[1]):
-        src = int(edge_index_lane_to_lane[0, i])
-        dst = int(edge_index_lane_to_lane[1, i])
-        if src == dst:
-            conn_type = "self"
-        elif pre_adj[dst, src]:
-            conn_type = "pred"
-        elif suc_adj[dst, src]:
-            conn_type = "succ"
-        elif left_adj[dst, src]:
-            conn_type = "left"
-        elif right_adj[dst, src]:
-            conn_type = "right"
-        else:
-            conn_type = "none"
-        road_connection_types.append(_lane_connection_type_onehot(conn_type))
-    return np.asarray(road_connection_types, dtype=np.float32)
-
-
-def _extract_map(scenario, center, rotation):
+def _extract_map(scenario, center, rotation, radius):
     lane_graph = _empty_lane_graph()
     road_edges = []
     road_edge_masks = []
@@ -276,7 +214,7 @@ def _extract_map(scenario, center, rotation):
             if len(polyline) < 2:
                 continue
             local = _to_local_positions(polyline[None, :, :], center, rotation)[0]
-            in_range = _in_map_range(local)
+            in_range = _in_map_range(local, radius)
             if not in_range.any():
                 continue
             lane_id = int(feature.id)
@@ -291,7 +229,7 @@ def _extract_map(scenario, center, rotation):
             if len(polyline) == 0:
                 continue
             local = _to_local_positions(polyline[None, :, :], center, rotation)[0]
-            in_range = _in_map_range(local)
+            in_range = _in_map_range(local, radius)
             if not in_range.any():
                 continue
             points = local[in_range]
@@ -308,14 +246,14 @@ def _extract_map(scenario, center, rotation):
             if len(polygon) == 0:
                 continue
             local = _to_local_positions(polygon[None, :, :], center, rotation)[0]
-            in_range = _in_map_range(local)
+            in_range = _in_map_range(local, radius)
             if in_range.any():
                 crosswalks.append(local[in_range].astype(np.float32))
 
         elif feature.HasField("stop_sign"):
             point = np.asarray([[feature.stop_sign.position.x, feature.stop_sign.position.y]], dtype=np.float32)
             local = _to_local_positions(point[None, :, :], center, rotation)[0, 0]
-            if _in_map_range(local):
+            if _in_map_range(local, radius):
                 stop_signs.append(local.astype(np.float32))
 
     lane_ids = set(lane_graph["lanes"].keys())
@@ -323,39 +261,25 @@ def _extract_map(scenario, center, rotation):
         for lane_id in list(lane_graph[pair_key].keys()):
             lane_graph[pair_key][lane_id] = [other_id for other_id in lane_graph[pair_key][lane_id] if other_id in lane_ids]
 
-    if len(lane_graph["lanes"]) == 0:
-        road_points, pre_adj, suc_adj, left_adj, right_adj, num_lanes = _get_road_points_adj(lane_graph)
-        edge_index_lane_to_lane = get_edge_index_complete_graph(num_lanes).numpy()
-        road_connection_types = np.zeros((0, len(_LANE_CONNECTION_TYPES)), dtype=np.float32)
-        compact_lane_graph = lane_graph
-    else:
+    # The lane tensors themselves (road_points / connections / edge index) are built by
+    # utils.goal_preprocess.build_record, so the tfrecord path and the v1->v2
+    # conversion path cannot produce different geometry from the same lane graph.
+    compact_lane_graph = lane_graph
+    if len(lane_graph["lanes"]) > 0:
         compact_lane_graph = get_compact_lane_graph({"lane_graph": lane_graph})
-        road_points, pre_adj, suc_adj, left_adj, right_adj, num_lanes = _get_road_points_adj(compact_lane_graph)
-        edge_index_lane_to_lane = get_edge_index_complete_graph(num_lanes).numpy()
-        road_connection_types = _build_road_connection_types(
-            edge_index_lane_to_lane,
-            pre_adj,
-            suc_adj,
-            left_adj,
-            right_adj,
-        )
 
-    map_data = {
-        "road_points": road_points,
-        "road_point_masks": np.ones((num_lanes, _NUM_POINTS_PER_LANE), dtype=bool),
-        "edge_index_lane_to_lane": edge_index_lane_to_lane,
-        "road_connection_types": road_connection_types,
-        "num_lanes": num_lanes,
+    return {
         "lane_graph": compact_lane_graph,
-        "road_edges": np.stack(road_edges, axis=0) if road_edges else np.zeros((0, _NUM_POINTS_PER_LANE, 2), dtype=np.float32),
-        "road_edge_masks": np.stack(road_edge_masks, axis=0) if road_edge_masks else np.zeros((0, _NUM_POINTS_PER_LANE), dtype=bool),
-        "crosswalks": crosswalks,
-        "stop_signs": np.stack(stop_signs, axis=0) if stop_signs else np.zeros((0, 2), dtype=np.float32),
+        "extras": {
+            "road_edges": np.stack(road_edges, axis=0) if road_edges else np.zeros((0, _NUM_POINTS_PER_LANE, 2), dtype=np.float32),
+            "road_edge_masks": np.stack(road_edge_masks, axis=0) if road_edge_masks else np.zeros((0, _NUM_POINTS_PER_LANE), dtype=bool),
+            "crosswalks": crosswalks,
+            "stop_signs": np.stack(stop_signs, axis=0) if stop_signs else np.zeros((0, 2), dtype=np.float32),
+        },
     }
-    return map_data
 
 
-def _process_scenario(scenario, source_file, record_index, output_path, viz_dir=None):
+def _process_scenario(scenario, source_file, record_index, output_path, cfg, viz_dir=None):
     current_t = int(scenario.current_time_index)
     sdc_idx = int(scenario.sdc_track_index)
     if sdc_idx < 0 or sdc_idx >= len(scenario.tracks):
@@ -368,28 +292,20 @@ def _process_scenario(scenario, source_file, record_index, output_path, viz_dir=
     if not sdc_state.valid:
         return False
 
+    radius = cfg.map_range / 2.0
     center = np.asarray([sdc_state.center_x, sdc_state.center_y], dtype=np.float32)
     rotation = _rotation_from_sdc_yaw(sdc_state.heading)
 
-    map_data = _extract_map(scenario, center, rotation)
-    if map_data["num_lanes"] == 0:
+    map_data = _extract_map(scenario, center, rotation, radius)
+    if len(map_data["lane_graph"]["lanes"]) == 0:
         return False
 
     agent_ids = []
     agent_track_indices = []
     agent_types = []
-    agent_type_names = []
-    global_trajectories = []
     local_trajectories = []
     trajectory_valid = []
-    clipped_valid = []
-    raw_global_final_states = []
-    raw_final_states = []
-    raw_final_valid = []
-    raw_final_timesteps = []
-    clipped_final_states = []
-    clipped_final_valid = []
-    clipped_final_timesteps = []
+    trajectory_clip_valid = []
     current_local_states = []
 
     for track_index, track in enumerate(scenario.tracks):
@@ -402,35 +318,26 @@ def _process_scenario(scenario, source_file, record_index, output_path, viz_dir=
         global_states, valid = _extract_track_states(track)
         local_states = _localize_states(global_states, valid, center, rotation)
         current_local = local_states[current_t]
-        if not _in_map_range(current_local[:2]):
+        if not _in_map_range(current_local[:2], radius):
             continue
 
-        in_range = _in_map_range(local_states[:, :2])
-        clip_mask = np.logical_and(valid, in_range)
-        raw_global_final, _, _ = _last_valid_state(global_states, valid)
-        raw_final, raw_ok, raw_t = _last_valid_state(local_states, valid)
-        clipped_final, clipped_ok, clipped_t = _last_valid_state(local_states, clip_mask)
+        in_range = _in_map_range(local_states[:, :2], radius)
 
         agent_ids.append(int(track.id) if track.id else track_index)
         agent_track_indices.append(track_index)
         agent_types.append(_object_type_onehot(type_name))
-        agent_type_names.append(type_name)
-        global_trajectories.append(global_states)
-        local_trajectories.append(local_states)
+        # [x, y, vx, vy, yaw] is everything the goal block needs; length/width are
+        # constant per agent and already carried by agent_states.
+        local_trajectories.append(local_states[:, :5])
         trajectory_valid.append(valid)
-        clipped_valid.append(clip_mask)
-        raw_global_final_states.append(raw_global_final)
-        raw_final_states.append(raw_final)
-        raw_final_valid.append(raw_ok)
-        raw_final_timesteps.append(raw_t)
-        clipped_final_states.append(clipped_final)
-        clipped_final_valid.append(clipped_ok)
-        clipped_final_timesteps.append(clipped_t)
+        trajectory_clip_valid.append(np.logical_and(valid, in_range))
         current_local_states.append(current_local)
 
     if len(agent_ids) == 0:
         return False
 
+    # ego first, then the remaining agents by distance to the origin -- the ordering
+    # utils.goal_preprocess.select_agents assumes.
     current_local_states = np.asarray(current_local_states, dtype=np.float32)
     non_ego_order = np.argsort(np.linalg.norm(current_local_states[:, :2], axis=-1))
     ego_candidates = np.where(np.asarray(agent_track_indices, dtype=np.int64) == sdc_idx)[0]
@@ -449,61 +356,41 @@ def _process_scenario(scenario, source_file, record_index, output_path, viz_dir=
         arr = np.asarray(values, dtype=dtype)
         return arr[order]
 
-    ordered_track_indices = ordered_array(agent_track_indices, dtype=np.int64)
-    ego_matches = np.where(ordered_track_indices == sdc_idx)[0]
-
     scenario_id = scenario.scenario_id or Path(source_file).stem + f"_{record_index}"
     raw_file_name = f"{Path(source_file).name}_{record_index}"
-    to_pickle = {
-        "idx": record_index,
-        "scenario_id": scenario_id,
-        "source_file": source_file,
-        "source_record_index": record_index,
-        "scene_timestep": current_t,
-        "map_range": _MAP_RANGE,
-        "map_radius": _MAP_RANGE / 2.0,
-        "sdc_track_index": sdc_idx,
-        "map_id": 0,
-        "normalize": {
+
+    record = build_record(
+        idx=record_index,
+        scenario_id=scenario_id,
+        source_file=source_file,
+        source_record_index=record_index,
+        scene_timestep=current_t,
+        sdc_track_index=sdc_idx,
+        normalize={
             "center": center,
             "yaw": np.float32(sdc_state.heading),
             "rotation": np.float32(rotation),
         },
-        "num_agents": len(agent_ids),
-        "num_lanes": len(map_data["road_points"]),
-        "agent_ids": ordered_array(agent_ids, dtype=np.int64),
-        "agent_track_indices": ordered_track_indices,
-        "ego_index": int(ego_matches[0]),
-        "agent_types": ordered_array(agent_types, dtype=np.float32),
-        "agent_type_names": [agent_type_names[i] for i in order],
-        "agent_states": ordered_array(current_local_states, dtype=np.float32)[:, :-1],
-        "raw_global_trajectory": ordered_array(global_trajectories, dtype=np.float32),
-        "local_trajectory": ordered_array(local_trajectories, dtype=np.float32),
-        "trajectory_valid": ordered_array(trajectory_valid, dtype=bool),
-        "clipped_trajectory": ordered_array(local_trajectories, dtype=np.float32),
-        "clipped_valid": ordered_array(clipped_valid, dtype=bool),
-        "raw_global_final_states": ordered_array(raw_global_final_states, dtype=np.float32),
-        "raw_final_states": ordered_array(raw_final_states, dtype=np.float32),
-        "raw_final_valid": ordered_array(raw_final_valid, dtype=bool),
-        "raw_final_timesteps": ordered_array(raw_final_timesteps, dtype=np.int64),
-        "clipped_final_states": ordered_array(clipped_final_states, dtype=np.float32),
-        "clipped_final_valid": ordered_array(clipped_final_valid, dtype=bool),
-        "clipped_final_timesteps": ordered_array(clipped_final_timesteps, dtype=np.int64),
-        "road_points": map_data["road_points"],
-        "road_point_masks": map_data["road_point_masks"],
-        "edge_index_lane_to_lane": map_data["edge_index_lane_to_lane"],
-        "edge_index_lane_to_agent": get_edge_index_bipartite(map_data["num_lanes"], len(agent_ids)).numpy(),
-        "edge_index_agent_to_agent": get_edge_index_complete_graph(len(agent_ids)).numpy(),
-        "road_connection_types": map_data["road_connection_types"],
-        "lg_type": NON_PARTITIONED,
-        "map": map_data,
-    }
+        map_id=0,
+        agent_states_raw=ordered_array(current_local_states, dtype=np.float32)[:, :-1],
+        agent_types=ordered_array(agent_types, dtype=np.float32),
+        agent_ids=ordered_array(agent_ids, dtype=np.int64),
+        agent_track_indices=ordered_array(agent_track_indices, dtype=np.int64),
+        trajectory=ordered_array(local_trajectories, dtype=np.float32),
+        trajectory_valid=ordered_array(trajectory_valid, dtype=bool),
+        trajectory_clip_valid=ordered_array(trajectory_clip_valid, dtype=bool),
+        lane_graph=map_data["lane_graph"],
+        extras=map_data["extras"],
+        cfg=cfg,
+    )
+    if record is None:
+        return False
 
     with open(output_path / f"{raw_file_name}.pkl", "wb") as f:
-        pickle.dump(to_pickle, f, protocol=pickle.HIGHEST_PROTOCOL)
+        pickle.dump(record, f, protocol=pickle.HIGHEST_PROTOCOL)
 
     if viz_dir is not None:
-        _write_debug_gif(to_pickle, viz_dir / f"{raw_file_name}.gif")
+        _write_debug_gif(record, viz_dir / f"{raw_file_name}.gif")
 
     return True
 
@@ -517,29 +404,28 @@ def _write_debug_gif(data, gif_path):
         print(f"[viz] Skipping {gif_path.name}: {exc}")
         return
 
-    trajectories = data["local_trajectory"]
-    valid = data["clipped_valid"]
-    agent_type_names = data["agent_type_names"]
+    from utils.goal_runtime import compute_goals
+
+    trajectories = np.asarray(data["trajectory"], dtype=np.float32)
+    valid = data["trajectory_clip_valid"]
+    # length/width are constant per agent and live in agent_states, not the trajectory
+    sizes = np.asarray(data["agent_states"], dtype=np.float32)[:, 5:7]
+    type_ids = np.argmax(np.asarray(data["agent_types"]), axis=1)
     ego_index = data["ego_index"]
     num_steps = trajectories.shape[1]
-    radius = data["map_radius"]
+    radius = float(data["map_range"]) / 2.0
+    goal_xy, goal_valid, _, _ = compute_goals(data)
 
     fig, ax = plt.subplots(figsize=(5, 5))
 
     def agent_color(agent_idx):
         if agent_idx == ego_index:
             return "red"
-        type_name = agent_type_names[agent_idx]
-        if type_name == "vehicle":
-            return "blue"
-        if type_name == "cyclist":
-            return "yellow"
-        if type_name == "pedestrian":
-            return "purple"
-        return "black"
+        return {0: "blue", 1: "purple", 2: "yellow"}.get(int(type_ids[agent_idx]), "black")
 
-    def bbox_corners(state):
-        x, y, heading, length, width = state[0], state[1], state[4], state[5], state[6]
+    def bbox_corners(state, size):
+        x, y, heading = state[0], state[1], state[4]
+        length, width = size
         local = np.asarray(
             [
                 [-length / 2.0, -width / 2.0],
@@ -566,7 +452,7 @@ def _write_debug_gif(data, gif_path):
         ax.set_title(f"{data['scenario_id']} t={frame}")
         for lane in data["road_points"]:
             ax.plot(lane[:, 0], lane[:, 1], color="0.75", linewidth=0.7)
-        for edge in data["map"]["road_edges"]:
+        for edge in data.get("road_edges", []):
             ax.plot(edge[:, 0], edge[:, 1], color="0.45", linewidth=0.7)
         ax.scatter([0.0], [0.0], s=18, color="red")
         for a in range(data["num_agents"]):
@@ -576,7 +462,7 @@ def _write_debug_gif(data, gif_path):
                 ax.plot(pts[:, 0], pts[:, 1], linewidth=1.0)
             if valid[a, frame]:
                 color = agent_color(a)
-                corners = bbox_corners(trajectories[a, frame])
+                corners = bbox_corners(trajectories[a, frame], sizes[a])
                 ax.add_patch(
                     Polygon(
                         corners,
@@ -587,9 +473,8 @@ def _write_debug_gif(data, gif_path):
                         alpha=0.45,
                     )
                 )
-            goal = data["clipped_final_states"][a]
-            if data["clipped_final_valid"][a]:
-                ax.scatter(goal[0], goal[1], marker="x", s=18, color="black")
+            if goal_valid[a]:
+                ax.scatter(goal_xy[a, 0], goal_xy[a, 1], marker="x", s=18, color="black")
 
     animation = FuncAnimation(fig, draw, frames=num_steps, interval=120)
     gif_path.parent.mkdir(parents=True, exist_ok=True)
@@ -598,7 +483,7 @@ def _write_debug_gif(data, gif_path):
 
 
 def _process_file_worker(args):
-    filename, output_path, viz_dir, max_scenarios, reserved_counter, saved_counter, counter_lock = args
+    filename, output_path, viz_dir, max_scenarios, cfg, reserved_counter, saved_counter, counter_lock = args
     local_saved = 0
     dataset = tf.data.TFRecordDataset(str(filename), compression_type="")
     for record_index, data in enumerate(dataset):
@@ -610,7 +495,7 @@ def _process_file_worker(args):
 
         scenario = scenario_pb2.Scenario()
         scenario.ParseFromString(data.numpy())
-        if _process_scenario(scenario, filename.name, record_index, output_path, viz_dir):
+        if _process_scenario(scenario, filename.name, record_index, output_path, cfg, viz_dir):
             local_saved += 1
             if max_scenarios is not None:
                 with counter_lock:
@@ -623,7 +508,8 @@ def _process_file_worker(args):
 
 def main():
     args = _parse_args()
-    raw_folder = _default_waymo_folder(args.split)
+    cfg = _config_from_args(args)
+    raw_folder = _default_waymo_folder(args.split, args.waymo_dir)
     output_path = Path(args.output_dir) / args.split if args.output_dir else _default_output_dir(args.split)
     output_path.mkdir(parents=True, exist_ok=True)
     viz_dir = output_path / "viz" if args.viz else None
@@ -641,7 +527,7 @@ def main():
         lock = mp.Lock()
         saved = 0
         for filename in tqdm(files, desc=f"selfplay-{args.split}"):
-            saved += _process_file_worker((filename, output_path, viz_dir, args.max, reserved_value, saved_value, lock))
+            saved += _process_file_worker((filename, output_path, viz_dir, args.max, cfg, reserved_value, saved_value, lock))
             if args.max is not None and reserved_value.value >= args.max:
                 print(f"Saved {saved_value.value} scenarios to {output_path}")
                 return
@@ -650,7 +536,7 @@ def main():
         reserved_value = manager.Value("i", 0)
         saved_value = manager.Value("i", 0)
         lock = manager.Lock()
-        worker_args = [(filename, output_path, viz_dir, args.max, reserved_value, saved_value, lock) for filename in files]
+        worker_args = [(filename, output_path, viz_dir, args.max, cfg, reserved_value, saved_value, lock) for filename in files]
         saved = 0
         with mp.Pool(processes=num_workers) as pool:
             for local_saved in tqdm(

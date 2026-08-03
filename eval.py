@@ -44,9 +44,17 @@ def generate_simulation_environments(cfg, cfg_ae, save_dir=None, model_cls=Scena
 
 
 def eval_ldm(cfg, cfg_ae, save_dir=None, model_cls=ScenarioDreamerLDM):
-    """ Evaluate the Scenario Dreamer Latent Diffusion Model."""
+    """ Evaluate the Scenario Dreamer Latent Diffusion Model.
+    
+    - mode: metrics
+    use the generated scene to calculate metrics
+    
+    - mode: initial_scene
+    generate scene
+    
+    """
     if cfg.eval.mode == 'metrics':
-        metric_evaluator = Metrics(cfg, cfg_ae)
+        metric_evaluator = Metrics(cfg)
         metric_evaluator.compute_metrics()
         return
     
@@ -65,6 +73,10 @@ def eval_ldm(cfg, cfg_ae, save_dir=None, model_cls=ScenarioDreamerLDM):
     
     # generate samples
     model = model_cls.load_from_checkpoint(ckpt_path, cfg=cfg, cfg_ae=cfg_ae).to('cuda')
+    # models that generate the same mode under several protocols (e.g. ldm_adv's
+    # prior vs dataset sampling) set eval.cache_dir explicitly so their sample sets
+    # do not overwrite each other; everything else keeps the default layout.
+    cache_dir = cfg.eval.get('cache_dir') or os.path.join(save_dir, f'{cfg.eval.mode}_samples')
     model.generate(
         mode = cfg.eval.mode, # Scenario Dreamer supports multiple generation modes: initial_scene, lane_conditioned, and inpainting
         num_samples = cfg.eval.num_samples,
@@ -72,7 +84,7 @@ def eval_ldm(cfg, cfg_ae, save_dir=None, model_cls=ScenarioDreamerLDM):
         cache_samples = cfg.eval.cache_samples,
         visualize = cfg.eval.visualize,
         conditioning_path = cfg.eval.conditioning_path,
-        cache_dir = os.path.join(save_dir, f'{cfg.eval.mode}_samples'),
+        cache_dir = cache_dir,
         viz_dir = cfg.eval.viz_dir,
         save_wandb = False,
         return_samples=False,

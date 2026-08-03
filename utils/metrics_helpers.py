@@ -639,134 +639,98 @@ def get_speeds(vehicles):
     return vehicles[:, UNIFIED_FORMAT_INDICES['speed']]
 
 
+def _collect_urban_planning_stats(dataset):
+    """ Collects the per-scene lane-graph statistics of ONE set of scenes."""
+    degree_keypoints_all = []
+    num_keypoints_all = []
+    num_valid_paths_all = []
+    valid_path_lengths_all = []
+
+    for data in tqdm(dataset):
+        keypoint_G = get_keypoint_G(data['G'], data['lanes'])
+        num_valid_paths, valid_path_lengths = urban_planning_reach_and_convenience(keypoint_G)
+        degree_keypoints_all.append(get_degree_keypoints(keypoint_G))
+        num_keypoints_all.append(get_num_keypoints(keypoint_G))
+        num_valid_paths_all.append(num_valid_paths)
+        valid_path_lengths_all.append(valid_path_lengths)
+
+    return {
+        'degree_keypoints': np.concatenate(degree_keypoints_all, axis=0),
+        'num_keypoints': np.concatenate(num_keypoints_all, axis=0),
+        'num_valid_paths': np.concatenate(num_valid_paths_all, axis=0),
+        'valid_path_lengths': np.concatenate(valid_path_lengths_all, axis=0),
+    }
+
+
 def compute_urban_planning_metrics(samples, gt_samples):
-    """ Computes the urban planning metrics for the samples and ground truth samples."""
+    """ Computes the urban planning metrics for the samples and ground truth samples.
+
+    These are distribution-level Frechet distances, so the two sets are pooled
+    INDEPENDENTLY and need not have the same length: you can score N generated
+    scenes against a reference set of any size. """
     print("Computing urban planning frechet distances")
-    
+
     # gen = scenario dreamer samples, real = gt samples
-    degree_keypoints_gen_all = []
-    num_keypoints_gen_all = []
-    num_valid_paths_gen_all = []
-    valid_path_lengths_gen_all = []
-    degree_keypoints_real_all = []
-    num_keypoints_real_all = []
-    num_valid_paths_real_all = []
-    valid_path_lengths_real_all = []
-    for i in tqdm(range(len(samples))):
-        data_gen = samples[i]
-        data_real = gt_samples[i]
+    gen = _collect_urban_planning_stats(samples)
+    real = _collect_urban_planning_stats(gt_samples)
 
-        G_gen = data_gen['G']
-        lanes_gen = data_gen['lanes']
-        G_real = data_real['G']
-        lanes_real = data_real['lanes']
-
-        keypoint_G_gen = get_keypoint_G(G_gen, lanes_gen)
-        keypoint_G_real = get_keypoint_G(G_real, lanes_real)
-
-        # get statistics for generated scene
-        degree_keypoints_gen = get_degree_keypoints(keypoint_G_gen)
-        num_keypoints_gen = get_num_keypoints(keypoint_G_gen)
-        num_valid_paths_gen, valid_path_lengths_gen = urban_planning_reach_and_convenience(keypoint_G_gen)
-        degree_keypoints_gen_all.append(degree_keypoints_gen)
-        num_keypoints_gen_all.append(num_keypoints_gen)
-        num_valid_paths_gen_all.append(num_valid_paths_gen)
-        valid_path_lengths_gen_all.append(valid_path_lengths_gen)
-
-        # get statistics for real scene
-        degree_keypoints_real = get_degree_keypoints(keypoint_G_real)
-        num_keypoints_real = get_num_keypoints(keypoint_G_real)
-        num_valid_paths_real, valid_path_lengths_real = urban_planning_reach_and_convenience(keypoint_G_real)
-        degree_keypoints_real_all.append(degree_keypoints_real)
-        num_keypoints_real_all.append(num_keypoints_real)
-        num_valid_paths_real_all.append(num_valid_paths_real)
-        valid_path_lengths_real_all.append(valid_path_lengths_real)
-
-    degree_keypoints_gen_all = np.concatenate(degree_keypoints_gen_all, axis=0)
-    num_keypoints_gen_all = np.concatenate(num_keypoints_gen_all, axis=0)
-    num_valid_paths_gen_all = np.concatenate(num_valid_paths_gen_all, axis=0)
-    valid_path_lengths_gen_all = np.concatenate(valid_path_lengths_gen_all, axis=0)
-
-    degree_keypoints_real_all = np.concatenate(degree_keypoints_real_all, axis=0)
-    num_keypoints_real_all = np.concatenate(num_keypoints_real_all, axis=0)
-    num_valid_paths_real_all = np.concatenate(num_valid_paths_real_all, axis=0)
-    valid_path_lengths_real_all = np.concatenate(valid_path_lengths_real_all, axis=0)
-
-    frechet_connectivity = compute_frechet_distance(degree_keypoints_gen_all, degree_keypoints_real_all) * 10
-    frechet_density = compute_frechet_distance(num_keypoints_gen_all, num_keypoints_real_all)
-    frechet_reach = compute_frechet_distance(num_valid_paths_gen_all, num_valid_paths_real_all)
-    frechet_convenience = compute_frechet_distance(valid_path_lengths_gen_all, valid_path_lengths_real_all) * 10
+    frechet_connectivity = compute_frechet_distance(gen['degree_keypoints'], real['degree_keypoints']) * 10
+    frechet_density = compute_frechet_distance(gen['num_keypoints'], real['num_keypoints'])
+    frechet_reach = compute_frechet_distance(gen['num_valid_paths'], real['num_valid_paths'])
+    frechet_convenience = compute_frechet_distance(gen['valid_path_lengths'], real['valid_path_lengths']) * 10
 
     return frechet_connectivity, frechet_density, frechet_reach, frechet_convenience
 
 
-def compute_jsd_metrics(samples, gt_samples):
-    """ Computes the JSD agent metrics for the samples and ground truth samples."""
-    print("Computing agent jsd metrics")
-    nearest_dist_gen_all = []
-    lat_dev_gen_all = []
-    ang_dev_gen_all = []
-    length_gen_all = []
-    width_gen_all = []
-    speed_gen_all = []
-    nearest_dist_real_all = []
-    lat_dev_real_all = []
-    ang_dev_real_all = []
-    length_real_all = []
-    width_real_all = []
-    speed_real_all = []
+def _collect_agent_stats(dataset):
+    """ Collects the per-vehicle agent statistics of ONE set of scenes."""
+    nearest_dist_all = []
+    lat_dev_all = []
+    ang_dev_all = []
+    length_all = []
+    width_all = []
+    speed_all = []
 
-    for i in tqdm(range(len(samples))):
-        data_gen = samples[i]
-        vehicles_gen = data_gen['vehicles'] # [pos_x, pos_y, speed, cos(heading), sin(heading), length, width]
+    for data in tqdm(dataset):
+        vehicles = data['vehicles'] # [pos_x, pos_y, speed, cos(heading), sin(heading), length, width]
         # resample lanes to higher resolution
-        lanes_gen = resample_lanes(data_gen['lanes'], num_points=100)
-        onroad_vehicles_gen = get_onroad_vehicles(vehicles_gen, lanes_gen)
+        lanes = resample_lanes(data['lanes'], num_points=100)
+        onroad_vehicles = get_onroad_vehicles(vehicles, lanes)
 
-        if len(vehicles_gen) > 1:
-            nearest_dist_gen_all.append(get_nearest_dists(vehicles_gen))
-        if len(onroad_vehicles_gen) > 0:
-            lat_dev_gen_all.append(get_lateral_devs(onroad_vehicles_gen, lanes_gen))
-            ang_dev_gen_all.append(get_angular_devs(onroad_vehicles_gen, lanes_gen))
-        length_gen_all.append(get_lengths(vehicles_gen))
-        width_gen_all.append(get_widths(vehicles_gen))
-        speed_gen_all.append(get_speeds(vehicles_gen))
+        if len(vehicles) > 1:
+            nearest_dist_all.append(get_nearest_dists(vehicles))
+        if len(onroad_vehicles) > 0:
+            lat_dev_all.append(get_lateral_devs(onroad_vehicles, lanes))
+            ang_dev_all.append(get_angular_devs(onroad_vehicles, lanes))
+        length_all.append(get_lengths(vehicles))
+        width_all.append(get_widths(vehicles))
+        speed_all.append(get_speeds(vehicles))
 
-        data_real = gt_samples[i]
-        vehicles_real = data_real['vehicles'] # [pos_x, pos_y, speed, cos(heading), sin(heading), length, width]
-        
-        lanes_real = resample_lanes(data_real['lanes'], num_points=100)
-        onroad_vehicles_real = get_onroad_vehicles(vehicles_real, lanes_real)
+    return {
+        'nearest_dist': np.concatenate(nearest_dist_all, axis=0),
+        'lat_dev': np.concatenate(lat_dev_all, axis=0),
+        'ang_dev': np.concatenate(ang_dev_all, axis=0),
+        'length': np.concatenate(length_all, axis=0),
+        'width': np.concatenate(width_all, axis=0),
+        'speed': np.concatenate(speed_all, axis=0),
+    }
 
-        if len(vehicles_real) > 1:
-            nearest_dist_real_all.append(get_nearest_dists(vehicles_real))
-        if len(onroad_vehicles_real) > 0:
-            lat_dev_real_all.append(get_lateral_devs(onroad_vehicles_real, lanes_real))
-            ang_dev_real_all.append(get_angular_devs(onroad_vehicles_real, lanes_real))
-        length_real_all.append(get_lengths(vehicles_real))
-        width_real_all.append(get_widths(vehicles_real))
-        speed_real_all.append(get_speeds(vehicles_real))
 
-    nearest_dist_gen_all = np.concatenate(nearest_dist_gen_all, axis=0)
-    lat_dev_gen_all = np.concatenate(lat_dev_gen_all, axis=0)
-    ang_dev_gen_all = np.concatenate(ang_dev_gen_all, axis=0)
-    length_gen_all = np.concatenate(length_gen_all, axis=0)
-    width_gen_all = np.concatenate(width_gen_all, axis=0)
-    speed_gen_all = np.concatenate(speed_gen_all, axis=0)
+def compute_jsd_metrics(samples, gt_samples):
+    """ Computes the JSD agent metrics for the samples and ground truth samples.
 
-    nearest_dist_real_all = np.concatenate(nearest_dist_real_all, axis=0)
-    lat_dev_real_all = np.concatenate(lat_dev_real_all, axis=0)
-    ang_dev_real_all = np.concatenate(ang_dev_real_all, axis=0)
-    length_real_all = np.concatenate(length_real_all, axis=0)
-    width_real_all = np.concatenate(width_real_all, axis=0)
-    speed_real_all = np.concatenate(speed_real_all, axis=0)
+    Each side is pooled INDEPENDENTLY (JSD compares two histograms), so the number
+    of generated scenes and the size of the real reference set are free to differ. """
+    print("Computing agent jsd metrics")
+    gen = _collect_agent_stats(samples)
+    real = _collect_agent_stats(gt_samples)
 
-    nearest_dist_jsd = jsd(nearest_dist_gen_all, nearest_dist_real_all, clip_min=0, clip_max=50, bin_size=1) * 10
-    lat_dev_jsd = jsd(lat_dev_gen_all, lat_dev_real_all, clip_min=0, clip_max=1.5, bin_size=0.1) * 10
-    ang_dev_jsd = jsd(ang_dev_gen_all, ang_dev_real_all, clip_min=-200, clip_max=200, bin_size=5) * 100
-    length_jsd = jsd(length_gen_all, length_real_all, clip_min=0, clip_max=25, bin_size=0.1) * 100
-    width_jsd = jsd(width_gen_all, width_real_all, clip_min=0, clip_max=5, bin_size=0.1) * 100
-    speed_jsd = jsd(speed_gen_all, speed_real_all, clip_min=0, clip_max=50, bin_size=1) * 100
+    nearest_dist_jsd = jsd(gen['nearest_dist'], real['nearest_dist'], clip_min=0, clip_max=50, bin_size=1) * 10
+    lat_dev_jsd = jsd(gen['lat_dev'], real['lat_dev'], clip_min=0, clip_max=1.5, bin_size=0.1) * 10
+    ang_dev_jsd = jsd(gen['ang_dev'], real['ang_dev'], clip_min=-200, clip_max=200, bin_size=5) * 100
+    length_jsd = jsd(gen['length'], real['length'], clip_min=0, clip_max=25, bin_size=0.1) * 100
+    width_jsd = jsd(gen['width'], real['width'], clip_min=0, clip_max=5, bin_size=0.1) * 100
+    speed_jsd = jsd(gen['speed'], real['speed'], clip_min=0, clip_max=50, bin_size=1) * 100
 
     return nearest_dist_jsd, lat_dev_jsd, ang_dev_jsd, length_jsd, width_jsd, speed_jsd
 
@@ -789,6 +753,135 @@ def compute_lane_metrics(samples, gt_samples):
         'frechet_reach': frechet_reach,
         'frechet_convenience': frechet_convenience,
     }
+
+GOAL_INDICES = {'goal_x': 7, 'goal_y': 8}
+# metres; a goal closer than this to the spawn point means the agent is parked
+# (mirrors ddpo.goal_schema.MIN_DISTANCE_TO_GOAL, which defines the same bucket
+# for the LDM-Adv conditioning labels)
+MIN_DISTANCE_TO_GOAL = 2.0
+# metres; a goal farther than this from any lane point counts as offroad
+# (same tolerance get_onroad_vehicles uses for spawn positions)
+GOAL_OFFROAD_TOL = 1.5
+
+
+def has_goals(vehicles):
+    """ True if the unified-format vehicle array carries goal columns."""
+    return vehicles.shape[-1] > GOAL_INDICES['goal_y']
+
+
+def get_goal_dists(vehicles):
+    """ Distance in metres between each vehicle's spawn point and its goal."""
+    goals = vehicles[:, GOAL_INDICES['goal_x']:GOAL_INDICES['goal_y'] + 1]
+    positions = vehicles[:, :UNIFIED_FORMAT_INDICES['pos_y'] + 1]
+    return np.linalg.norm(goals - positions, axis=-1)
+
+
+def get_goal_pseudo_vehicles(vehicles):
+    """ Builds a unified-format vehicle array placed AT each goal, headed along the
+    spawn->goal direction.
+
+    This lets the existing lane-relative helpers (get_onroad_vehicles /
+    get_lateral_devs / get_angular_devs) be reused to ask whether the generated
+    goals lie on the road and point along it. Parked agents (goal within
+    MIN_DISTANCE_TO_GOAL of the spawn) have no meaningful direction, so they keep
+    their spawn heading. """
+    goal_dists = get_goal_dists(vehicles)
+    pseudo = vehicles[:, :UNIFIED_FORMAT_INDICES['width'] + 1].copy()
+    pseudo[:, :UNIFIED_FORMAT_INDICES['pos_y'] + 1] = vehicles[
+        :, GOAL_INDICES['goal_x']:GOAL_INDICES['goal_y'] + 1]
+
+    delta = (vehicles[:, GOAL_INDICES['goal_x']:GOAL_INDICES['goal_y'] + 1]
+             - vehicles[:, :UNIFIED_FORMAT_INDICES['pos_y'] + 1])
+    heading = np.arctan2(delta[:, 1], delta[:, 0])
+    moving = goal_dists >= MIN_DISTANCE_TO_GOAL
+    pseudo[moving, UNIFIED_FORMAT_INDICES['cos_heading']] = np.cos(heading[moving])
+    pseudo[moving, UNIFIED_FORMAT_INDICES['sin_heading']] = np.sin(heading[moving])
+
+    return pseudo
+
+
+def get_goal_offroad_mask(vehicles, lanes, tol=GOAL_OFFROAD_TOL):
+    """ Per-vehicle mask marking goals farther than ``tol`` from every lane point."""
+    goals = vehicles[:, GOAL_INDICES['goal_x']:GOAL_INDICES['goal_y'] + 1]
+    lane_points = lanes.reshape(-1, 2)
+    dists = np.linalg.norm(goals[:, np.newaxis, :] - lane_points[np.newaxis, :, :], axis=-1).min(1)
+    return dists > tol
+
+
+def compute_goal_metrics(samples, gt_samples):
+    """ Computes the goal-specific metrics (only defined for the goal-augmented
+    pipeline, where both the generated and the ground-truth vehicles carry
+    ``[goal_x, goal_y]``).
+
+    - goal_dist_jsd     : JSD over ||goal - spawn||, i.e. how far agents intend to travel
+    - goal_lat_dev_jsd  : JSD over the goal point's distance to the nearest lane
+    - goal_ang_dev_jsd  : JSD over the angle between the spawn->goal direction and the
+                          nearest lane's heading
+    - goal_offroad_rate : % of goals farther than GOAL_OFFROAD_TOL from any lane
+    - parked_rate       : % of agents whose goal is within MIN_DISTANCE_TO_GOAL of
+                          their spawn (reported for generated and GT, plus the gap)
+    """
+    print("Computing goal metrics")
+    stats = {}
+    for key, dataset in (('gen', samples), ('real', gt_samples)):
+        goal_dists, lat_devs, ang_devs = [], [], []
+        num_offroad = num_parked = num_total = 0
+
+        for data in tqdm(dataset):
+            vehicles = data['vehicles']
+            if len(vehicles) == 0:
+                continue
+            if not has_goals(vehicles):
+                raise ValueError(
+                    "compute_goal_metrics requires goal columns on every sample; "
+                    "check that the generated samples are 9-dimensional and that "
+                    "the ground truth was prepared with gt_format=goal."
+                )
+            lanes = resample_lanes(data['lanes'], num_points=100)
+
+            goal_dists.append(get_goal_dists(vehicles))
+            num_parked += int((get_goal_dists(vehicles) < MIN_DISTANCE_TO_GOAL).sum())
+            num_offroad += int(get_goal_offroad_mask(vehicles, lanes).sum())
+            num_total += len(vehicles)
+
+            # lane-relative goal quality, measured on the goals that landed on-road
+            # (an offroad goal has no meaningful lateral/angular deviation, and it
+            # is already accounted for by goal_offroad_rate)
+            goal_pseudo = get_goal_pseudo_vehicles(vehicles)
+            onroad_goals = get_onroad_vehicles(goal_pseudo, lanes)
+            if len(onroad_goals) > 0:
+                lat_devs.append(get_lateral_devs(onroad_goals, lanes))
+                ang_devs.append(get_angular_devs(onroad_goals, lanes))
+
+        stats[key] = {
+            'goal_dist': np.concatenate(goal_dists, axis=0) if goal_dists else np.zeros(0),
+            'lat_dev': np.concatenate(lat_devs, axis=0) if lat_devs else np.zeros(0),
+            'ang_dev': np.concatenate(ang_devs, axis=0) if ang_devs else np.zeros(0),
+            'offroad_rate': num_offroad / max(num_total, 1),
+            'parked_rate': num_parked / max(num_total, 1),
+        }
+
+    gen, real = stats['gen'], stats['real']
+
+    def _jsd(key, scale, **kwargs):
+        """JSD over one field, or NaN when either side collected no samples."""
+        if len(gen[key]) == 0 or len(real[key]) == 0:
+            print(f"WARNING: no samples collected for '{key}'; reporting NaN.")
+            return float('nan')
+        return jsd(gen[key], real[key], **kwargs) * scale
+
+    return {
+        # same clip/bin conventions as the corresponding spawn-space metrics
+        'goal_dist_jsd': _jsd('goal_dist', 100, clip_min=0, clip_max=50, bin_size=1),
+        'goal_lat_dev_jsd': _jsd('lat_dev', 10, clip_min=0, clip_max=1.5, bin_size=0.1),
+        'goal_ang_dev_jsd': _jsd('ang_dev', 100, clip_min=-200, clip_max=200, bin_size=5),
+        'goal_offroad_rate': gen['offroad_rate'] * 100,
+        'goal_offroad_rate_gt': real['offroad_rate'] * 100,
+        'parked_rate': gen['parked_rate'] * 100,
+        'parked_rate_gt': real['parked_rate'] * 100,
+        'parked_rate_diff': abs(gen['parked_rate'] - real['parked_rate']) * 100,
+    }
+
 
 def compute_agent_metrics(samples, gt_samples):
     """ Computes the agent metrics for the samples and ground truth samples."""

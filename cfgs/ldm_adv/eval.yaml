@@ -6,14 +6,32 @@ run_name: scenario_dreamer_ldm_adv_base_waymo
 
 mode: init_scene
 num_samples: 100
-init_prob_matrix_path: ${project_root}/metadata/initial_prob_matrix_waymo.pt
-inpainting_prob_matrix_path: ${project_root}/metadata/inpainting_prob_matrix_waymo.pt
+
+# Where the scenes to generate come from:
+#   prior   -> sample (map_id, num_lanes, num_agents) from init_prob_matrix_path and
+#              leave every conditioning label at its trained null token. This is an
+#              UNCONDITIONAL generator, i.e. the same protocol the baseline LDM is
+#              evaluated under, and the setting to use for model comparison.
+#   dataset -> take real scenes from split_name (ground-truth layout AND ground-truth
+#              per-agent / adv conditioning labels). This is a reconstruction setting;
+#              use it for conditioned modes (init_agent / init_adv) and diagnostics.
+split_name: val
+# Layout prior estimated on the goal latent cache (scripts/create_goal_init_prob_matrix.py).
+# NOT the baseline's initial_prob_matrix_waymo.pt: the goal preprocessing drops agents
+# without a valid goal and caps the scene at max_num_agents, so its (num_lanes,
+# num_agents) distribution differs. Counts TOTAL agents; one is split off as the adv.
+init_prob_matrix_path: ${project_root}/metadata/initial_prob_matrix_goal_waymo.pt
+inpainting_prob_matrix_path: ${project_root}/metadata/inpainting_prob_matrix_waymo.pt  # not in use for my task
 batch_size: 32
 visualize: False
 viz_dir: ${project_root}/viz_gen_samples_${ldm_adv.eval.run_name}
 cache_samples: False
 conditioning_path: null
+# sample_source is part of the path: prior-mode and dataset-mode samples of the same
+# run/mode are different sample sets and must not overwrite each other.
+cache_dir: ${dataset_root}/checkpoints/${ldm_adv.eval.run_name}/${ldm_adv.eval.mode}_${ldm_adv.eval.sample_source}_samples
 
+# TODO: below not in use, remove it in the future
 sim_envs:
   num_inpainting_candidates: 8
   overhead_factor: 5
@@ -21,7 +39,14 @@ sim_envs:
   nocturne_compatible_only: True
 
 metrics:
-  samples_path: ${dataset_root}/checkpoints/${ldm_adv.eval.run_name}/initial_scene_samples
+  mode: init_scene
+  sample_source: ${ldm_adv.eval.sample_source} # which generated sample set to score
+  samples_path: ${dataset_root}/checkpoints/${ldm_adv.eval.run_name}/${ldm_adv.eval.metrics.mode}_${ldm_adv.eval.metrics.sample_source}_samples
   metrics_save_path: ${dataset_root}/checkpoints/${ldm_adv.eval.run_name}
-  eval_set: ${project_root}/metadata/waymo_eval_set.pkl
-  gt_test_dir: ${dataset_root}/scene_goal_preprocess_waymo/test
+  metrics_filename: metrics_${ldm_adv.eval.metrics.mode}_${ldm_adv.eval.metrics.sample_source}.pkl
+  # Shared reference set with the baseline LDM: same scenes, same ground-truth
+  # preparation (see cfgs/eval/waymo_ldm.yaml), so the w/o-goal numbers of the two
+  # models are computed against an identical real distribution.
+  eval_set: ${project_root}/metadata/waymo_goal_val_eval_set.pkl
+  gt_test_dir: ${dataset_root}/scene_goal_preprocess_waymo/val
+  gt_format: goal

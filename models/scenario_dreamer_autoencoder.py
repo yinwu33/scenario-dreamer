@@ -46,26 +46,33 @@ class ScenarioDreamerAutoEncoder(pl.LightningModule):
 
     
     def test_dataloader(self):
-        """If caching enabled, returns Dataloader for dataset we wish to cache latents, otherwise returns a DataLoader for the test dataset."""
+        """Return the requested latent-caching or reconstruction-evaluation split."""
         use_goal = getattr(self.cfg_dataset, 'use_goal', False)
         if self.cfg.eval.cache_latents.enable_caching:
             if use_goal:
                 test_dataset = WaymoDatasetAEGoal(self.cfg_dataset, split_name=self.cfg.eval.cache_latents.split_name, mode='eval')
-            elif self.cfg.dataset_name == 'waymo':
-                test_dataset = WaymoDatasetAutoEncoder(self.cfg_dataset, split_name=self.cfg.eval.cache_latents.split_name, mode='eval')
             else:
-                test_dataset = NuplanDatasetAutoEncoder(self.cfg_dataset, split_name=self.cfg.eval.cache_latents.split_name, mode='eval')
+                # the vanilla scenario dreamer
+                if self.cfg.dataset_name == 'waymo':
+                    test_dataset = WaymoDatasetAutoEncoder(self.cfg_dataset, split_name=self.cfg.eval.cache_latents.split_name, mode='eval')
+                else:
+                    test_dataset = NuplanDatasetAutoEncoder(self.cfg_dataset, split_name=self.cfg.eval.cache_latents.split_name, mode='eval')
             latent_dir = os.path.join(self.cfg.eval.cache_latents.latent_dir, self.cfg.eval.cache_latents.split_name)
             if not os.path.exists(latent_dir):
                 os.makedirs(latent_dir, exist_ok=True)
             self.files = test_dataset.files.copy()
         else:
+            # not latent caching, here is metrics evaluation
+            
+            # TODO: notice I use val here because "advscene" dataset doesn't have test yet
+            # TODO: should use "test" in the future
+            eval_split = getattr(self.cfg.eval, 'split_name', 'val')
             if use_goal:
-                test_dataset = WaymoDatasetAEGoal(self.cfg_dataset, split_name='val', mode='eval')
+                test_dataset = WaymoDatasetAEGoal(self.cfg_dataset, split_name=eval_split, mode='eval')
             elif self.cfg.dataset_name == 'waymo':
-                test_dataset = WaymoDatasetAutoEncoder(self.cfg_dataset, split_name='val', mode='eval')
+                test_dataset = WaymoDatasetAutoEncoder(self.cfg_dataset, split_name=eval_split, mode='eval')
             else:
-                test_dataset = NuplanDatasetAutoEncoder(self.cfg_dataset, split_name='test', mode='eval')
+                test_dataset = NuplanDatasetAutoEncoder(self.cfg_dataset, split_name=eval_split, mode='eval')
         test_dataloader = DataLoader(test_dataset, 
                             batch_size=self.cfg.datamodule.val_batch_size, 
                             shuffle=False,

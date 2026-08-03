@@ -5,7 +5,7 @@ defaults:
 # ldm_adv reuses the EXACT goal-autoencoder latent cache (per-agent latents). The
 # single adversarial agent is split off on the fly at load time, so nothing needs
 # to be re-exported -- the autoencoder is unaware of the adversary.
-dataset_path: ${dataset_root}/scenario_dreamer_ae_goal_latents_waymo
+dataset_path: ${dataset_root}/advscene_ae_goal_latents_waymo
 latent_stats_dir: ${project_root}/metadata/latent_stats
 latent_stats_path: ${ldm_adv.dataset.latent_stats_dir}/${ldm_adv.model.autoencoder_run_name}.pkl
 agent_latents_mean: null # mean of agent latents, loaded from cached latent stats

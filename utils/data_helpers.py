@@ -369,7 +369,8 @@ def normalize_scene(
 
     # goal pos_x / pos_y (optional trailing columns), normalized in the same
     # FOV frame as the current position
-    if agent_states.shape[-1] >= 9:
+    if agent_states.shape[-1] == 9:
+        # goal pos_x / pos_y
         agent_states[:, 7] = 2 * ((agent_states[:, 7] - (-1 * fov/2))
                                 / fov) - 1
         agent_states[:, 8] = 2 * ((agent_states[:, 8] - (-1 * fov/2))
@@ -560,6 +561,18 @@ def convert_batch_to_scenarios(data, batch_size, batch_idx, cache_dir, condition
     agent_batch = agent_batch.cpu().numpy()
     lane_batch = lane_batch.cpu().numpy()
     lane_conn_batch = lane_conn_batch.cpu().numpy()
+    has_adv = (
+        'adv' in data.node_types
+        and 'x' in data['adv']
+        and 'type' in data['adv']
+    )
+    if has_adv:
+        x_adv_states = data['adv'].x.cpu().numpy()
+        x_adv_types = data['adv'].type.cpu().numpy()
+        if 'batch' in data['adv']:
+            adv_batch = data['adv'].batch.cpu().numpy()
+        else:
+            adv_batch = np.arange(len(x_adv_states))
     if mode == 'inpainting':
         x_lane_mask = x_lane_mask.cpu().numpy()
         x_agent_mask = x_agent_mask.cpu().numpy()
@@ -571,6 +584,13 @@ def convert_batch_to_scenarios(data, batch_size, batch_idx, cache_dir, condition
         scene_i_agents = x_agent_states[agent_batch == i]
         scene_i_lanes = x_lane_states[lane_batch == i]
         scene_i_agent_types = x_agent_types[agent_batch == i]
+        if has_adv:
+            scene_i_agents = np.concatenate(
+                [scene_i_agents, x_adv_states[adv_batch == i]], axis=0
+            )
+            scene_i_agent_types = np.concatenate(
+                [scene_i_agent_types, x_adv_types[adv_batch == i]], axis=0
+            )
         if cache_lane_types:
             scene_i_lane_types = x_lane_types[lane_batch == i]
         scene_i_lane_conns = x_lane_conn[lane_conn_batch == i]
@@ -598,10 +618,13 @@ def convert_batch_to_scenarios(data, batch_size, batch_idx, cache_dir, condition
             data['agent_mask'] = scene_i_agent_mask
             data['lane_ids'] = scene_i_lane_ids
 
-        if mode != 'inpainting':
+        conditioning_idx = int(batch_idx * batch_size + i)
+        if conditioning_filenames is not None:
+            scenario_id = conditioning_filenames[conditioning_idx]
+        elif mode != 'inpainting':
             scenario_id = f"{i}_{batch_idx}"
         else:
-            scenario_id = conditioning_filenames[int(batch_idx * batch_size + i)]
+            raise ValueError("Inpainting requires conditioning filenames.")
         filename = f"{scenario_id}.pkl"
 
         batch_of_scenarios[scenario_id] = data

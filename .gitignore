@@ -33,3 +33,5 @@ outputs/**/media/
 outputs/**/wandb/
 outputs/**/checkpoints/
 outputs/**/generated/
+
+temp_scripts/*
