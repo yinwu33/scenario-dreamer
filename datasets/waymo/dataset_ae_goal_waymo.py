@@ -34,6 +34,10 @@ class WaymoDatasetAEGoal(Dataset):
     The goal columns and any goal-driven filtering are applied at load time by
     ``utils.goal_runtime.prepare_scene``; everything else comes off disk, mirroring the
     baseline autoencoder's fast path.
+
+    Setting ``cfg.include_goal = False`` keeps the goal-driven *filtering* but drops the
+    two goal columns, yielding the baseline 7-D states on exactly the same agent set --
+    the apples-to-apples setup for evaluating a 7-D checkpoint against this dataset.
     """
 
     def __init__(self, cfg: Any, split_name: str = "train", mode: str = "train") -> None:
@@ -42,6 +46,10 @@ class WaymoDatasetAEGoal(Dataset):
         self.split_name = split_name
         self.mode = mode
         self.preprocess = self.cfg.preprocess
+        # When False the goal columns are dropped again after prepare_scene, so the states
+        # are the baseline 7-D ones while the *agent set* stays exactly the goal-filtered
+        # one. That is what makes a 7-D and a 9-D autoencoder comparable on the same data.
+        self.include_goal = getattr(self.cfg, "include_goal", True)
         # mirrors the autoencoder dataset interface; preprocess_dir holds the cached pickles
         self.preprocessed_dir = os.path.join(self.cfg.preprocess_dir, f"{self.split_name}")
         self.files = sorted(glob.glob(os.path.join(self.preprocessed_dir, "*.pkl")))
@@ -60,6 +68,8 @@ class WaymoDatasetAEGoal(Dataset):
         
         scene = prepare_scene(data, self.cfg)
         agent_states = scene["agent_states"] # 【N, 9】, includes goal columns
+        if not self.include_goal:
+            agent_states = agent_states[:, :-2] # [N, 7], baseline state layout
         agent_types = scene["agent_types"]  # [N, ?]
         goal_xy = scene["goal_xy"]  # [N, 2]
         goal_valid = scene["goal_valid"]  # [N,]

@@ -1,10 +1,12 @@
 defaults:
   - /dataset/waymo_base@_here_
 
-dataset_path: ${dataset_root}/scene_goal_preprocess_waymo # source of preprocessed goal-augmented scenes
+dataset_path: ${dataset_root}/advscene_preprocess_waymo # source of preprocessed goal-augmented scenes
 preprocess: True # always load from preprocessed pickles (no slow path here)
-preprocess_dir: ${dataset_root}/scene_goal_preprocess_waymo # directory holding the preprocessed pickles
+preprocess_dir: ${dataset_root}/advscene_preprocess_waymo # directory holding the preprocessed pickles
 generate_only_vehicles: False
 remove_left_right_connections: False
 
 offroad_threshold: 1.5
+
+use_goal: True  # use_goal 让原本的SD-AE使用我构建的advscene dataset，只针对SD-AE def test_dataloader生效

@@ -1,10 +1,17 @@
 # Evaluate the regular 7-D Waymo Scenario Dreamer autoencoder on the
-# goal-preprocessed Waymo dataset.  The goal coordinates are deliberately
-# omitted so the input remains compatible with the regular autoencoder
-# checkpoint.
+# goal-preprocessed Waymo dataset, as the head-to-head baseline for
+# config_ae_goal. Both configs must see the *same* scenes and the *same* agents,
+# so this one also reads the v2 records through WaymoDatasetAEGoal (same
+# prepare_scene/select_agents filtering) and only drops the two goal columns,
+# keeping the input compatible with the 7-D checkpoint.
+#
+# Compare the two runs on `test_agent_loss_base_state` (L1 over the 7 shared state
+# columns). `test_agent_loss` / `test_loss` average over state_dim, so they are NOT
+# comparable across a 7-D and a 9-D autoencoder.
 #
 # Usage:
 #   python eval.py --config-name config_ae_my_dataset
+#   python eval.py --config-name config_ae_goal
 
 defaults:
   - _base
@@ -20,12 +27,16 @@ model_name: autoencoder
 
 ae:
   dataset:
-    dataset_path: ${dataset_root}/scene_goal_preprocess_waymo
-    preprocess_dir: ${dataset_root}/scene_goal_preprocess_waymo
+    dataset_path: ${dataset_root}/advscene_preprocess_waymo
+    preprocess_dir: ${dataset_root}/advscene_preprocess_waymo
+    # read the v2 records through the goal dataset so the agent set is filtered exactly
+    # as it is for config_ae_goal (goal-valid + on-road goals), but drop the goal columns
+    # so the 7-D checkpoint sees its native state layout.
     use_goal: true
     include_goal: false
+    offroad_threshold: 1.5 # must match cfgs/ae_goal/dataset.yaml -- it decides which agents survive
 
   eval:
     run_name: scenario_dreamer_autoencoder_waymo
     split_name: val
-    num_samples_to_visualize: 0
+    num_samples_to_visualize: 16
