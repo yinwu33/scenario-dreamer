@@ -9,7 +9,7 @@
 #   ${scratch_root}/checkpoints/scenario_dreamer_ae_goal_waymo/last.ckpt
 #
 # Usage:
-#   python train.py --config-name config_critical_scene_ldm_adv_ddpo
+#   python train.py --config-name config_advscene_ldm_adv_ddpo
 
 model_name: ddpo
 
@@ -52,7 +52,7 @@ ddpo:
   output_dir: ${experiment.output_dir}
 
 experiment:
-  project: critical_scene
+  project: advscene
   stage: ddpo
   generator: ldm_adv
   sampler: ${ddpo.sampler}

@@ -5,7 +5,7 @@ defaults:
 # Diffuse over the goal-autoencoder latents. agent_latent_dim (8) and
 # lane_latent_dim (24) are inherited from /model/ldm; the adversary shares the
 # agent latent layout (dit_ex sets adv_latent_dim = agent_latent_dim).
-autoencoder_run_name: scenario_dreamer_ae_goal_waymo # the goal autoencoder run
+autoencoder_run_name: advscene_ae_goal_waymo # the goal autoencoder run
 autoencoder_path: ${scratch_root}/checkpoints/${ldm_adv.model.autoencoder_run_name}/last.ckpt
 
 # Conditioning: embed the discretized labels (see ldm_adv.dataset.cond_*) and add
