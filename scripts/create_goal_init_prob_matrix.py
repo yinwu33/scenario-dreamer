@@ -78,11 +78,14 @@ def main():
             "No scene satisfied the lane/agent bounds; nothing to normalize."
         )
 
-    # Row-normalize per map id, exactly like initial_prob_matrix_waymo.pt (a map id
-    # never observed stays all-zero; prior-mode sampling must not select it).
-    totals = counts.sum(dim=-1, keepdim=True)
-    probs = torch.where(totals > 0, counts / totals.clamp(min=1.0), counts)
-    probs = probs.float()
+    # Normalize the WHOLE matrix to a joint distribution over (num_lanes,
+    # num_agents). ldm_adv has no map_id dimension, so -- unlike the baseline's
+    # (num_map_ids, num_lanes, num_agents) matrix, where each map_id slice sums to
+    # 1 -- there is nothing to normalize per row here. Normalizing per num_lanes
+    # row would give every lane count equal mass (a uniform lane-count prior), and
+    # ScenarioDreamerLDMAdv._initialize_pyg_dset samples from prior.reshape(-1),
+    # i.e. it reads this as one joint distribution.
+    probs = (counts / counts.sum()).float()
 
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)

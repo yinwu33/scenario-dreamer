@@ -59,15 +59,22 @@ class WaymoDatasetLDMAdv(Dataset):
         self.files = sorted(glob.glob(os.path.join(self.dataset_dir, "*.pkl")))
         self.dset_len = len(self.files)
 
-    def _select_adv_index(self, num_agents):
+    def _select_adv_index(self, num_agents, scene_id=0):
         """Pick the index of the single adversarial agent: a random non-ego agent
         (ego is index 0 after the ego-first reorder and is never selected).
-        Deterministic outside of training for reproducible evaluation. Assumes
-        ``num_agents >= 2``."""
+        Assumes ``num_agents >= 2``.
+
+        Outside training the draw is seeded on the scene id, so it is reproducible
+        across epochs and runs (DDPO's conditioning pool relies on a scene's
+        adversary being constant) while keeping the *same* distribution training
+        samples from. Taking ``non_ego[0]`` instead would always pick the first
+        agent of the min_y ordering, i.e. the one furthest behind the ego --
+        measured on val that biases ego_dist to 52% "far" against 33% under random
+        selection, which makes val metrics incomparable to the training ones."""
         non_ego = np.arange(1, num_agents)
         if self.mode == "train":
             return int(np.random.choice(non_ego))
-        return int(non_ego[0])
+        return int(np.random.default_rng(int(scene_id)).choice(non_ego))
 
     @staticmethod
     def _bucket(dist, near_thr, far_thr):
@@ -202,7 +209,7 @@ class WaymoDatasetLDMAdv(Dataset):
         # path removes it from the normal agent set (replacement-style missing
         # agent prior). DDPO can keep it in the normal set and use the adv stream
         # as an extra inserted agent, preserving the full real scene context.
-        adv_idx = self._select_adv_index(agent_mu.shape[0])
+        adv_idx = self._select_adv_index(agent_mu.shape[0], scene_id=idx)
         adv_mu = agent_mu[adv_idx:adv_idx + 1]
         adv_log_var = agent_log_var[adv_idx:adv_idx + 1]
         keep = np.ones(agent_mu.shape[0], dtype=bool)

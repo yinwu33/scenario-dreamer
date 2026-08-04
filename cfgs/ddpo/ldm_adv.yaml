@@ -87,8 +87,11 @@ gen_agent_invalid:
   check_ego_dist: true
 
 # --- artifacts -------------------------------------------------------------
-ldm_adv_ckpt: ${scratch_root}/checkpoints/scenario_dreamer_ldm_adv_train/last.ckpt
-ae_ckpt: ${scratch_root}/checkpoints/scenario_dreamer_ae_goal_waymo/last.ckpt
+# Must be the base run trained by config_ldm_adv_base (ldm_adv.train.run_name) and
+# the SAME goal autoencoder whose latents that run diffused -- the LDM's latent
+# space is tied to one autoencoder, so a mismatched ae_ckpt decodes to garbage.
+ldm_adv_ckpt: ${scratch_root}/checkpoints/advscene_ldm_adv_base/last.ckpt
+ae_ckpt: ${scratch_root}/checkpoints/advscene_ae_goal_waymo/last.ckpt
 use_ema_weights: true
 
 # --- conditioning pools (native ldm_adv latent cache; no dump step) ---------

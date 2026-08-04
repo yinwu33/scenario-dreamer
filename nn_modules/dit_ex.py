@@ -44,6 +44,15 @@ class DiT(nn.Module):
         self.use_adv_conditioning = bool(self.cfg_model.get("use_adv_conditioning", False))
         self.use_agent_conditioning = bool(self.cfg_model.get("use_agent_conditioning", False))
         self.cond_dropout_prob = float(self.cfg_model.get("cond_dropout_prob", 0.0))
+        # Per-SCENE joint dropout on top of the per-token/per-field dropout above.
+        # The iid dropout alone never produces the fully-unconditional scene that
+        # prior-mode generation feeds in (every agent null AND all four adv fields
+        # null at once): that state has probability p^n_agents * p^4, i.e. never.
+        # This draws whole scenes to be fully null, so unconditional generation is
+        # in-distribution -- the classifier-free-guidance convention of dropping
+        # the entire conditioning jointly, kept alongside the iid dropout that
+        # makes DDPO's partial-null targets in-distribution.
+        self.uncond_scene_prob = float(self.cfg_model.get("cond_uncond_scene_prob", 0.0))
         if (self.use_adv_conditioning or self.use_agent_conditioning) and self.cond_dropout_prob <= 0:
             raise ValueError(
                 "cond_dropout_prob must be > 0 when conditioning is enabled "
@@ -178,7 +187,18 @@ class DiT(nn.Module):
                 parameter.requires_grad_(True)
 
 
-    def _cond_drop_mask(self, num_tokens, store, device, num_fields=1):
+    def _uncond_scene_mask(self, batch_size, device):
+        """Per-scene ``[batch_size]`` bool mask of scenes whose conditioning is
+        dropped *entirely* (every agent, every adv field). Drawn once per forward
+        so the agent and adv streams are dropped together -- that joint state is
+        exactly what prior-mode generation feeds in. ``None`` outside training or
+        when ``cond_uncond_scene_prob`` is 0."""
+        if not self.training or self.uncond_scene_prob <= 0:
+            return None
+        return torch.rand(batch_size, device=device) < self.uncond_scene_prob
+
+    def _cond_drop_mask(self, num_tokens, store, device, num_fields=1,
+                        uncond_scene=None, token_scene=None):
         """Conditioning dropout mask for a token stream.
 
         ``num_fields == 1`` (default, normal-agent stream): a single ``[num_tokens]``
@@ -190,13 +210,25 @@ class DiT(nn.Module):
         combinations (e.g. type/motion pinned while goal_dist/ego_dist are null),
         which makes the DDPO per-field null-token target in-distribution.
 
+        ``uncond_scene`` (training only) is the per-scene joint-drop mask from
+        :meth:`_uncond_scene_mask`; every token of a selected scene is forced to
+        null on top of the iid draw. ``token_scene`` maps each token to its scene
+        (omit when the stream already has exactly one token per scene, like adv).
+
         Random while training; otherwise an explicit ``cond_drop`` mask if the
         caller provides one (inference: drop the agents whose conditions are
         irrelevant; broadcast across fields); else ``None`` (use the labels as
         given)."""
         if self.training and self.cond_dropout_prob > 0:
             shape = (num_tokens,) if num_fields == 1 else (num_tokens, num_fields)
-            return (torch.rand(*shape, device=device) < self.cond_dropout_prob).long()
+            drop = (torch.rand(*shape, device=device) < self.cond_dropout_prob).long()
+            if uncond_scene is not None:
+                per_token = uncond_scene if token_scene is None else uncond_scene[token_scene]
+                per_token = per_token.long()
+                if drop.dim() == 2:
+                    per_token = per_token.unsqueeze(1)
+                drop = torch.maximum(drop, per_token)
+            return drop
         if "cond_drop" in store:
             m = store.cond_drop.long().to(device)
             return m if num_fields == 1 else m.unsqueeze(1).expand(-1, num_fields)
@@ -244,12 +276,18 @@ class DiT(nn.Module):
         # (e.g. init_adv / a DDPO rollout where the agents are given) every agent is
         # treated as the trained null state -- the same distribution training saw
         # for a fully-dropped agent -- rather than dropping the term entirely.
+        # Scenes drawn to be fully unconditional this step: one draw shared by the
+        # agent and adv branches below, so a selected scene goes all-null on both.
+        uncond_scene = self._uncond_scene_mask(data.batch_size, x_adv.device)
+
         if self.use_agent_conditioning:
             device = num_agents_emb_per_agent.device
             n_agent = num_agents_emb_per_agent.shape[0]
             if "cond" in data["agent"]:
                 agent_cond = data["agent"].cond.long()
-                drop = self._cond_drop_mask(n_agent, data["agent"], device)
+                drop = self._cond_drop_mask(
+                    n_agent, data["agent"], device,
+                    uncond_scene=uncond_scene, token_scene=agent_batch)
             else:
                 agent_cond = torch.zeros((n_agent, 3), dtype=torch.long, device=device)
                 drop = torch.ones(n_agent, dtype=torch.long, device=device)
@@ -272,7 +310,9 @@ class DiT(nn.Module):
                 adv_cond = data["adv"].cond.long()
                 # Independent per-field dropout (adv stream only): each of the four
                 # labels is dropped iid, so partial-null combinations are trained.
-                drop = self._cond_drop_mask(n_adv, data["adv"], device, num_fields=4)
+                # One adv token per scene, so uncond_scene indexes it directly.
+                drop = self._cond_drop_mask(n_adv, data["adv"], device, num_fields=4,
+                                            uncond_scene=uncond_scene)
             else:
                 adv_cond = torch.zeros((n_adv, 4), dtype=torch.long, device=device)
                 drop = torch.ones((n_adv, 4), dtype=torch.long, device=device)

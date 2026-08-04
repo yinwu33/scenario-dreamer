@@ -33,10 +33,11 @@ class ScenarioDreamerLDMAdv(ScenarioDreamerLDM):
         )
 
     def _initialize_pyg_dset(self, mode, num_samples, *args, **kwargs):
-        """Build the generation dataset, either from the layout prior
-        (``eval.sample_source='prior'``, comparable to the baseline LDM) or from a
-        deterministic real-data subset (``'dataset'``, ground-truth layout +
-        conditioning)."""
+        """Build the generation dataset by sampling ``(num_lanes, num_agents)``
+        layouts from ``eval.init_prob_matrix_path``. Conditioning labels are left
+        absent, so the DiT uses its trained null tokens for every agent and for
+        all four adv fields -- the unconditional protocol the baseline LDM is
+        evaluated under. Scenes are never taken from real data here."""
         if self.cfg.dataset_name != "waymo":
             raise ValueError("LDM-Adv evaluation currently supports Waymo only.")
 
@@ -68,10 +69,8 @@ class ScenarioDreamerLDMAdv(ScenarioDreamerLDM):
         for _ in range(num_samples):
             prob_idx = int(torch.multinomial(flatten_probs, 1).item())
 
-            num_lanes = int((prob_idx // (self.cfg_dataset.max_num_agents + 1)).item())
-            num_total_agents = int(
-                (prob_idx % (self.cfg_dataset.max_num_agents + 1)).item()
-            )
+            num_lanes = prob_idx // (self.cfg_dataset.max_num_agents + 1)
+            num_total_agents = prob_idx % (self.cfg_dataset.max_num_agents + 1)
             assert num_lanes > 0, "Generating scene with no lanes"
             assert num_total_agents >= 2, (
                 "Adv generation needs the ego plus at least one non-ego agent; the "

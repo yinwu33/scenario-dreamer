@@ -21,6 +21,11 @@ autoencoder_path: ${scratch_root}/checkpoints/${ldm_adv.model.autoencoder_run_na
 use_agent_conditioning: true
 use_adv_conditioning: true
 cond_dropout_prob: 0.2  # per-agent unconditional dropout (must be > 0 when conditioning)
+# Per-SCENE joint dropout: with this probability the whole scene goes null (every
+# agent AND all four adv fields at once). The iid dropout above never produces
+# that state (p^n_agents * p^4), yet it is exactly what prior-mode / base eval
+# feeds in, so without this the unconditional protocol is out-of-distribution.
+cond_uncond_scene_prob: 0.1
 cond_num_types: 3       # vehicle / pedestrian / cyclist (matches dataset.num_agent_types)
 cond_num_motion: 2      # parked / moving
 cond_num_goaldist: 3    # near / middle / far (goal-spawn travel distance)
