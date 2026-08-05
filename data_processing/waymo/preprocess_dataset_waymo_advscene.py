@@ -21,7 +21,7 @@ from tqdm import tqdm
 from waymo_open_dataset.protos import scenario_pb2
 
 from utils.geometry import apply_se2_transform, normalize_angle
-from utils.goal_preprocess import V2Config, build_v2_record
+from utils.goal_preprocess import V2Config, build_record
 from utils.lane_graph_helpers import get_compact_lane_graph, resample_polyline
 
 
