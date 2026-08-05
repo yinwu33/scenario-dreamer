@@ -18,7 +18,7 @@ torch.set_float32_matmul_precision('medium')
 # default 'file_descriptor' strategy passes one fd per tensor storage, which
 # intermittently fails with "RuntimeError: received 0 items of ancdata" once a
 # batch carries enough tensors. 'file_system' passes /dev/shm names instead.
-torch.multiprocessing.set_sharing_strategy('file_system')
+# torch.multiprocessing.set_sharing_strategy('file_system')
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import LearningRateMonitor
 from pytorch_lightning.callbacks import ModelCheckpoint, ModelSummary
