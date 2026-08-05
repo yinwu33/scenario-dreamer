@@ -29,5 +29,5 @@ metrics:
   # Note: this LDM was trained on scenario_dreamer_ae_preprocess_waymo, so scoring it
   # here measures it out of its training preprocessing -- see MyREADME.md.
   eval_set: ${project_root}/metadata/waymo_goal_val_eval_set.pkl # pickle containing paths to ground-truth samples for metrics computation
-  gt_test_dir: ${dataset_root}/scene_goal_preprocess_waymo/val # directory containing ground-truth agent/lane data for metrics computation
+  gt_test_dir: ${dataset_root}/advscene_preprocess_waymo/val # same goal-preprocessed val data used by ldm_adv metrics
   gt_format: goal # goal-preprocessed pickles need the valid-goal filter / agent cap applied

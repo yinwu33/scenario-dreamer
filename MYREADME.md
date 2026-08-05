@@ -6,7 +6,7 @@ python train.py --config-name config_ae_goal
 python eval.py --config-name config_ae_goal ae_goal.eval.cache_latents.enable_caching=True ae_goal.eval.cache_latents.split_name=train
 python eval.py --config-name config_ae_goal ae_goal.eval.cache_latents.enable_caching=True ae_goal.eval.cache_latents.split_name=val
 # 3. 训 ldm_adv（在 goal-AE latent 上扩散 normal agents + 1 个 adversary）
-python train.py --config-name config_ldm_adv_train
+python train.py --config-name config_ldm_adv_base
 ```
 
 

@@ -93,13 +93,13 @@ python eval.py --config-name config_ae_goal +ae_goal.eval.split_name=val ae_goal
 Both models are scored under the same protocol:
 
 * **same reference data** — `metadata/waymo_goal_val_eval_set.pkl` over
-  `data/scene_goal_preprocess_waymo/val`, prepared with `gt_format=goal`
+  `data/advscene_preprocess_waymo/val`, prepared with `gt_format=goal`
   (valid-goal filter + `max_num_agents` closest), for both models.
 * **same sampling protocol** — both generate *unconditionally* from a
   `(num_lanes, num_agents)` prior, with no dependence on the eval scenes.
-  `ldm_adv.eval.sample_source=prior` leaves every conditioning label at its trained
-  null token; the old `sample_source=dataset` path (ground-truth layout + labels) is
-  a reconstruction setting, kept for the conditioned modes and diagnostics.
+  LDM-Adv's prior-mode graph contains no conditioning labels, so every label uses
+  its trained null token. Dataset/reconstruction sampling is no longer exposed by
+  the base-evaluation entrypoint.
 * **same metrics** — the lane/agent metrics only read the first 7 unified-format
   columns, so they are goal-agnostic ("w/o goal"). LDM-Adv additionally reports the
   goal-specific metrics ("w goal") automatically when generated samples carry goals.
@@ -129,105 +129,82 @@ val split measures it *out of* its training preprocessing. The evaluation protoc
 is matched; the training data is not. A goal-dataset LDM baseline would be needed to
 remove that caveat.
 
-Rebuild the shared artifacts (one-off):
+The shared artifacts currently contain 43658 val scenes. Rebuild the LDM-Adv layout
+prior after changing the goal latent cache:
 
 ```bash
-# shared reference set (43658 scenes: non-partitioned, >= 2 agents with a valid goal)
-python scripts/create_waymo_goal_val_eval_set.py --num-workers 48
-
 # (num_lanes, num_agents) prior for prior-mode ldm_adv sampling
 python scripts/create_goal_init_prob_matrix.py --num-workers 48
 ```
 
 ```bash
-
-# TODO: delete, fast check
-python eval.py \
-    dataset_name=waymo \
-    model_name=ldm \
-    ldm.eval.mode=initial_scene \
-    ldm.eval.run_name=scenario_dreamer_ldm_large_waymo \
-    ldm.model.autoencoder_run_name=scenario_dreamer_autoencoder_waymo \
-    ldm.model.num_l2l_blocks=3 \
-    ldm.eval.num_samples=10 \
-    ldm.eval.batch_size=256 \
-    ldm.eval.cache_samples=False \
-    ldm.eval.visualize=True \
-    hydra.run.dir=slurm_logs/eval_ldm_50k_b256
-```
-
-```bash
 # scenario dreamer baseline LDM Large
-# note this is large model, not base model size
-# generate samples 10k
+# Its checkpoint is currently archived under data/checkpoints. Use a fresh
+# sample directory rather than mixing these samples into the existing 50k cache.
 python eval.py \
     dataset_name=waymo \
     model_name=ldm \
     ldm.eval.mode=initial_scene \
     ldm.eval.run_name=scenario_dreamer_ldm_large_waymo \
+    ldm.eval.save_dir=$DATASET_ROOT/checkpoints \
     ldm.model.autoencoder_run_name=scenario_dreamer_autoencoder_waymo \
     ldm.model.num_l2l_blocks=3 \
     ldm.eval.num_samples=10000 \
     ldm.eval.batch_size=256 \
     ldm.eval.cache_samples=True \
     ldm.eval.visualize=False \
-    hydra.run.dir=slurm_logs/eval_ldm_10k_b256
+    +ldm.eval.cache_dir=$DATASET_ROOT/checkpoints/scenario_dreamer_ldm_large_waymo/initial_scene_advscene_fair10k_samples \
+    hydra.run.dir=$PROJECT_ROOT/slurm_logs/eval_ldm_large_advscene_fair10k
 
-# calculate metrics against the SHARED goal-val reference set (w/o goal metrics).
-# eval_set / gt_test_dir / gt_format now default to the shared set in
-# cfgs/eval/waymo_ldm.yaml, so no override is needed. num_samples caps the GENERATED
-# pool; the real pool defaults to all 43658 reference scenes.
+# Score against all 43658 shared advscene val scenes. Only its [w/o goal]
+# lane/agent tables are comparable to LDM-Adv.
 python eval.py \
     dataset_name=waymo \
     model_name=ldm \
     ldm.eval.mode=metrics \
     ldm.eval.run_name=scenario_dreamer_ldm_large_waymo \
+    ldm.eval.save_dir=$DATASET_ROOT/checkpoints \
+    ldm.eval.metrics.samples_path=$DATASET_ROOT/checkpoints/scenario_dreamer_ldm_large_waymo/initial_scene_advscene_fair10k_samples \
+    ldm.eval.metrics.metrics_save_path=$DATASET_ROOT/checkpoints/scenario_dreamer_ldm_large_waymo \
+    ldm.eval.metrics.metrics_filename=metrics_advscene_fair10k.pkl \
+    ldm.eval.metrics.eval_set=$PROJECT_ROOT/metadata/waymo_goal_val_eval_set.pkl \
+    ldm.eval.metrics.gt_test_dir=$DATASET_ROOT/advscene_preprocess_waymo/val \
+    ldm.eval.metrics.gt_format=goal \
     +ldm.eval.metrics.num_samples=10000 \
-    hydra.run.dir=slurm_logs/metrics_ldm_goal_val_10k
+    +ldm.eval.metrics.num_gt_samples=43658 \
+    hydra.run.dir=$PROJECT_ROOT/slurm_logs/metrics_ldm_large_advscene_fair10k
 ```
 
-LDM-Adv, same protocol (unconditional prior sampling, shared reference set). Samples
-land in `init_scene_prior_samples` and metrics in `metrics_init_scene_prior.pkl`, so
-they never collide with the `dataset`-mode outputs.
+LDM-Adv Base, same sample count, batch size, default seed (0), metric code, and real
+reference pool. It keeps the layout prior estimated from its own training preprocessing.
 
 ```bash
-# generate 10k unconditional samples (no dependence on the eval scenes).
-# Same count as the baseline above -- finite-sample JSD is biased by pool size.
+# Generate 10k unconditional samples into a fresh cache.
 python eval.py \
-    --config-name config_ldm_adv_train \
-    ldm_adv.eval.run_name=scenario_dreamer_ldm_adv_train \
+    --config-name config_ldm_adv_base \
+    ldm_adv.eval.run_name=advscene_ldm_adv_base \
     ldm_adv.eval.mode=init_scene \
-    ldm_adv.eval.sample_source=prior \
     ldm_adv.eval.num_samples=10000 \
     ldm_adv.eval.batch_size=256 \
     ldm_adv.eval.cache_samples=True \
     ldm_adv.eval.visualize=False \
-    hydra.run.dir=slurm_logs/eval_adv_prior_init_scene_10k
+    ldm_adv.eval.cache_dir=$DATASET_ROOT/checkpoints/advscene_ldm_adv_base/init_scene_advscene_fair10k_samples \
+    hydra.run.dir=$PROJECT_ROOT/slurm_logs/eval_ldm_adv_base_advscene_fair10k
 
 # metrics: prints both the [w/o goal] lane+agent tables (directly comparable to the
 # baseline above) and the [w goal] goal table; all three are saved in one pickle
 python eval.py \
-    --config-name config_ldm_adv_train \
-    ldm_adv.eval.run_name=scenario_dreamer_ldm_adv_train \
+    --config-name config_ldm_adv_base \
+    ldm_adv.eval.run_name=advscene_ldm_adv_base \
     ldm_adv.eval.mode=metrics \
     ldm_adv.eval.metrics.mode=init_scene \
-    ldm_adv.eval.sample_source=prior \
+    ldm_adv.eval.metrics.samples_path=$DATASET_ROOT/checkpoints/advscene_ldm_adv_base/init_scene_advscene_fair10k_samples \
+    ldm_adv.eval.metrics.metrics_save_path=$DATASET_ROOT/checkpoints/advscene_ldm_adv_base \
+    ldm_adv.eval.metrics.metrics_filename=metrics_advscene_fair10k.pkl \
+    ldm_adv.eval.metrics.eval_set=$PROJECT_ROOT/metadata/waymo_goal_val_eval_set.pkl \
+    ldm_adv.eval.metrics.gt_test_dir=$DATASET_ROOT/advscene_preprocess_waymo/val \
+    ldm_adv.eval.metrics.gt_format=goal \
     +ldm_adv.eval.metrics.num_samples=10000 \
-    hydra.run.dir=slurm_logs/metrics_adv_prior_init_scene_10k
-```
-
-Reconstruction setting (ground-truth layout + conditioning labels), for diagnostics
-and the conditioned modes — NOT comparable to the baseline:
-
-```bash
-python eval.py \
-    --config-name config_ldm_adv_train \
-    ldm_adv.eval.run_name=scenario_dreamer_ldm_adv_train \
-    ldm_adv.eval.mode=init_scene \
-    ldm_adv.eval.sample_source=dataset \
-    ldm_adv.eval.num_samples=10000 \
-    ldm_adv.eval.batch_size=256 \
-    ldm_adv.eval.cache_samples=True \
-    ldm_adv.eval.visualize=False \
-    hydra.run.dir=slurm_logs/eval_adv_dataset_init_scene_10k
+    +ldm_adv.eval.metrics.num_gt_samples=43658 \
+    hydra.run.dir=$PROJECT_ROOT/slurm_logs/metrics_ldm_adv_base_advscene_fair10k
 ```

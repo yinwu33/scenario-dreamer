@@ -2,10 +2,10 @@
 # agent per scene), diffusing the goal-autoencoder latents.
 #
 # Usage:
-#   python train.py --config-name config_ldm_adv_train
+#   python train.py --config-name config_ldm_adv_base
 #
-# Reuses the pre-trained goal autoencoder (scenario_dreamer_ae_goal_waymo) and
-# its exported latent cache (scenario_dreamer_ae_goal_latents_waymo) -- the
+# Reuses the pre-trained goal autoencoder (advscene_ae_goal_waymo) and
+# its exported latent cache (advscene_ae_goal_latents_waymo) -- the
 # autoencoder is unaware of the adversary, the adv is split off at load time.
 
 model_name: ldm_adv
