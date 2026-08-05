@@ -117,11 +117,11 @@ separate knobs:
 ⚠️ Finite-sample JSD is biased by pool size, so when comparing two models give them
 the **same** generated count and the **same** reference set.
 
-Each model keeps the layout prior of its own training preprocessing: the baseline
-uses `metadata/initial_prob_matrix_waymo.pt`, LDM-Adv uses
-`metadata/initial_prob_matrix_goal_waymo.pt` (the goal preprocessing drops agents
-without a valid goal and caps the scene at `max_num_agents`, so its layout
-distribution differs).
+Both models use `metadata/initial_prob_matrix_goal_waymo.pt`, so they draw total
+lane/agent counts from the same goal-data joint distribution. This prior is 2D and
+has no `map_id` axis. The baseline stores `map_id=0` only as a schema placeholder
+and runs with `ldm.train.guidance_scale=0.0`, so that placeholder does not condition
+its generated scenes.
 
 ⚠️ **Caveat**: `scenario_dreamer_ldm_large_waymo` was trained on
 `scenario_dreamer_ae_preprocess_waymo`, so scoring it against the goal-preprocessed
@@ -147,6 +147,8 @@ python eval.py \
     ldm.eval.mode=initial_scene \
     ldm.eval.run_name=scenario_dreamer_ldm_large_waymo \
     ldm.eval.save_dir=$DATASET_ROOT/checkpoints \
+    ldm.eval.init_prob_matrix_path=$PROJECT_ROOT/metadata/initial_prob_matrix_goal_waymo.pt \
+    ldm.train.guidance_scale=0.0 \
     ldm.model.autoencoder_run_name=scenario_dreamer_autoencoder_waymo \
     ldm.model.num_l2l_blocks=3 \
     ldm.eval.num_samples=10000 \
@@ -175,8 +177,8 @@ python eval.py \
     hydra.run.dir=$PROJECT_ROOT/slurm_logs/metrics_ldm_large_advscene_fair10k
 ```
 
-LDM-Adv Base, same sample count, batch size, default seed (0), metric code, and real
-reference pool. It keeps the layout prior estimated from its own training preprocessing.
+LDM-Adv Base, same layout prior, sample count, batch size, default seed (0), metric
+code, and real reference pool.
 
 ```bash
 # Generate 10k unconditional samples into a fresh cache.
@@ -207,4 +209,52 @@ python eval.py \
     +ldm_adv.eval.metrics.num_samples=10000 \
     +ldm_adv.eval.metrics.num_gt_samples=43658 \
     hydra.run.dir=$PROJECT_ROOT/slurm_logs/metrics_ldm_adv_base_advscene_fair10k
+```
+
+# Planner benchmark (SUT x traffic planner x scene initialization)
+
+Fills one cell of the evaluation table: an ego planner (the system under test) and a
+traffic planner share a scene, and the ego's Succ. / Off. / Coll. rates are measured.
+The table's two planner axes ARE the rollout's role axes (`planner.sut` = row,
+`planner.env` = column), so a cell is selected purely by composing
+`cfgs/planner/<name>.yaml` -- the harness never special-cases a planner.
+
+Planners: `idm` (rule-based, routes through the lane graph to its goal) and
+`bad_driver` (the frozen PufferDrive **PPO** policy; its
+`conditioning.collision_factor` picks the driving style, 0 = aggressive,
+2 = cautious, so the PPO_agg / PPO_norm / PPO_caution columns need no new code).
+
+Metrics, all on the *driving-ego* subset (ego spawn->goal distance >= 10 m; a parked
+ego reaches its goal for free):
+`reached_goal_rate_driving` = Succ., `ego_offroad_rate_driving` = Off. (centerline
+proxy at 2.75 m -- the maps carry no ROAD_EDGE entities), `ego_collision_rate_driving`
+= Coll. (ego vs *any* vehicle, unlike the adversary-only DDPO reward hook).
+
+```bash
+# scene init = Log, SUT = IDM, traffic = IDM
+python scripts/run_planner_matrix.py --sut idm --env idm \
+    --num-scenes 1000 --batch-size 50 \
+    --out-dir $DATASET_ROOT/critical_scene/planner_matrix_log_1000
+
+# PPO x PPO control row, same scenes (--seed fixes the sample)
+python scripts/run_planner_matrix.py --sut bad_driver --env bad_driver \
+    --num-scenes 1000 --batch-size 50 \
+    --out-dir $DATASET_ROOT/critical_scene/planner_matrix_log_1000
+
+# an aggressive-PPO traffic column
+python scripts/run_planner_matrix.py --sut idm --env bad_driver \
+    --override planner.env.conditioning.collision_factor=0 \
+    --num-scenes 1000 --batch-size 50 \
+    --out-dir $DATASET_ROOT/critical_scene/planner_matrix_log_1000
+```
+
+Each cell writes `benchmark/<sut>__<env>__<source>/{per_scene.csv,summary.json}` and the
+run rebuilds `table.{csv,md}` from every `summary.json` present, so cells accumulate into
+one table across invocations.
+
+Sanity check on the route search before trusting any IDM row (asserts routes start at the
+agent, end at its goal, are evenly spaced, and bounds the straight-line fallback rate):
+
+```bash
+python test_scripts/test_routes.py --num-scenes 200
 ```

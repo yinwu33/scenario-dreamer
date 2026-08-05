@@ -298,6 +298,33 @@ class ScenarioDreamerLDM(pl.LightningModule):
         """ Initialize a PyTorch Geometric dataset with the appropriate metadata for the given generation mode."""
         data_list = []
         map_id_counter = 0
+
+        # The original Scenario Dreamer prior has shape
+        # (num_map_ids, max_num_lanes + 1, max_num_agents + 1). Fair comparison
+        # with LDM-Adv uses the goal-data joint prior instead, whose shape is only
+        # (max_num_lanes + 1, max_num_agents + 1). In that case map_id is not part
+        # of layout sampling; a zero is stored below only because the common data
+        # schema requires the field. Set train.guidance_scale=0 at evaluation time
+        # when that placeholder must not condition the pretrained LDM.
+        joint_layout_probs = None
+        if mode == 'initial_scene' and self.init_prob_matrix.ndim == 2:
+            expected_shape = (
+                self.cfg_dataset.max_num_lanes + 1,
+                self.cfg_dataset.max_num_agents + 1,
+            )
+            if tuple(self.init_prob_matrix.shape) != expected_shape:
+                raise ValueError(
+                    f"Expected a 2D initial-scene prior with shape {expected_shape}, "
+                    f"got {tuple(self.init_prob_matrix.shape)} from "
+                    f"{self.cfg.eval.init_prob_matrix_path}"
+                )
+            joint_layout_probs = self.init_prob_matrix.reshape(-1)
+            if not torch.isfinite(joint_layout_probs).all():
+                raise ValueError("Initial-scene prior contains NaN or Inf")
+            if (joint_layout_probs < 0).any():
+                raise ValueError("Initial-scene prior contains negative probabilities")
+            if joint_layout_probs.sum() <= 0:
+                raise ValueError("Initial-scene prior has no positive probability mass")
         
         conditioning_files = None
         if mode == 'lane_conditioned':
@@ -317,22 +344,29 @@ class ScenarioDreamerLDM(pl.LightningModule):
             d = ScenarioDreamerData()
 
             if mode == 'initial_scene':
-                if self.cfg.dataset_name == 'waymo':
+                if joint_layout_probs is not None:
+                    # The 2D goal prior has no map-id axis. map_id=0 is only a
+                    # schema placeholder and must be neutralized with
+                    # train.guidance_scale=0 for map-unconditional evaluation.
+                    map_id = 0
+                    lane_agent_probs = joint_layout_probs
+                elif self.cfg.dataset_name == 'waymo':
                     if nocturne_compatible_only:
                         map_id = torch.tensor(NOCTURNE_COMPATIBLE)
                     else:
                         map_id = torch.multinomial(
                             torch.tensor([1-PROPORTION_NOCTURNE_COMPATIBLE, PROPORTION_NOCTURNE_COMPATIBLE]), 1)
+                    lane_agent_probs = self.init_prob_matrix[map_id].reshape(-1)
                 else:
                     map_id = map_id_counter 
                     map_id_counter += 1
                     map_id_counter = map_id_counter % self.cfg_dataset.num_map_ids
+                    lane_agent_probs = self.init_prob_matrix[map_id].reshape(-1)
 
-                lane_agent_probs = self.init_prob_matrix[map_id].reshape(1, -1)
-                folded_num_lanes_agents = torch.multinomial(lane_agent_probs, 1).squeeze(-1)
+                folded_num_lanes_agents = int(torch.multinomial(lane_agent_probs, 1).item())
                 # +1 because there is an index for "no agents" and "no lanes"
-                num_lanes = (folded_num_lanes_agents // (self.cfg_dataset.max_num_agents + 1)).item()
-                num_agents = (folded_num_lanes_agents % (self.cfg_dataset.max_num_agents + 1)).item()
+                num_lanes = folded_num_lanes_agents // (self.cfg_dataset.max_num_agents + 1)
+                num_agents = folded_num_lanes_agents % (self.cfg_dataset.max_num_agents + 1)
 
                 assert num_lanes > 0 and num_agents > 0, "Generating scene with either no lanes or no agents"
 
