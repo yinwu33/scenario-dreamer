@@ -320,6 +320,61 @@ class RewardHookEgoCollision(RewardHook):
             ctx.metrics["ego_fault_collision"][scene_idx] = 1.0
 
 
+class RewardHookEgoAnyCollision(RewardHook):
+    """Ego collision with ANY vehicle -- the planner-quality collision notion.
+
+    Companion to ``RewardHookEgoCollision``, which scores the ego against the
+    *generated adversary only* (``if adv < 0: return``) because DDPO is asking
+    "did the adversary create a critical scene". A planner benchmark asks the
+    opposite question -- "did this planner crash" -- and the scenes it runs on
+    (log scenes) have no adversary at all, so the adversarial hook would report a
+    flat zero. Here every ego<->vehicle contact counts, whoever caused it.
+
+    Same timing constraint as the adversarial hook: the event is consumed from
+    ``sim.last_ego_collision_partners`` in ``after_step_scene``, the step it is
+    latched, because ``latch_ego_crash`` zeroes both vehicles' velocities
+    immediately and a later re-check would read the ego as passive.
+
+    Metrics:
+      * ``ego_collision_any``       -- 1.0 if the ego contacted any vehicle
+      * ``ego_fault_collision_any`` -- subset where the ego was the aggressor
+      * ``ego_collision_time``      -- time (s) of the first contact, else inf
+    """
+
+    def before_rollout(self, ctx: RolloutContext) -> None:
+        n = ctx.num_scenes
+        ctx.metrics["ego_collision_any"] = np.zeros(n, dtype=np.float32)
+        ctx.metrics["ego_fault_collision_any"] = np.zeros(n, dtype=np.float32)
+        ctx.metrics["ego_collision_time"] = np.full(n, np.inf, dtype=np.float32)
+
+    def before_step_scene(
+        self, ctx: RolloutContext, scene_idx: int, sim: SimScene
+    ) -> None:
+        # The ego was frozen by the previous step's latch_ego_crash: the run is
+        # over, further steps would only measure a stationary wreck.
+        if sim.n and bool(sim.crashed[0]):
+            ctx.finished[scene_idx] = True
+            if ctx.trajectories is not None:
+                ctx.trajectories[scene_idx]["done"].append(True)
+
+    def after_step_scene(
+        self,
+        ctx: RolloutContext,
+        scene_idx: int,
+        sim: SimScene,
+        *,
+        ego_reached: bool,
+    ) -> None:
+        if not len(sim.last_ego_collision_partners):
+            return
+        ctx.metrics["ego_collision_any"][scene_idx] = 1.0
+        t = float((ctx.t + 1) * sim.dt)   # the contact happened during t -> t+1
+        if t < ctx.metrics["ego_collision_time"][scene_idx]:
+            ctx.metrics["ego_collision_time"][scene_idx] = t
+        if len(sim.last_ego_fault_partners):
+            ctx.metrics["ego_fault_collision_any"][scene_idx] = 1.0
+
+
 class RewardHookEgoMinTTC(RewardHook):
     """Dense criticality feature: min ego time-to-collision over the rollout.
 

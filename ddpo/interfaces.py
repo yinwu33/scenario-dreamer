@@ -35,7 +35,17 @@ class GeneratedScenes:
     # (e.g. no-adv conditioning scenes). ``meta['gen_agent_mask']`` is the same
     # information as a per-node bool, kept only for viz/analysis scripts.
     adv_local_idx: torch.Tensor | None = None   # [num_scenes] long, -1 == no adversary
-    meta: dict = field(default_factory=dict)   # carries "lane_scene_idx", "gen_agent_mask"
+    # Free-form side channel. Conventional keys:
+    #   "lane_scene_idx"  -- [N_lanes] -> scene id, the lane counterpart of agent_scene_idx
+    #   "gen_agent_mask"  -- [N_agents] bool, per-node form of adv_local_idx (viz/analysis)
+    #   "lane_graph"      -- list[dict], one per scene: {"succ": [2, E], "lateral": [2, E]}
+    #                        arrays of SCENE-LOCAL lane indices. ``succ`` edges run in the
+    #                        driving direction; ``lateral`` pairs left/right neighbours.
+    #                        Optional: the lane GRAPH, as opposed to the lane geometry in
+    #                        lane_polylines. Route-planning planners (ddpo.routes) need it;
+    #                        the frozen neural planners do not, so most producers leave it
+    #                        out and SimScene.lane_graph stays None.
+    meta: dict = field(default_factory=dict)
 
 
 def single_adv_local_idx(gen_agent_mask, agent_scene_idx, num_scenes):

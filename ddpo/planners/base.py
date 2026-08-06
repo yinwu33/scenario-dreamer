@@ -203,16 +203,22 @@ class RolloutRunner:
         if isinstance(l_idx, torch.Tensor):
             l_idx = l_idx.detach().cpu().numpy()
 
+        # Optional lane graph, one scene-local {"succ", "lateral"} dict per scene.
+        # Only route-planning planners (idm) consume it; absent for every scene
+        # source that ships geometry only.
+        lane_graph = scenes.meta.get("lane_graph")
+
         sims = []
         for s in range(scenes.num_scenes):
-            sims.append(
-                SimScene(
-                    states[a_idx == s],
-                    ptypes[a_idx == s],
-                    lanes[l_idx == s],
-                    sim_cfg=self.sim_cfg,
-                )
+            sim = SimScene(
+                states[a_idx == s],
+                ptypes[a_idx == s],
+                lanes[l_idx == s],
+                sim_cfg=self.sim_cfg,
             )
+            if lane_graph is not None:
+                sim.lane_graph = lane_graph[s]
+            sims.append(sim)
         return sims
 
     def _apply_conditioning(
@@ -350,12 +356,16 @@ def build_planner(
     """Instantiate the planner named by ``planner_cfg['name']`` for one role.
 
     ``planner_cfg`` is any mapping with a ``name`` key (an OmegaConf node from
-    ``cfgs/planner/<name>.yaml`` or a plain dict). ``bad_driver`` is the only
-    planner; the explicit check keeps stale configs failing loudly.
+    ``cfgs/planner/<name>.yaml`` or a plain dict). Unknown names raise, so a
+    stale config fails loudly instead of silently falling back to a default.
     """
     from .bad_driver import BadDriverPlanner
+    from .idm import IDMPlanner
 
-    name = planner_cfg.get("name")
-    if str(name) != "bad_driver":
-        raise ValueError(f"unknown planner {name!r}; only 'bad_driver' is available")
-    return BadDriverPlanner(planner_cfg, params, role=role, device=device)
+    registry = {"bad_driver": BadDriverPlanner, "idm": IDMPlanner}
+    name = str(planner_cfg.get("name"))
+    if name not in registry:
+        raise ValueError(
+            f"unknown planner {name!r}; available: {sorted(registry)}"
+        )
+    return registry[name](planner_cfg, params, role=role, device=device)

@@ -44,7 +44,6 @@ from __future__ import annotations
 
 import copy
 import csv
-import json
 import subprocess
 from datetime import datetime
 from pathlib import Path
@@ -56,6 +55,13 @@ from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
 
 from cfgs.config import CONFIG_PATH
+from critical_scene.metrics_common import (
+    ego_goal_dist,
+    mean_finite,
+    num_agents_per_scene,
+    rate,
+    write_json,
+)
 from ddpo.conditioning import LDMAdvConditioningPool
 from ddpo.interfaces import GeneratedScenes
 from ddpo.planners import SimulatorConfig
@@ -451,37 +457,11 @@ def build_metadata(
 
 
 # ---------------------------------------------------------------- benchmark
-def _rate(values: np.ndarray) -> float:
-    arr = np.asarray(values, dtype=np.float32)
-    return float((arr > 0).mean()) if arr.size else float("nan")
-
-
-def _mean_finite(values: np.ndarray) -> float:
-    arr = np.asarray(values, dtype=np.float32)
-    finite = np.isfinite(arr)
-    return float(arr[finite].mean()) if finite.any() else float("nan")
-
-
-def ego_goal_dist(payload: dict[str, Any]) -> np.ndarray:
-    """Per-scene ego spawn->goal distance (agent row 0; states layout
-    [x, y, speed, cos, sin, length, width, goal_x, goal_y])."""
-    states = payload["agent_states"].numpy()
-    scene_idx = payload["agent_scene_idx"].numpy()
-    n = int(payload["num_scenes"])
-    out = np.full(n, np.nan, dtype=np.float32)
-    for s in range(n):
-        rows = np.flatnonzero(scene_idx == s)
-        if rows.size == 0:
-            continue
-        ego = states[rows[0]]
-        out[s] = float(np.hypot(ego[7] - ego[0], ego[8] - ego[1]))
-    return out
-
-
-def num_agents_per_scene(payload: dict[str, Any]) -> np.ndarray:
-    return np.bincount(
-        payload["agent_scene_idx"].numpy(), minlength=int(payload["num_scenes"])
-    ).astype(np.int64)
+# Generic per-scene helpers live in metrics_common so the lightweight planner
+# benchmark can use them without importing the LDM / AE stack. Re-exported here
+# under their original names for the scripts that import them from this module.
+_rate = rate
+_mean_finite = mean_finite
 
 
 def benchmark_payload(
@@ -597,8 +577,3 @@ def write_table(out_dir: Path, summaries: dict[str, dict[str, float]]) -> None:
             lines.append(f"| {source} | " + " | ".join(_fmt(s.get(c)) for c in columns) + " |")
     (out_dir / "table.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     print(f"[table] wrote {out_dir / 'table.csv'} and {out_dir / 'table.md'}", flush=True)
-
-
-def write_json(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")

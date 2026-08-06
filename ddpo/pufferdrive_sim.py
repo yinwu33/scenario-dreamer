@@ -354,7 +354,17 @@ class SimScene:
         slot_order = np.concatenate([self.controlled, self.static]) if n else np.zeros(0, np.int64)
         self.slot_order = slot_order[:MAX_AGENTS]
 
-        self._build_grid(np.asarray(lane_polylines, dtype=np.float32))
+        lanes = np.asarray(lane_polylines, dtype=np.float32)
+        # Kept alongside the grid decomposition: the grid flattens the lanes into
+        # anonymous segments (seg_start/seg_end), which answers "how far is the
+        # nearest centerline" but not "which lane is this and where does it go".
+        # A route-planning planner needs the per-lane polylines back.
+        self.lane_polylines = lanes
+        # Lane GRAPH: {"succ": [2, E], "lateral": [2, E]} over lane rows, or None
+        # when the scene source did not supply connectivity (most do not -- see
+        # GeneratedScenes.meta['lane_graph']). Filled in by RolloutRunner.
+        self.lane_graph: dict[str, np.ndarray] | None = None
+        self._build_grid(lanes)
         self.update_metrics()  # c_reset computes metrics before the first observation
 
     # ------------------------------------------------------------------ grid

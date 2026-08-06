@@ -252,8 +252,42 @@ Each cell writes `benchmark/<sut>__<env>__<source>/{per_scene.csv,summary.json}`
 run rebuilds `table.{csv,md}` from every `summary.json` present, so cells accumulate into
 one table across invocations.
 
+## Visualization (GIF)
+
+`--gif N` re-rolls N of the evaluated scenes with trajectory recording and writes one
+animated GIF each to `benchmark/<cell>/gifs/`, named by outcome
+(`collision_scene18629.gif`, `timeout_scene727.gif`, `reached_scene...gif`). Scenes are
+picked stratified by outcome -- collisions first, then non-arrivals, then off-road, then
+long-drive successes as the control -- because a random sample is mostly uneventful.
+Rendering is a second pass on purpose: recording trajectories for a whole 1000-scene
+sweep costs a lot of memory for frames nobody looks at.
+
+```bash
+# benchmark a cell and save 8 GIFs of the most informative scenes
+python scripts/run_planner_matrix.py --sut idm --env idm \
+    --num-scenes 1000 --batch-size 50 --gif 8 \
+    --out-dir $DATASET_ROOT/critical_scene/planner_matrix_log_1000
+
+# just look at some rollouts, no big sweep
+python scripts/run_planner_matrix.py --sut idm --env idm \
+    --num-scenes 64 --gif 6 --gif-fps 10 \
+    --out-dir /tmp/idm_look
+```
+
+Ego is red, other vehicles blue; a moving agent's goal is a dotted line to an `x`,
+parked/static agents get a bold black `x` at their centre (`ddpo/viz.py`).
+
+`idm` routes ALWAYS follow lane centerlines -- there is no straight-line fallback. When
+the lane graph has no path from spawn to goal the agent gets no route and coasts, and the
+`route_unavailable_rate` column reports how often that happened, so "drove badly" stays
+distinguishable from "was never given a path". Coverage on val: 97.8% of egos, 91.3% of
+all agents. Three things carry that number, all of them worth ~4-12 points each: lateral
+(left/right) lane neighbours join the candidate sets so a lane change is representable,
+start and goal lanes are chosen *jointly* rather than independently, and trimming
+projects onto the centerline by arc length instead of snapping to one of the 20 vertices.
+
 Sanity check on the route search before trusting any IDM row (asserts routes start at the
-agent, end at its goal, are evenly spaced, and bounds the straight-line fallback rate):
+agent, end at its goal, are evenly spaced, and bounds coverage + detour):
 
 ```bash
 python test_scripts/test_routes.py --num-scenes 200

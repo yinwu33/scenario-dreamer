@@ -1,0 +1,74 @@
+# SUT x traffic-planner x scene-initialization benchmark.
+#
+# Fills one cell of the evaluation table: an ego planner (the system under test)
+# and a traffic planner are put in the same scene, and the ego's success /
+# off-road / collision rates are measured. The table's two planner axes ARE the
+# rollout's role axes -- `planner.sut` is the table row, `planner.env` the column
+# -- so a cell is selected entirely by composition:
+#
+#   python scripts/run_planner_matrix.py --sut idm --env idm --source log \
+#       --num-scenes 1000 --out-dir data/critical_scene/planner_matrix_idm_idm
+#
+# The script overrides planner@planner.{sut,env} from its --sut / --env flags;
+# the values below are the defaults (the IDM x IDM cell).
+#
+# No model is loaded on the `log` scene source, so this config deliberately
+# composes neither the LDM/AE bundles nor the DDPO reward.
+
+defaults:
+  - _base
+  - dataset_name: waymo
+  # Agent-set filters (offroad_threshold, max_num_agents) + FOV. The log loader
+  # runs utils.goal_runtime.prepare_scene with these, so the benchmark sees the
+  # same agent set the training datasets do.
+  - ae_goal/dataset@dataset
+  # One planner per role. adv drives nobody on log scenes (no generated
+  # adversary) but RolloutRunner requires all three roles to be defined.
+  - planner@planner.sut: idm
+  - planner@planner.env: idm
+  - planner@planner.adv: idm
+  # Shared rollout dynamics -- the SAME group the DDPO rollout composes. The one
+  # deliberate difference is goal_behavior, overridden below.
+  - rollout@planner.sim: base
+  - _self_
+
+planner:
+  sim:
+    # Background agents are DESPAWNED when they reach their goal (DDPO's rollout
+    # uses 'continue'). This is the only lifecycle whose post-goal behaviour is
+    # both defined and planner-independent, which matters here because the
+    # traffic planner is a column of the table: under 'continue' an agent past
+    # its goal has no objective left, so what it does next is an artefact of that
+    # particular policy and contaminates the comparison.
+    #
+    # It is also what the log says happened. Measured on 400 val scenes, of the
+    # background agents that actually drive, 51.5% have their goal on the FOV
+    # boundary and are still moving at a median 11.1 m/s when they reach it --
+    # they left the crop, they did not stop. 'stop' would freeze half the traffic
+    # into phantom roadblocks in live lanes, and would do so more often the
+    # further the ego drives, i.e. biased against exactly what is being measured
+    # (it costs 17.7 points of success, vs the 5.4-point IDM/PPO gap).
+    #
+    # Genuinely parked cars need no help from this setting: SimScene already
+    # makes any agent whose goal is within MIN_DISTANCE_TO_GOAL of its spawn a
+    # permanent static obstacle. The ego is exempt too -- its scene ends when it
+    # arrives. Matching PufferDrive's own training config (goal_behavior = 3)
+    # additionally keeps the frozen PPO planner in-distribution.
+    goal_behavior: remove
+
+simulator:
+  sim_steps: 91   # 9.1 s at dt=0.1, the length of the stored Waymo trajectories
+  seed: 0
+
+benchmark:
+  split: val
+  preprocess_dir: ${dataset_root}/advscene_preprocess_waymo
+  batch_size: 32
+  # Ego spawn->goal distance (m) above which a scene counts as a "driving ego".
+  # A parked ego reaches its goal for free, so the headline rates are also
+  # reported on this subset. Same value the DDPO conditioning pool uses.
+  min_ego_drive: 10.0
+  # Ego counts as off-road on a step when its centre is farther than this from
+  # every lane centerline. The maps carry no ROAD_EDGE entities, so this proxy
+  # is the cross-scene-source-comparable off-road measure.
+  ego_offroad_threshold: 2.75

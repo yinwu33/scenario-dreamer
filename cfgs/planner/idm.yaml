@@ -1,0 +1,40 @@
+# Rule-based IDM planner (ddpo/planners/idm.py) for one rollout role.
+#
+# Longitudinal: classic IDM against the nearest vehicle ahead on the agent's
+# lane-graph route; lateral: pure pursuit resolved over the 13 discrete steering
+# values. Actions are quantised onto the same 7x13 table bad_driver uses, so
+# both planners drive through the identical step_dynamics integrator.
+name: idm
+
+# Rule-based: the policy has no conditioning obs, so its agents' collision_factor
+# / offroad_factor / lane_width slots stay 0 (RolloutRunner._apply_conditioning
+# skips this role entirely).
+conditioning: null
+
+# --- IDM longitudinal (policies/idm_policy.py:555-560 values) ---
+target_speed: 15.0      # v0 [m/s], free-road cruising speed
+min_gap: 1.0            # s0 [m], standstill bumper-to-bumper distance
+headway_time: 1.5       # T [s], desired time gap to the lead vehicle
+max_accel: 2.0          # a [m/s^2]
+comfort_decel: 6.0      # b [m/s^2], the braking term's reference deceleration
+accel_exponent: 4.0     # delta, the usual IDM value
+
+# --- lead-vehicle gating (Frenet, along the route) ---
+# Half-width slack added to (w_ego + w_other)/2 when deciding whether a vehicle
+# is in our corridor. Larger => more conservative (yields to adjacent traffic).
+lateral_margin: 0.3
+lead_search_radius: 40.0  # [m] broad-phase gate before the Frenet projection
+
+# --- pure pursuit ---
+lookahead_time: 0.9       # lookahead = clip(t * speed, min, max)
+lookahead_min: 3.0        # [m]
+lookahead_max: 12.0       # [m]
+# Steps each candidate steering is forward-simulated before scoring. 1 aligns
+# only the velocity direction and makes the agent crab; a few steps let the
+# heading catch up to the slip angle and kills the oscillation.
+steer_preview_steps: 5
+
+# --- route search (ddpo/routes.py) ---
+route:
+  spacing: 1.0     # [m] between route points after resampling
+  max_depth: 12    # max lanes chained by the successor search
