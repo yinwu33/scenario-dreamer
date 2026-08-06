@@ -13,12 +13,11 @@ The first table cell (IDM ego, IDM traffic, real log scenes)::
     python scripts/run_planner_matrix.py --sut idm --env idm \
         --num-scenes 1000 --out-dir data/critical_scene/planner_matrix_log
 
-Add the PPO control row to the same table (bad_driver IS a PPO policy; its
-``conditioning.collision_factor`` selects the driving style, 0 = aggressive,
-2 = cautious)::
+Add a PPO traffic column to the same table. The ppo_* variants are one frozen
+checkpoint at different ``conditioning.collision_factor`` values (0 = aggressive,
+2 = cautious), so each is just another planner name::
 
-    python scripts/run_planner_matrix.py --sut idm --env bad_driver \
-        --env-override planner.env.conditioning.collision_factor=0 \
+    python scripts/run_planner_matrix.py --sut idm --env ppo_aggressive \
         --num-scenes 1000 --out-dir data/critical_scene/planner_matrix_log
 
 Reruns append to ``<out-dir>/table.{csv,md}``: each cell keeps its own

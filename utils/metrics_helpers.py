@@ -756,7 +756,7 @@ def compute_lane_metrics(samples, gt_samples):
 
 GOAL_INDICES = {'goal_x': 7, 'goal_y': 8}
 # metres; a goal closer than this to the spawn point means the agent is parked
-# (mirrors ddpo.goal_schema.MIN_DISTANCE_TO_GOAL, which defines the same bucket
+# (mirrors sim.schema.MIN_DISTANCE_TO_GOAL, which defines the same bucket
 # for the LDM-Adv conditioning labels)
 MIN_DISTANCE_TO_GOAL = 2.0
 # metres; a goal farther than this from any lane point counts as offroad

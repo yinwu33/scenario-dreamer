@@ -35,8 +35,8 @@ import numpy as np
 from omegaconf import OmegaConf
 
 from .geometry import _corners, _sat_overlap
-from .goal_schema import MIN_DISTANCE_TO_GOAL
-from planner.selfplay_drive.planner import (
+from .schema import MIN_DISTANCE_TO_GOAL
+from nets.selfplay_drive.net import (
     EGO_FEATURES,
     MAX_AGENTS,
     MAX_PARTNER_OBJECTS,
@@ -63,7 +63,7 @@ MAX_ROAD_SCALE = 100.0
 GRID_CELL_SIZE = 5.0
 VISION_RANGE = 21                  # drive.h init_grid_map (hardcoded)
 MAX_CONTROLLED_AGENTS = 32         # config/pacific/selfplay_drive.ini max_controlled_agents
-# MIN_DISTANCE_TO_GOAL (static-agent threshold at spawn) imported from .goal_schema
+# MIN_DISTANCE_TO_GOAL (static-agent threshold at spawn) imported from .schema
 # and re-exported here for the planner/metric modules that import it from this file.
 PARTNER_DIST2_GATE = 4096.0        # 64 m
 COLLISION_DIST2_GATE = 225.0       # 15 m
@@ -72,6 +72,18 @@ EGO_AGGRESSOR_MIN_SPEED = 0.5      # m/s; ego counts as the aggressor only when 
                                    # exceeds this (a passive/slow ego is never at fault)
 TYPE_VEHICLE, TYPE_PEDESTRIAN, TYPE_CYCLIST = 1, 2, 3
 ROAD_LANE_TYPE_FEATURE = 0.0       # entity type 4 (ROAD_LANE) - 4
+
+
+def to_puffer_agent_types(agent_types) -> np.ndarray:
+    """Convert dataset/model ids (0 veh, 1 ped, 2 cyc) to PufferDrive ids.
+
+    ``GeneratedScenes.agent_types`` deliberately keeps the model-side convention.
+    PufferDrive observations and collision logic use entity ids 1..3, so callers
+    convert at this boundary before constructing a sim scene.
+    """
+    return (
+        np.asarray(agent_types, dtype=np.int64) + 1
+    ).clip(TYPE_VEHICLE, TYPE_CYCLIST)
 
 
 @dataclass(frozen=True)
@@ -318,7 +330,7 @@ class SimScene:
         self.ego_caused_collision = False
         # Per-step ego collision event, recorded by latch_ego_crash *before* the
         # contact response zeroes the ego velocity and consumed the same step by
-        # RewardHookEgoCollision.after_step_scene. ``last_ego_collision_partners`` is the
+        # EgoCollisionHook.after_step_scene. ``last_ego_collision_partners`` is the
         # set of vehicles the ego contacted this step (focal event, fault-agnostic);
         # ``last_ego_fault_partners`` is the subset the ego was driving *into*.
         # Recording the event here is what lets the rewarded collision fire at all:
@@ -654,7 +666,7 @@ class SimScene:
         Called once per step after ``goal_step``. With ``goal_behavior='continue'``
         agents keep driving past their goal, so the map boundary
         (``|x| > map_half`` or ``|y| > map_half``) is what retires them. The ego
-        (agent 0) is exempt - its scene is finished by ``RewardHookReachedGoal`` when it
+        (agent 0) is exempt - its scene is finished by ``ReachedGoalHook`` when it
         reaches its goal, never by leaving the map. Returns the removed indices.
         """
         idx = self.controlled

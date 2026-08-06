@@ -1,4 +1,20 @@
-"""Hook components for planner-backed DDPO reward rollouts."""
+"""Metric hooks: everything the rollout can measure while it steps.
+
+A hook observes the ``SimScene`` sequence and writes into ``ctx.metrics``. It
+never computes a reward and never decides whether a number is good -- that
+polarity belongs to the caller, which is why the adversarial reward
+(``ddpo.reward``, collisions are a *win*) and the planner benchmark
+(``critical_scene.planner_matrix_eval``, collisions are a *loss*) can share this
+module by picking different hook sets out of it.
+
+Two families live here:
+
+  * ego metrics -- reached goal, collision, off-road proxy, min TTC, trajectory
+    recording. Any scene source can use these.
+  * adversary metrics -- spawn overlap, ego<->adv distance, and the realized-vs-
+    requested condition checks. These need ``scenes.adv_local_idx``, so they are
+    only meaningful for sources that generate an adversary.
+"""
 
 from __future__ import annotations
 
@@ -9,8 +25,8 @@ import numpy as np
 import torch
 
 from .geometry import _corners, _obb_overlap_frac, sat_first_contact_time
-from .interfaces import GeneratedScenes
-from .pufferdrive_sim import (
+from .scenes import GeneratedScenes
+from .world import (
     COLLISION_DIST2_GATE,
     MIN_DISTANCE_TO_GOAL,
     TYPE_PEDESTRIAN,
@@ -30,7 +46,7 @@ _ADV_COND_NULL = (3, 2, 3, 3)  # (type, motion, goal_dist, ego_dist)
 
 @dataclass
 class GenInvalidCheck:
-    """Config for ``RewardHookGenAgentInvalid``.
+    """Config for ``GenAgentInvalidHook``.
 
     Bucket thresholds mirror the dataset's adv-conditioning discretization
     (``WaymoDatasetLDMAdv._adv_condition`` / ``cfgs/ldm_adv/dataset.yaml``); they
@@ -71,7 +87,7 @@ def gen_invalid_gap(
 ) -> tuple[bool, str, float]:
     """Realized-vs-target condition check with a graded distance-to-valid gap.
 
-    Used by ``RewardHookGenAgentInvalid`` to emit the
+    Used by ``GenAgentInvalidHook`` to emit the
     ``gen_agent_is_invalid`` / ``gen_agent_invalid_reason`` /
     ``gen_agent_invalid_gap`` metrics. A field whose target is the null token
     was generated unconditionally (``adv_cond_target: null``) and is skipped.
@@ -149,7 +165,7 @@ class RolloutContext:
         return len(self.sims)
 
 
-class RewardHook:
+class MetricHook:
     """No-op base class for rollout metric hooks."""
 
     def before_rollout(self, ctx: RolloutContext) -> None:
@@ -174,7 +190,7 @@ class RewardHook:
         pass
 
 
-class RewardHookInitOverlap(RewardHook):
+class InitOverlapHook(MetricHook):
     """Measure how much a generated adversary overlaps a vehicle at spawn.
 
     Adversary-only: only overlaps that involve the generated adversary (vs the ego
@@ -189,7 +205,7 @@ class RewardHookInitOverlap(RewardHook):
     footprint (not the union, as IoU would) makes the signal independent of neighbour
     size: a half-buried adversary reads 0.5 whether it overlaps a car or a bus.
     ``init_invalid`` is kept as a boolean (frac > ``invalid_frac``) for logging / eval
-    and for the RewardHookEgoCollision gate, not to floor the reward.
+    and for the EgoCollisionHook gate, not to floor the reward.
     """
 
     def __init__(self, margin: float = 0.0, invalid_frac: float = 0.0):
@@ -241,7 +257,7 @@ class RewardHookInitOverlap(RewardHook):
                 ctx.metrics["init_invalid"][s] = 1.0
 
 
-class RewardHookEgoCollision(RewardHook):
+class EgoCollisionHook(MetricHook):
     """Track ego<->adversary collisions and the time of the first one.
 
     Two collision notions are kept distinct:
@@ -320,10 +336,10 @@ class RewardHookEgoCollision(RewardHook):
             ctx.metrics["ego_fault_collision"][scene_idx] = 1.0
 
 
-class RewardHookEgoAnyCollision(RewardHook):
+class EgoAnyCollisionHook(MetricHook):
     """Ego collision with ANY vehicle -- the planner-quality collision notion.
 
-    Companion to ``RewardHookEgoCollision``, which scores the ego against the
+    Companion to ``EgoCollisionHook``, which scores the ego against the
     *generated adversary only* (``if adv < 0: return``) because DDPO is asking
     "did the adversary create a critical scene". A planner benchmark asks the
     opposite question -- "did this planner crash" -- and the scenes it runs on
@@ -375,7 +391,7 @@ class RewardHookEgoAnyCollision(RewardHook):
             ctx.metrics["ego_fault_collision_any"][scene_idx] = 1.0
 
 
-class RewardHookEgoMinTTC(RewardHook):
+class EgoMinTTCHook(MetricHook):
     """Dense criticality feature: min ego time-to-collision over the rollout.
 
     Restricted to the generated adversary, so the criticality TTC measures only
@@ -450,7 +466,7 @@ class RewardHookEgoMinTTC(RewardHook):
             ctx.metrics["ego_min_ttc"][scene_idx] = ttc
 
 
-class RewardHookReachedGoal(RewardHook):
+class ReachedGoalHook(MetricHook):
     """Track ego goal completion and stop finished scenes."""
 
     def __init__(self, goal_radius: float):
@@ -490,7 +506,7 @@ class RewardHookReachedGoal(RewardHook):
             ctx.finished[scene_idx] = True
 
 
-class RewardHookTrajectory(RewardHook):
+class TrajectoryHook(MetricHook):
     """Record per-scene rollout trajectories for visualization."""
 
     def before_rollout(self, ctx: RolloutContext) -> None:
@@ -575,7 +591,7 @@ def dist_to_lane_centerline(sim: SimScene, points: np.ndarray) -> np.ndarray:
     return np.sqrt((d * d).sum(-1)).min(axis=1)
 
 
-class RewardHookGoalOfflane(RewardHook):
+class GoalOfflaneHook(MetricHook):
     """Penalty feature for the DDPO-generated adversary placed off the lane graph.
 
     Only the generated adversary (``scenes.adv_local_idx``) is scored here, and a
@@ -622,7 +638,7 @@ class RewardHookGoalOfflane(RewardHook):
         ctx.metrics["spawn_lane_dist"] = spawn_lane_dist
 
 
-class RewardHookEgoOffroadProxy(RewardHook):
+class EgoOffroadProxyHook(MetricHook):
     """Ego off-road proxy: per-step ego distance to the nearest lane centerline.
 
     The maps carry lane centerlines only (no ROAD_EDGE entities), so the sim's
@@ -671,7 +687,7 @@ class RewardHookEgoOffroadProxy(RewardHook):
         ).astype(np.float32)
 
 
-class RewardHookParkingMismatch(RewardHook):
+class ParkingMismatchHook(MetricHook):
     """Penalty feature for generated-vs-ground-truth parking state mismatch."""
 
     def after_rollout(self, ctx: RolloutContext) -> None:
@@ -710,10 +726,10 @@ def adv_local_indices(scenes, num_scenes):
     return np.asarray(adv, dtype=np.int64)
 
 
-class RewardHookEgoAdvMinDist(RewardHook):
+class EgoAdvMinDistHook(MetricHook):
     """Dense shaping feature: min same-step ego<->adversary distance.
 
-    Complements RewardHookEgoMinTTC, which sweeps only the ego forward (an adversary
+    Complements EgoMinTTCHook, which sweeps only the ego forward (an adversary
     closing on a slow/stationary ego yields TTC=inf, hence no gradient). This
     symmetric centre distance gives signal at any range and regardless of which
     party is moving. Only the generated adversary is measured, so the metric is
@@ -765,14 +781,14 @@ class RewardHookEgoAdvMinDist(RewardHook):
             ctx.metrics["ego_adv_min_dist_warmup"][scene_idx] = d
 
 
-class RewardHookGenAgentParking(RewardHook):
+class GenAgentParkingHook(MetricHook):
     """Penalty feature: whether the generated adversary is parked (1.0 / 0.0).
 
     A generated adversary whose goal sits within MIN_DISTANCE_TO_GOAL of its
     spawn is static (the sim never controls it - see ``set_active_agents``). To
     push the policy to make the adversary actually drive, penalise a parked
     adversary. The metric (``gen_agent_is_parked``) is now per-scene 0/1 for
-    the single adversary. Unlike RewardHookParkingMismatch this is independent of
+    the single adversary. Unlike ParkingMismatchHook this is independent of
     GT, so it works in agent_only mode (no gt_parking_mask).
     """
 
@@ -791,7 +807,7 @@ class RewardHookGenAgentParking(RewardHook):
         ctx.metrics["gen_agent_is_parked"] = is_parked
 
 
-class RewardHookGenAgentInvalid(RewardHook):
+class GenAgentInvalidHook(MetricHook):
     """Penalty feature: whether the generated adversary violates its condition.
 
     The adversary is generated from a discretized ``[type, motion, goal_dist,
@@ -837,7 +853,7 @@ class RewardHookGenAgentInvalid(RewardHook):
         self.check_ego_dist = bool(check_ego_dist)
 
     @classmethod
-    def from_check(cls, check: GenInvalidCheck) -> "RewardHookGenAgentInvalid":
+    def from_check(cls, check: GenInvalidCheck) -> "GenAgentInvalidHook":
         """Build from the typed ``GenInvalidCheck`` carried on ``SimulatorConfig``."""
         from dataclasses import asdict
 

@@ -13,7 +13,7 @@ np.set_printoptions(suppress=True, threshold=sys.maxsize)
 torch.set_printoptions(threshold=100000)
 
 from cfgs.config import CONFIG_PATH
-from ddpo.goal_schema import MIN_DISTANCE_TO_GOAL
+from sim.schema import MIN_DISTANCE_TO_GOAL
 from utils.data_container import ScenarioDreamerData
 from utils.data_helpers import reorder_indices, reparameterize, sample_latents
 from utils.pyg_helpers import get_edge_index_bipartite, get_edge_index_complete_graph

@@ -1,1 +1,1 @@
-"""ldm_adv critical-scene generation + bad_driver evaluation utilities."""
+"""ldm_adv critical-scene generation + planner evaluation utilities."""

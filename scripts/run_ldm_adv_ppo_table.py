@@ -1,8 +1,8 @@
-"""Four-source ldm_adv critical-scene evaluation against bad_driver.
+"""Four-source ldm_adv critical-scene evaluation against the frozen ppo planner.
 
 Generates paired scene artifacts for the sources in critical_scene.ldm_adv_eval
 (original / base_gen / ddpo_gen / original_ddpo_adv, all from the same template
-pool slots), rolls each out under the frozen bad_driver planner, and writes:
+pool slots), rolls each out under the frozen ppo planner, and writes:
 
   <out-dir>/artifacts/<source>/chunk_XXXXX.pt   resumable per-chunk payloads
   <out-dir>/artifacts/<source>.pt               merged artifact + metadata
@@ -11,8 +11,8 @@ pool slots), rolls each out under the frozen bad_driver planner, and writes:
   <out-dir>/table.csv / table.md                cross-source comparison table
 
 Usage (env vars from scripts/define_env_variables.sh must be set):
-  .venv/bin/python scripts/run_ldm_adv_bad_driver_table.py \
-      --num-scenes 1000 --chunk-size 32 --out-dir data/critical_scene/ldm_adv_bad_driver_eval
+  .venv/bin/python scripts/run_ldm_adv_ppo_table.py \
+      --num-scenes 1000 --chunk-size 32 --out-dir data/critical_scene/ldm_adv_ppo_eval
 """
 
 from __future__ import annotations
@@ -57,7 +57,7 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--config-name", default="config_critical_scene_ldm_adv_ddpo")
     ap.add_argument("--overrides", nargs="*", default=[])
-    ap.add_argument("--out-dir", default="data/critical_scene/ldm_adv_bad_driver_eval")
+    ap.add_argument("--out-dir", default="data/critical_scene/ldm_adv_ppo_eval")
     ap.add_argument("--num-scenes", type=int, default=1000)
     ap.add_argument("--split", default="val")
     ap.add_argument("--seed", type=int, default=0)
@@ -72,7 +72,7 @@ def main() -> int:
     )
     ap.add_argument(
         "--ddpo-ckpt",
-        default="data/critical_scene/critical_scene_ddpo_ldm_adv_ddpm_bad_driver/last.ckpt",
+        default="data/critical_scene/critical_scene_ddpo_ldm_adv_ddpm_ppo_normal/last.ckpt",
     )
     ap.add_argument("--skip-generation", action="store_true")
     ap.add_argument("--skip-benchmark", action="store_true")
@@ -167,7 +167,7 @@ def main() -> int:
     # ------------------------------------------------------------ benchmark
     if not args.skip_benchmark:
         reward = build_reward(cfg_root, ldm_cfg)
-        min_ego_drive = float(cfg_root.ddpo.get("min_ego_drive", 10.0))
+        min_ego_drive = float(cfg_root.ddpo.min_ego_drive)
         summaries = {}
         for source in sources:
             summary_path = benchmark_dir / source / "summary.json"

@@ -36,7 +36,7 @@ _ADV_COND_NUM = {"type": 3, "motion": 2, "goal_dist": 3, "ego_dist": 3}
 # cond_dropout_prob > 0); a field set to null in adv_cond_target draws this id, so
 # the frozen embedder looks it up as the trained null embedding (genuinely
 # unconstrained) and the reward invalid-check skips the field. MUST match
-# ``_ADV_COND_NULL`` in ddpo/reward_hooks.py.
+# ``_ADV_COND_NULL`` in sim/hooks.py.
 _ADV_COND_NULL = {f: n for f, n in _ADV_COND_NUM.items()}
 
 

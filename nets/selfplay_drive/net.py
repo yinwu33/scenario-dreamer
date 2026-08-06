@@ -1,17 +1,21 @@
-"""Frozen PufferDrive planner policy, re-implemented in plain torch.
+"""Frozen PufferDrive Drive network, re-implemented in plain torch.
+
+This is a NETWORK, not a planner: it maps an observation to an action and knows
+nothing about roles, scenes or rollouts. ``sim.planners.ppo`` is the
+planner that wraps it.
 
 Exact architectural port of ``pufferlib.pacific.torch.Drive`` (PufferDrive repo)
-for the configuration used by the DDPO reward rollout:
+for the configuration used by the rollout:
 
   * dynamics_model = "classic"  -> ego features = 11
   * action_type    = "discrete" -> single MultiDiscrete head of 7*13 = 91 actions
   * obs layout = [ego(11) | partners(63*7) | road(512*7)]
 
 The state_dict produced by PufferDrive training (``selfplay_drive_*.pt`` or a
-recurrent bad_driver checkpoint) loads directly: layer names/shapes match the
-original module. Planner-specific settings are read from
-``planner/selfplay_drive/config.yaml`` and can be overridden by Hydra planner
-configs.
+recurrent ppo checkpoint) loads directly: layer names/shapes match the
+original module. All settings come from the caller's ``cfgs/planner/<name>.yaml``
+node -- there is no defaults file and no built-in defaults, so an incomplete
+config raises instead of silently loading a differently-shaped net.
 """
 
 from __future__ import annotations
@@ -34,19 +38,25 @@ ROAD_FEATURES = 7
 MAX_ROAD_OBJECTS = 512             # MAX_ROAD_SEGMENT_OBSERVATIONS
 OBS_DIM = EGO_FEATURES + MAX_PARTNER_OBJECTS * PARTNER_FEATURES + MAX_ROAD_OBJECTS * ROAD_FEATURES
 NUM_ACTIONS = 7 * 13               # accel_idx * 13 + steer_idx
-CONFIG_PATH = Path(__file__).with_name("config.yaml")
 
 
 @dataclass(frozen=True)
-class PlannerConfig:
+class NetConfig:
+    """Fully resolved architecture + checkpoint of one Drive net.
+
+    Frozen and hashable so ``load_net`` can key its cache on it: two roles that
+    compose the same planner yaml share one loaded network.
+    """
+
     checkpoint: Path
     device: str
     input_size: int
     hidden_size: int
-    deterministic: bool
-    rnn_name: str | None = None
-    rnn_input_size: int | None = None
-    rnn_hidden_size: int | None = None
+    # ``None`` means the feed-forward variant; any other value selects the
+    # recurrent one, in which case the rnn sizes below are required.
+    rnn_name: str | None
+    rnn_input_size: int | None
+    rnn_hidden_size: int | None
 
     @property
     def recurrent(self) -> bool:
@@ -59,63 +69,63 @@ def _resolve_device(device: str) -> str:
     return device
 
 
-def _to_config(overrides: Any | None):
-    if overrides is None:
-        return OmegaConf.create({})
-    if OmegaConf.is_config(overrides):
-        return OmegaConf.create(OmegaConf.to_container(overrides, resolve=True))
-    return OmegaConf.create(overrides)
+def _require(cfg, path: str):
+    """Read a required (possibly dotted) key out of the planner config node."""
+    node = cfg
+    for i, part in enumerate(path.split(".")):
+        if part not in node:
+            raise KeyError(
+                f"selfplay_drive net config is missing required key {path!r} "
+                f"(add it to the planner yaml that builds this net)"
+            )
+        node = node[part]
+        if node is None and i < len(path.split(".")) - 1:
+            raise ValueError(f"selfplay_drive net config: {path!r} traverses a null node")
+    return node
 
 
-def _none_string(value: Any | None) -> str | None:
-    if value is None:
-        return None
-    text = str(value)
-    if text.lower() == "none":
-        return None
-    return text
+def load_net_config(cfg: Any) -> NetConfig:
+    """Resolve one planner yaml node into a ``NetConfig``.
 
+    Strict by design: every architecture key must be present in ``cfg``. A net
+    silently built at the wrong width still loads a checkpoint (shapes are
+    checked, but only for the layers that exist) and then drives differently,
+    which is the worst possible failure mode for a frozen baseline.
+    """
+    if OmegaConf.is_config(cfg):
+        cfg = OmegaConf.create(OmegaConf.to_container(cfg, resolve=True))
+    else:
+        cfg = OmegaConf.create(cfg)
 
-def load_planner_config(overrides: Any | None = None) -> PlannerConfig:
-    user = _to_config(overrides)
-    raw = OmegaConf.load(CONFIG_PATH)
-    base_dir = CONFIG_PATH.parent
-
-    config_path = user.get("config_path", None)
-    if config_path is not None:
-        config_path = Path(str(config_path))
-        raw = OmegaConf.merge(raw, OmegaConf.load(config_path))
-        base_dir = config_path.parent
-
-    raw = OmegaConf.merge(raw, user)
-    policy_cfg = raw.get("policy", {})
-    rnn_cfg = raw.get("rnn", {})
-
-    checkpoint = Path(str(raw.get("checkpoint", "selfplay_drive_178121292262.pt")))
+    checkpoint = Path(str(_require(cfg, "checkpoint")))
     if not checkpoint.is_absolute():
-        checkpoint = base_dir / checkpoint
-    rnn_name = _none_string(raw.get("rnn_name", None))
-    return PlannerConfig(
+        raise ValueError(
+            f"planner checkpoint must be an absolute path, got {checkpoint}; "
+            "use ${project_root}/checkpoints/... in the planner yaml"
+        )
+    if not checkpoint.exists():
+        raise FileNotFoundError(f"planner checkpoint does not exist: {checkpoint}")
+
+    rnn_name = _require(cfg, "rnn_name")
+    rnn_name = None if rnn_name is None or str(rnn_name).lower() == "none" else str(rnn_name)
+    return NetConfig(
         checkpoint=checkpoint,
-        device=_resolve_device(str(raw.get("device", "auto"))),
-        input_size=int(raw.get("input_size", policy_cfg.get("input_size", 64))),
-        hidden_size=int(raw.get("hidden_size", policy_cfg.get("hidden_size", 256))),
-        deterministic=bool(raw.get("deterministic", True)),
+        device=_resolve_device(str(_require(cfg, "device"))),
+        input_size=int(_require(cfg, "policy.input_size")),
+        hidden_size=int(_require(cfg, "policy.hidden_size")),
         rnn_name=rnn_name,
-        rnn_input_size=int(raw.get("rnn_input_size", rnn_cfg.get("input_size", 256))),
-        rnn_hidden_size=int(raw.get("rnn_hidden_size", rnn_cfg.get("hidden_size", 256))),
+        rnn_input_size=int(_require(cfg, "rnn.input_size")) if rnn_name else None,
+        rnn_hidden_size=int(_require(cfg, "rnn.hidden_size")) if rnn_name else None,
     )
 
 
-class DrivePlanner(nn.Module):
+class DriveNet(nn.Module):
     """Port of pufferlib.pacific.torch.Drive (discrete / classic only)."""
 
-    def __init__(self, cfg: PlannerConfig | None = None):
+    def __init__(self, cfg: NetConfig):
         super().__init__()
-        cfg = cfg or load_planner_config()
         input_size = cfg.input_size
         hidden_size = cfg.hidden_size
-        self.deterministic = cfg.deterministic
         self.recurrent = False
         self.ego_dim = EGO_FEATURES
         self.partner_features = PARTNER_FEATURES
@@ -174,26 +184,23 @@ class DrivePlanner(nn.Module):
         return self.actor(hidden), self.value_fn(hidden)
 
     @torch.no_grad()
-    def act(self, observations: torch.Tensor, deterministic: bool | None = None) -> torch.Tensor:
-        if deterministic is None:
-            deterministic = self.deterministic
+    def act(self, observations: torch.Tensor, *, deterministic: bool) -> torch.Tensor:
         logits, _ = self.forward(observations)
         if deterministic:
             return logits.argmax(dim=-1)
         return torch.distributions.Categorical(logits=logits).sample()
 
 
-class RecurrentDrivePlanner(nn.Module):
+class RecurrentDriveNet(nn.Module):
     """Inference-only port of pufferlib.models.LSTMWrapper around Drive."""
 
-    def __init__(self, cfg: PlannerConfig):
+    def __init__(self, cfg: NetConfig):
         super().__init__()
         if cfg.rnn_name != "Recurrent":
             raise ValueError(f"unsupported rnn_name {cfg.rnn_name!r}; expected 'Recurrent'")
-        self.policy = DrivePlanner(cfg)
-        self.input_size = int(cfg.rnn_input_size or cfg.hidden_size)
-        self.hidden_size = int(cfg.rnn_hidden_size or cfg.hidden_size)
-        self.deterministic = cfg.deterministic
+        self.policy = DriveNet(cfg)
+        self.input_size = int(cfg.rnn_input_size)
+        self.hidden_size = int(cfg.rnn_hidden_size)
         self.recurrent = True
         self.lstm = nn.LSTM(self.input_size, self.hidden_size)
         self.cell = nn.LSTMCell(self.input_size, self.hidden_size)
@@ -229,28 +236,26 @@ class RecurrentDrivePlanner(nn.Module):
         observations: torch.Tensor,
         *,
         state: dict[str, torch.Tensor],
-        deterministic: bool | None = None,
+        deterministic: bool,
     ) -> torch.Tensor:
-        if deterministic is None:
-            deterministic = self.deterministic
         logits, _ = self.forward_eval(observations, state)
         if deterministic:
             return logits.argmax(dim=-1)
         return torch.distributions.Categorical(logits=logits).sample()
 
 
-def _load_state_dict(planner: nn.Module, state_dict: dict[str, torch.Tensor], *, recurrent: bool) -> None:
+def _load_state_dict(net: nn.Module, state_dict: dict[str, torch.Tensor], *, recurrent: bool) -> None:
     try:
-        planner.load_state_dict(state_dict)
+        net.load_state_dict(state_dict)
         return
     except RuntimeError:
         if not recurrent:
             raise
-    missing, unexpected = planner.load_state_dict(state_dict, strict=False)
+    missing, unexpected = net.load_state_dict(state_dict, strict=False)
     allowed_missing = [key for key in missing if key.startswith("cell.")]
     if len(allowed_missing) != len(missing) or unexpected:
         raise RuntimeError(
-            "checkpoint did not match recurrent Drive planner; "
+            "checkpoint did not match recurrent Drive net; "
             f"missing={missing}, unexpected={unexpected}"
         )
 
@@ -258,17 +263,18 @@ def _load_state_dict(planner: nn.Module, state_dict: dict[str, torch.Tensor], *,
 # Loaded nets keyed by their resolved (frozen, hashable) config: the per-role
 # rollout planners typically share one checkpoint, and the net is frozen/eval
 # with all recurrent state held by the caller, so sharing one instance is safe.
-_PLANNER_CACHE: dict[PlannerConfig, "DrivePlanner | RecurrentDrivePlanner"] = {}
+_NET_CACHE: dict[NetConfig, "DriveNet | RecurrentDriveNet"] = {}
 
 
-def load_planner(overrides: Any | None = None) -> DrivePlanner | RecurrentDrivePlanner:
-    cfg = load_planner_config(overrides)
-    cached = _PLANNER_CACHE.get(cfg)
+def load_net(cfg: Any) -> DriveNet | RecurrentDriveNet:
+    """Build (or reuse) the frozen Drive net described by a planner yaml node."""
+    cfg = load_net_config(cfg)
+    cached = _NET_CACHE.get(cfg)
     if cached is not None:
         return cached
-    planner: DrivePlanner | RecurrentDrivePlanner
-    planner = RecurrentDrivePlanner(cfg) if cfg.recurrent else DrivePlanner(cfg)
-    planner = planner.to(cfg.device)
+    net: DriveNet | RecurrentDriveNet
+    net = RecurrentDriveNet(cfg) if cfg.recurrent else DriveNet(cfg)
+    net = net.to(cfg.device)
     sd = torch.load(cfg.checkpoint, map_location=cfg.device, weights_only=False)
     if isinstance(sd, dict) and "state_dict" in sd:
         sd = sd["state_dict"]
@@ -276,9 +282,9 @@ def load_planner(overrides: Any | None = None) -> DrivePlanner | RecurrentDriveP
         k.replace("module.", "").replace("_orig_mod.", ""): v
         for k, v in sd.items()
     }
-    _load_state_dict(planner, sd, recurrent=cfg.recurrent)
-    planner.eval()
-    for p in planner.parameters():
+    _load_state_dict(net, sd, recurrent=cfg.recurrent)
+    net.eval()
+    for p in net.parameters():
         p.requires_grad_(False)
-    _PLANNER_CACHE[cfg] = planner
-    return planner
+    _NET_CACHE[cfg] = net
+    return net

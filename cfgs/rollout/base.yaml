@@ -1,4 +1,4 @@
- # Shared rollout dynamics for the DDPO numpy sim (ddpo.pufferdrive_sim.SimConfig).
+ # Shared rollout dynamics for the DDPO numpy sim (sim.world.SimConfig).
 #
 # Composed at ddpo.planner.sim (rollout@ddpo.planner.sim: base): the simulation
 # (dt, goal lifecycle, map extent) is a property of the rollout shared by every

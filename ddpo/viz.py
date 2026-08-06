@@ -29,7 +29,7 @@ import matplotlib.pyplot as plt
 import matplotlib.transforms as transforms
 import numpy as np
 
-from .goal_schema import MIN_DISTANCE_TO_GOAL
+from sim.schema import MIN_DISTANCE_TO_GOAL
 
 _EGO_COLOR = "#de5959"      # light red  (ego = local index 0)
 _VEH_COLOR = "#87b3e6"      # light blue (other vehicles)

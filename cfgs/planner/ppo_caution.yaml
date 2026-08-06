@@ -1,0 +1,38 @@
+# ppo family, caution variant: the frozen recurrent PufferDrive PPO net
+# (sim/planners/ppo.py) + in-repo numpy classic dynamics. Composed per role
+# (planner@<entry>.planner.{sut,env,adv}).
+#
+# The most defensive end of the ppo driving-style range.
+# All ppo_* variants share ONE checkpoint and differ only in the conditioning
+# block below, so they cost nothing extra to run side by side as table columns.
+#
+# The shared simulation dynamics (dt, goal behavior, map extent, ...) are a
+# property of the rollout, not of one role's policy: cfgs/rollout/base.yaml.
+#
+# This file is the COMPLETE config of the net: nets/selfplay_drive/net.py has no
+# defaults file and no built-in fallbacks, so removing a key below raises rather
+# than quietly building a differently-shaped network.
+name: ppo_caution
+checkpoint: ${project_root}/checkpoints/planners/ppo/ppo_178352180650.pt
+device: auto
+deterministic: true
+
+# Conditioning obs of THIS policy (trailing ego-feature slots the frozen net
+# was trained on): how defensively this role's agents drive. Per field either
+# a scalar (fixed) or [lo, hi] (per-agent uniform sample). Applied to the
+# role's agents by RolloutRunner; a planner without conditioning slots
+# declares `conditioning: null`. collision_factor 0 = reckless, 2 = maximally
+# defensive.
+conditioning:  # TODO: change factor to be aggressive
+  collision_factor: 2.0
+  offroad_factor: 2.0
+  lane_width: 4.0
+
+policy:
+  input_size: 64
+  hidden_size: 256
+
+rnn_name: Recurrent
+rnn:
+  input_size: 256
+  hidden_size: 256

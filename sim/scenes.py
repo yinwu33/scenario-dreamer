@@ -1,8 +1,11 @@
-"""Data contracts between the DDPO policy (diffusion model) and the reward (sim).
+"""The scene contract: what any scene *source* hands to the rollout.
 
-Ported from PufferDrive/scene_init_ddpo/interfaces.py, trimmed to what the
-scenario-dreamer-hosted trainer needs (plain dataclasses, no ABC: the only policy
-today is ``ddpo.policy_ldm_adv.LDMAdvDDPOPolicy``).
+``GeneratedScenes`` is the single input type of ``sim.runner.RolloutRunner``, so
+it is also the seam that makes scene sources interchangeable. Today's producers
+are the DDPO diffusion policy (``ddpo.policy_ldm_adv``), the real-log loader
+(``critical_scene.log_scenes``) and the paired-source evaluation
+(``critical_scene.ldm_adv_eval``); none of them is privileged, and nothing below
+this module knows which one it is looking at.
 """
 
 from __future__ import annotations
@@ -42,7 +45,7 @@ class GeneratedScenes:
     #                        arrays of SCENE-LOCAL lane indices. ``succ`` edges run in the
     #                        driving direction; ``lateral`` pairs left/right neighbours.
     #                        Optional: the lane GRAPH, as opposed to the lane geometry in
-    #                        lane_polylines. Route-planning planners (ddpo.routes) need it;
+    #                        lane_polylines. Route-planning planners (sim.routes) need it;
     #                        the frozen neural planners do not, so most producers leave it
     #                        out and SimScene.lane_graph stays None.
     meta: dict = field(default_factory=dict)
@@ -86,18 +89,3 @@ def single_adv_local_idx(gen_agent_mask, agent_scene_idx, num_scenes):
             )
         out[sel_scene] = local[sel]
     return out
-
-
-@dataclass
-class SamplingTrajectory:
-    """Record of a diffusion sampling rollout, sufficient to recompute log-probs.
-
-    ``old_logprob`` is the per-scene, per-step log-density evaluated under the
-    behaviour parameters at sampling time (PPO/IS reference). ``records`` is
-    policy-specific (per-step (x_t, x_{t-1}, t) tuples).
-    """
-
-    records: Any
-    old_logprob: torch.Tensor       # [num_scenes, num_steps] detached
-    num_steps: int
-    num_scenes: int

@@ -4,8 +4,6 @@ from models.scenario_dreamer_autoencoder import ScenarioDreamerAutoEncoder
 from models.scenario_dreamer_ldm import ScenarioDreamerLDM
 from models.scenario_dreamer_dm import ScenarioDreamerDM
 from models.scenario_dreamer_dm_goal import ScenarioDreamerDMGoal
-from models.scenario_dreamer_dm_fixed_map_agent_goal import ScenarioDreamerDMFixedMapAgentGoal
-from models.scenario_dreamer_cldm import ScenarioDreamerCLDM
 from model_registry import collapse_cfg
 from metrics import Metrics
 

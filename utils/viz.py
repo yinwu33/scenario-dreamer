@@ -6,7 +6,7 @@ import os
 from utils.geometry import *
 import math
 from cfgs.config import LANE_CONNECTION_TYPES_WAYMO, LANE_CONNECTION_TYPES_NUPLAN
-from ddpo.goal_schema import MIN_DISTANCE_TO_GOAL
+from sim.schema import MIN_DISTANCE_TO_GOAL
 from ddpo.viz import CONTROL_COLOR  # vivid green for adversarial/controlled agents
 from moviepy.editor import ImageSequenceClip
 import wandb

@@ -1,9 +1,9 @@
 """idm planner: rule-based Intelligent-Driver-Model agent on a lane-graph route.
 
 The reference planner for the SUT x scene-initialization benchmark. Unlike
-``bad_driver`` (a frozen neural policy that reads raw road segments out of its
+the ``ppo_*`` family (frozen neural policies that read raw road segments out of their
 observation) this planner is explicit about where it is going: it searches a
-route from spawn to goal through the lane graph (``ddpo.routes``) and then
+route from spawn to goal through the lane graph (``sim.routes``) and then
 
   * longitudinal -- classic IDM against the nearest vehicle ahead ON THAT ROUTE
     (Frenet projection, not a Euclidean cone), plus the end of the route as a
@@ -23,7 +23,7 @@ would silently drift out of sync if the sim's model ever changed. Rolling the
 real update forward for a few steps cannot.
 
 Routes are built lazily on the first ``plan`` call and cached on the sim
-(``sim._idm_routes``), mirroring how ``BadDriverPlanner`` stashes its LSTM carry
+(``sim._idm_routes``), mirroring how ``PPOPlanner`` stashes its LSTM carry
 -- planner-owned state on a per-scene object, never world state.
 """
 
@@ -33,15 +33,15 @@ from typing import Sequence
 
 import numpy as np
 
-from ..pufferdrive_sim import (
+from ..routes import Route, build_route
+from ..world import (
     ACCELERATION_VALUES,
     NUM_STEER,
     STEERING_VALUES,
     TYPE_PEDESTRIAN,
     SimScene,
 )
-from ..routes import Route, build_route
-from .base import Planner, PlanItem, SimulatorConfig
+from .base import Planner, PlanItem, require
 
 # Coast: acceleration -0.0, steering 0.0. Used when an agent has no usable route.
 _IDLE_ACCEL_IDX = int(np.argmin(np.abs(ACCELERATION_VALUES)))
@@ -49,35 +49,30 @@ _IDLE_STEER_IDX = int(np.argmin(np.abs(STEERING_VALUES)))
 IDLE_ACTION = _IDLE_ACCEL_IDX * NUM_STEER + _IDLE_STEER_IDX
 
 
-def _cfg(planner_cfg, key: str, default):
-    value = planner_cfg.get(key, default)
-    return default if value is None else value
-
-
 class IDMPlanner(Planner):
-    def __init__(
-        self, planner_cfg, params: SimulatorConfig, *, role: str, device: str | None = None
-    ):
-        super().__init__(planner_cfg, params, role=role, device=device)
-        # --- IDM longitudinal parameters (policies/idm_policy.py defaults) ---
-        self.target_speed = float(_cfg(planner_cfg, "target_speed", 15.0))
-        self.min_gap = float(_cfg(planner_cfg, "min_gap", 1.0))
-        self.headway_time = float(_cfg(planner_cfg, "headway_time", 1.5))
-        self.max_accel = float(_cfg(planner_cfg, "max_accel", 2.0))
-        self.comfort_decel = float(_cfg(planner_cfg, "comfort_decel", 6.0))
-        self.accel_exponent = float(_cfg(planner_cfg, "accel_exponent", 4.0))
+    def __init__(self, planner_cfg, *, role: str, device: str | None = None):
+        super().__init__(planner_cfg, role=role, device=device)
+        # Every value is required: an IDM agent's behaviour IS these numbers, so
+        # a missing key must fail rather than quietly drive with a hidden default.
+        # --- IDM longitudinal ---
+        self.target_speed = float(self._require("target_speed"))
+        self.min_gap = float(self._require("min_gap"))
+        self.headway_time = float(self._require("headway_time"))
+        self.max_accel = float(self._require("max_accel"))
+        self.comfort_decel = float(self._require("comfort_decel"))
+        self.accel_exponent = float(self._require("accel_exponent"))
         # --- lead-vehicle gating ---
-        self.lateral_margin = float(_cfg(planner_cfg, "lateral_margin", 0.3))
-        self.lead_search_radius = float(_cfg(planner_cfg, "lead_search_radius", 40.0))
+        self.lateral_margin = float(self._require("lateral_margin"))
+        self.lead_search_radius = float(self._require("lead_search_radius"))
         # --- pure pursuit ---
-        self.lookahead_time = float(_cfg(planner_cfg, "lookahead_time", 0.9))
-        self.lookahead_min = float(_cfg(planner_cfg, "lookahead_min", 3.0))
-        self.lookahead_max = float(_cfg(planner_cfg, "lookahead_max", 12.0))
-        self.steer_preview_steps = int(_cfg(planner_cfg, "steer_preview_steps", 5))
+        self.lookahead_time = float(self._require("lookahead_time"))
+        self.lookahead_min = float(self._require("lookahead_min"))
+        self.lookahead_max = float(self._require("lookahead_max"))
+        self.steer_preview_steps = int(self._require("steer_preview_steps"))
         # --- route search ---
-        route_cfg = _cfg(planner_cfg, "route", {}) or {}
-        self.route_spacing = float(_cfg(route_cfg, "spacing", 1.0))
-        self.route_max_depth = int(_cfg(route_cfg, "max_depth", 12))
+        route_cfg = self._require("route")
+        self.route_spacing = float(require(route_cfg, self.name, "spacing", "route.spacing"))
+        self.route_max_depth = int(require(route_cfg, self.name, "max_depth", "route.max_depth"))
 
     # ------------------------------------------------------------- routes
     def _routes_for(self, sim: SimScene) -> dict[int, Route | None]:

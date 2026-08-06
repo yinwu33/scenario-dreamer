@@ -1,8 +1,8 @@
 """Render 2x2 comparison GIFs for the four ldm_adv evaluation sources.
 
 For each requested scene (pool slot of a run produced by
-scripts/run_ldm_adv_bad_driver_table.py) the four sources are rolled out under
-the same bad_driver simulator used for the tables and tiled into one GIF:
+scripts/run_ldm_adv_ppo_table.py) the four sources are rolled out under
+the same ppo simulator used for the tables and tiled into one GIF:
 
     top-left:  original             top-right:  original_ddpo_adv
     bottom-left: base_gen           bottom-right: ddpo_gen
@@ -13,9 +13,9 @@ the DDPO training visuals.
 
 Usage (env vars from scripts/define_env_variables.sh must be set):
   .venv/bin/python scripts/render_ldm_adv_2x2_gifs.py \
-      --out-dir data/critical_scene/ldm_adv_bad_driver_eval_1000 --scenes 0 1 2 3
+      --out-dir data/critical_scene/ldm_adv_ppo_eval_1000 --scenes 0 1 2 3
   .venv/bin/python scripts/render_ldm_adv_2x2_gifs.py \
-      --out-dir data/critical_scene/ldm_adv_bad_driver_eval_1000 --top-collisions 8
+      --out-dir data/critical_scene/ldm_adv_ppo_eval_1000 --top-collisions 8
 """
 
 from __future__ import annotations
@@ -126,7 +126,7 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--config-name", default="config_critical_scene_ldm_adv_ddpo")
     ap.add_argument("--overrides", nargs="*", default=[])
-    ap.add_argument("--out-dir", default="data/critical_scene/ldm_adv_bad_driver_eval_1000")
+    ap.add_argument("--out-dir", default="data/critical_scene/ldm_adv_ppo_eval_1000")
     ap.add_argument("--scenes", nargs="*", type=int, default=None, help="pool slots to render")
     ap.add_argument(
         "--top-collisions",

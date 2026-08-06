@@ -1,8 +1,8 @@
-# Rule-based IDM planner (ddpo/planners/idm.py) for one rollout role.
+# Rule-based IDM planner (sim/planners/idm.py) for one rollout role.
 #
 # Longitudinal: classic IDM against the nearest vehicle ahead on the agent's
 # lane-graph route; lateral: pure pursuit resolved over the 13 discrete steering
-# values. Actions are quantised onto the same 7x13 table bad_driver uses, so
+# values. Actions are quantised onto the same 7x13 table the ppo_* planners use, so
 # both planners drive through the identical step_dynamics integrator.
 name: idm
 

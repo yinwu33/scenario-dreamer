@@ -30,7 +30,7 @@ import numpy as np
 import torch
 
 from cfgs.config import LANE_CONNECTION_TYPES_WAYMO
-from ddpo.interfaces import GeneratedScenes
+from sim.scenes import GeneratedScenes
 from utils.goal_runtime import prepare_scene
 
 
@@ -48,7 +48,7 @@ def lane_graph_edges(record: dict[str, Any]) -> dict[str, np.ndarray]:
 
     ``succ`` runs in the driving direction; ``lateral`` pairs left/right
     neighbours (used to widen the route search's candidate lanes, not as
-    traversable edges -- see ``ddpo.routes``).
+    traversable edges -- see ``sim.routes``).
 
     Edge-direction note, verified against the geometry on 60 val scenes: the
     stored graph is in PyG message-passing form, where the type labels the SOURCE

@@ -21,9 +21,6 @@ from models.scenario_dreamer_ldm import ScenarioDreamerLDM
 from models.scenario_dreamer_ldm_adv import ScenarioDreamerLDMAdv
 from models.scenario_dreamer_dm import ScenarioDreamerDM
 from models.scenario_dreamer_dm_goal import ScenarioDreamerDMGoal
-from models.scenario_dreamer_dm_adv import ScenarioDreamerDMAdv
-from models.scenario_dreamer_dm_fixed_map_agent_goal import ScenarioDreamerDMFixedMapAgentGoal
-from models.scenario_dreamer_cldm import ScenarioDreamerCLDM
 from models.ctrl_sim import CtRLSim
 
 
@@ -47,17 +44,8 @@ class ModelSpec:
 MODEL_REGISTRY: dict[str, ModelSpec] = {
     "autoencoder": ModelSpec("ae", "autoencoder", ScenarioDreamerAutoEncoder),
     "autoencoder_goal": ModelSpec("ae_goal", "autoencoder", ScenarioDreamerAutoEncoder),
-    "autoencoder_bezier": ModelSpec("ae", "autoencoder", ScenarioDreamerAutoEncoderBezier),
     "ldm": ModelSpec("ldm", "ldm", ScenarioDreamerLDM, ae_attr="ae"),
-    "ldm_goal": ModelSpec("ldm_goal", "ldm", ScenarioDreamerLDM, ae_attr="ae_goal"),
     "ldm_adv": ModelSpec("ldm_adv", "ldm", ScenarioDreamerLDMAdv, ae_attr="ae_goal"),
-    "cldm": ModelSpec("ldm", "ldm", ScenarioDreamerCLDM, ae_attr="ae"),
-    "dm": ModelSpec("dm", "dm", ScenarioDreamerDM),
-    "dm_goal": ModelSpec("dm_goal", "dm", ScenarioDreamerDMGoal),
-    "dm_adv": ModelSpec("dm_adv", "dm", ScenarioDreamerDMAdv),
-    "dm_fixed_map_agent_goal": ModelSpec(
-        "dm_fixed_map_agent_goal", "dm", ScenarioDreamerDMFixedMapAgentGoal
-    ),
     "ctrl_sim": ModelSpec("ctrl_sim", "ctrl_sim", CtRLSim),
 }
 

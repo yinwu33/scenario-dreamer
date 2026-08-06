@@ -20,18 +20,34 @@ from __future__ import annotations
 
 import copy
 import math
+from dataclasses import dataclass
+from typing import Any
 
 import torch
 from torch_geometric.data import Batch
 
 from nn_modules.autoencoder import AutoEncoder
 from nn_modules.ldm_adv import LDMAdv
+from sim.scenes import GeneratedScenes, single_adv_local_idx
 from utils.data_container import ScenarioDreamerData
 from utils.data_helpers import unnormalize_latents, unnormalize_scene
 
-from .interfaces import GeneratedScenes, SamplingTrajectory, single_adv_local_idx
-
 _LOG_2PI = math.log(2.0 * math.pi)
+
+
+@dataclass
+class SamplingTrajectory:
+    """Record of a diffusion sampling rollout, sufficient to recompute log-probs.
+
+    ``old_logprob`` is the per-scene, per-step log-density evaluated under the
+    behaviour parameters at sampling time (PPO/IS reference). ``records`` is
+    policy-specific (per-step (x_t, x_{t-1}, t) tuples).
+    """
+
+    records: Any
+    old_logprob: torch.Tensor       # [num_scenes, num_steps] detached
+    num_steps: int
+    num_scenes: int
 
 
 def _gaussian_logprob(x: torch.Tensor, mean: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
@@ -494,7 +510,7 @@ class LDMAdvDDPOPolicy:
         meta = {"lane_scene_idx": lane_batch, "gen_agent_mask": gen_agent_mask}
         # Carry the adv conditioning target ([type, motion, goal_dist, ego_dist]
         # bucket ids, one row per scene) through to the reward so it can check the
-        # realized adversary against its requested condition (RewardHookGenAgentInvalid).
+        # realized adversary against its requested condition (GenAgentInvalidHook).
         if "cond" in data["adv"]:
             adv_cond = torch.full(
                 (num_scenes, data["adv"].cond.shape[1]), -1, dtype=torch.long

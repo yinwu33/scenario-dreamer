@@ -62,7 +62,7 @@ adv_cond_target:
   goal_dist: [middle, far] # sample per scene from {middle, far}, [near, middle, far]
   ego_dist: null           # null token: unconditional + not checked (use [near, middle, far] to randomize instead)
 
-# Condition-violation gate (RewardHookGenAgentInvalid): reject a conditionally-
+# Condition-violation gate (sim.hooks.GenAgentInvalidHook): reject a conditionally-
 # generated adversary if its realized labels fall in a different bucket than the
 # requested adv_cond_target on ANY enabled field (penalty graded by the metric
 # distance past the bucket boundary -- see reward.invalid_grade_scale). This
@@ -106,13 +106,14 @@ pool_size: 40000
 #
 # planner (WHICH policy drives each role + that policy's conditioning obs):
 # one cfgs/planner/<name>.yaml per role (planner@ddpo.planner.sut / .env /
-# .adv; the adv runs bad_driver_reckless); swap a role's checkpoint /
-# conditioning there or re-point its default.
+# .adv, all three from the ppo_* family); swap a role's checkpoint or override
+# its conditioning (e.g. ddpo.planner.adv.conditioning.collision_factor=0 for a
+# reckless adversary) in the entry config.
 # planner.sim (SHARED rollout dynamics: dt, goal lifecycle, map extent):
 # cfgs/rollout/base.yaml, composed at rollout@ddpo.planner.sim.
 #
 # simulator: HOW the rollout measures metrics while stepping
-# (ddpo.planners.SimulatorConfig; seed and the gen_agent_invalid check are
+# (sim.runner.SimulatorConfig; seed and the gen_agent_invalid check are
 # injected by the training loop).
 simulator:
   sim_steps: 91

@@ -8,7 +8,7 @@ concern (see ``cfgs/ddpo/ldm_adv.yaml``):
     dynamics section. Swapping planner weights or models means editing/adding a
     planner yaml or re-pointing a role default, nothing here.
   * ``simulator_cfg``  -- HOW the rollout measures metrics while stepping
-    (``ddpo.planners.SimulatorConfig``: sim_steps, seed, overlap margin, lane
+    (``sim.runner.SimulatorConfig``: sim_steps, seed, overlap margin, lane
     thresholds, approach warmup, optional condition-violation check).
   * ``reward_cfg``     -- HOW the scalar reward is assembled from those metrics
     (``RewardConfig`` below: weights and ramps only).
@@ -17,7 +17,7 @@ Configs are strict: every field is required and unknown keys raise, so a typo
 or a stale yaml fails at construction instead of silently using a default.
 
 The rollout is delegated to the ``RolloutRunner`` built from ``planner_cfg``
-(see ``ddpo.planners``); this module builds the metric hooks, injects them into
+(see ``sim.runner``); this module builds the metric hooks, injects them into
 the runner, and assembles the scalar reward from the per-scene metrics:
 
   * only the ego (scene agent 0) is scored;
@@ -53,12 +53,12 @@ the runner, and assembles the scalar reward from the per-scene metrics:
     dense-TTC-only reward left it ~0.1 above a deep near-miss (invisible under
     per-group whitening);
   * ``ego_offroad`` is kept for interface compatibility but is always 0: the
-    generated maps carry no road edges (see pufferdrive_sim docstring);
+    generated maps carry no road edges (see sim.world docstring);
   * a scene stops being stepped/scored once its ego reaches its goal;
   * ``evaluate`` also returns each reward component for diagnostics.
 
 Metric access is strict: a planner must emit every metric the reward consumes
-(the ``SimScene`` rollout always does, via the hooks in ``ddpo.reward_hooks``);
+(the ``SimScene`` rollout always does, via the hooks in ``sim.hooks``);
 a missing key raises instead of silently zeroing a term.
 """
 
@@ -69,20 +69,20 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 
-from .interfaces import GeneratedScenes
-from .planners import RolloutRunner, SimulatorConfig
-from .reward_hooks import (
-    RewardHookGenAgentInvalid,
-    RewardHookGenAgentParking,
-    RewardHookEgoAdvMinDist,
-    RewardHookEgoCollision,
-    RewardHookEgoMinTTC,
-    RewardHookEgoOffroadProxy,
-    RewardHookGoalOfflane,
-    RewardHookInitOverlap,
-    RewardHookParkingMismatch,
-    RewardHookReachedGoal,
-    RewardHookTrajectory,
+from sim.scenes import GeneratedScenes
+from sim.runner import RolloutRunner, SimulatorConfig
+from sim.hooks import (
+    GenAgentInvalidHook,
+    GenAgentParkingHook,
+    EgoAdvMinDistHook,
+    EgoCollisionHook,
+    EgoMinTTCHook,
+    EgoOffroadProxyHook,
+    GoalOfflaneHook,
+    InitOverlapHook,
+    ParkingMismatchHook,
+    ReachedGoalHook,
+    TrajectoryHook,
 )
 
 
@@ -221,21 +221,21 @@ class PufferSimulator:
         ``_assemble_reward`` / ``evaluate`` consume (strict access)."""
         p = self.simulator_cfg
         hooks = [
-            RewardHookInitOverlap(p.init_overlap_margin),
-            RewardHookEgoCollision(),
-            RewardHookEgoMinTTC(),
-            RewardHookEgoOffroadProxy(p.ego_offroad_threshold),
-            RewardHookEgoAdvMinDist(p.approach_warmup_time),
-            RewardHookTrajectory(),
-            RewardHookReachedGoal(self.runner.sim_cfg.goal_radius),
-            RewardHookGoalOfflane(p.goal_offlane_threshold, p.goal_onroad_threshold),
-            RewardHookParkingMismatch(),
-            RewardHookGenAgentParking(),
+            InitOverlapHook(p.init_overlap_margin),
+            EgoCollisionHook(),
+            EgoMinTTCHook(),
+            EgoOffroadProxyHook(p.ego_offroad_threshold),
+            EgoAdvMinDistHook(p.approach_warmup_time),
+            TrajectoryHook(),
+            ReachedGoalHook(self.runner.sim_cfg.goal_radius),
+            GoalOfflaneHook(p.goal_offlane_threshold, p.goal_onroad_threshold),
+            ParkingMismatchHook(),
+            GenAgentParkingHook(),
         ]
         # Condition-violation gate (ldm_adv, conditional): computed alongside the
         # parked-adv diagnostic; the reward uses it in place of the parking gate.
         if p.gen_invalid is not None:
-            hooks.append(RewardHookGenAgentInvalid.from_check(p.gen_invalid))
+            hooks.append(GenAgentInvalidHook.from_check(p.gen_invalid))
         return hooks
 
     @property

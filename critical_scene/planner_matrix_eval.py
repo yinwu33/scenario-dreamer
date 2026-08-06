@@ -15,9 +15,9 @@ not have. A planner benchmark needs the opposite polarity and a broader
 collision notion, so it owns a ``RolloutRunner`` directly and injects its own
 lean hook set:
 
-  * ``RewardHookReachedGoal``      -> Succ.
-  * ``RewardHookEgoAnyCollision``  -> Coll. (ego vs any vehicle)
-  * ``RewardHookEgoOffroadProxy``  -> Off.  (centerline-distance proxy; the maps
+  * ``ReachedGoalHook``      -> Succ.
+  * ``EgoAnyCollisionHook``  -> Coll. (ego vs any vehicle)
+  * ``EgoOffroadProxyHook``  -> Off.  (centerline-distance proxy; the maps
                                       carry no ROAD_EDGE entities)
   * ``RouteDiagnosticsHook``       -> whether the ego got a lane-following route
                                       at all, so "drove badly" can be told apart
@@ -40,14 +40,14 @@ from critical_scene.metrics_common import (
     rate,
     write_json,
 )
-from ddpo.interfaces import GeneratedScenes
-from ddpo.planners import RolloutRunner, SimulatorConfig
-from ddpo.reward_hooks import (
-    RewardHook,
-    RewardHookEgoAnyCollision,
-    RewardHookEgoOffroadProxy,
-    RewardHookReachedGoal,
-    RewardHookTrajectory,
+from sim.scenes import GeneratedScenes
+from sim.runner import RolloutRunner, SimulatorConfig
+from sim.hooks import (
+    MetricHook,
+    EgoAnyCollisionHook,
+    EgoOffroadProxyHook,
+    ReachedGoalHook,
+    TrajectoryHook,
     RolloutContext,
 )
 
@@ -65,7 +65,7 @@ METRIC_KEYS = (
 )
 
 
-class RouteDiagnosticsHook(RewardHook):
+class RouteDiagnosticsHook(MetricHook):
     """Record where the ego's reference path came from.
 
     Only rule-based planners build routes; when the sut planner is a neural one
@@ -108,27 +108,30 @@ def build_runner(cfg) -> RolloutRunner:
         cfg.planner,
         SimulatorConfig(
             **OmegaConf.to_container(cfg.simulator, resolve=True),
-            # Reward-only knobs the planner benchmark never scores. They are
+            # Adversary-only knobs the planner benchmark never scores. They are
             # required fields of SimulatorConfig (strict by design) but are read
-            # exclusively by the adversarial hooks, which are not installed here.
+            # exclusively by the adversary hooks, which are not installed here.
             init_overlap_margin=0.0,
             goal_offlane_threshold=np.inf,
             goal_onroad_threshold=np.inf,
             approach_warmup_time=0.0,
+            # No generated adversary in these scene sources, so no realized-vs-
+            # requested condition to check.
+            gen_invalid=None,
             ego_offroad_threshold=float(cfg.benchmark.ego_offroad_threshold),
         ),
     )
 
 
 def make_hooks(runner: RolloutRunner, cfg, *, record_trajectories: bool = False) -> list:
-    hooks: list[RewardHook] = [
-        RewardHookReachedGoal(runner.sim_cfg.goal_radius),
-        RewardHookEgoAnyCollision(),
-        RewardHookEgoOffroadProxy(float(cfg.benchmark.ego_offroad_threshold)),
+    hooks: list[MetricHook] = [
+        ReachedGoalHook(runner.sim_cfg.goal_radius),
+        EgoAnyCollisionHook(),
+        EgoOffroadProxyHook(float(cfg.benchmark.ego_offroad_threshold)),
         RouteDiagnosticsHook(),
     ]
     if record_trajectories:
-        hooks.append(RewardHookTrajectory())
+        hooks.append(TrajectoryHook())
     return hooks
 
 

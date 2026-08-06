@@ -1,4 +1,4 @@
-"""Four-source ldm_adv scene generation + bad_driver benchmark.
+"""Four-source ldm_adv scene generation + frozen-planner benchmark.
 
 Compares the frozen planner's ego metrics (reached-goal / collision / off-road
 proxy) across four scene sources that share the SAME template scenes (pool
@@ -63,8 +63,8 @@ from critical_scene.metrics_common import (
     write_json,
 )
 from ddpo.conditioning import LDMAdvConditioningPool
-from ddpo.interfaces import GeneratedScenes
-from ddpo.planners import SimulatorConfig
+from sim.scenes import GeneratedScenes
+from sim.runner import SimulatorConfig
 from ddpo.policy_ldm_adv import LDMAdvDDPOPolicy
 from ddpo.reward import PufferSimulator, RewardConfig
 from ddpo.train_loop import _build_gen_invalid
@@ -121,10 +121,10 @@ def build_pool(cfg_root, ldm_cfg, *, split: str, pool_size: int, device: str) ->
         pool_size=pool_size,
         device=device,
         seed=int(cfg.seed),
-        min_ego_drive=float(cfg.get("min_ego_drive", 10.0)),
-        prune_base_to_ego=bool(cfg.get("prune_base_to_ego", False)),
-        insert_adv_as_extra=bool(cfg.get("insert_adv_as_extra", False)),
-        adv_cond_target=cfg.get("adv_cond_target", None),
+        min_ego_drive=float(cfg.min_ego_drive),
+        prune_base_to_ego=bool(cfg.prune_base_to_ego),
+        insert_adv_as_extra=bool(cfg.insert_adv_as_extra),
+        adv_cond_target=cfg.adv_cond_target,
     )
 
 
@@ -136,10 +136,10 @@ def build_policy(cfg_root, ldm_cfg, *, ckpt: str, device: str) -> LDMAdvDDPOPoli
         ldm_ckpt=ckpt,
         ae_ckpt=cfg.ae_ckpt,
         device=device,
-        use_ema_weights=bool(cfg.get("use_ema_weights", True)),
-        sampler=str(cfg.get("sampler", "ddpm")),
-        ddim_steps=cfg.get("ddim_steps", None),
-        ddim_eta=float(cfg.get("ddim_eta", 1.0)),
+        use_ema_weights=bool(cfg.use_ema_weights),
+        sampler=str(cfg.sampler),
+        ddim_steps=cfg.ddim_steps,
+        ddim_eta=float(cfg.ddim_eta),
     )
 
 
@@ -442,13 +442,13 @@ def build_metadata(
         "base_ckpt": str(base_ckpt),
         "ddpo_ckpt": str(ddpo_ckpt),
         "ae_ckpt": str(cfg.ae_ckpt),
-        "sampler": str(cfg.get("sampler", "ddpm")),
-        "use_ema_weights": bool(cfg.get("use_ema_weights", True)),
-        "insert_adv_as_extra": bool(cfg.get("insert_adv_as_extra", False)),
-        "prune_base_to_ego": bool(cfg.get("prune_base_to_ego", False)),
-        "min_ego_drive": float(cfg.get("min_ego_drive", 10.0)),
+        "sampler": str(cfg.sampler),
+        "use_ema_weights": bool(cfg.use_ema_weights),
+        "insert_adv_as_extra": bool(cfg.insert_adv_as_extra),
+        "prune_base_to_ego": bool(cfg.prune_base_to_ego),
+        "min_ego_drive": float(cfg.min_ego_drive),
         "adv_cond_target": OmegaConf.to_container(cfg.adv_cond_target, resolve=True)
-        if cfg.get("adv_cond_target", None) is not None
+        if cfg.adv_cond_target is not None
         else None,
         "planner": OmegaConf.to_container(cfg.planner, resolve=True),
         "git_commit": _git_commit(),

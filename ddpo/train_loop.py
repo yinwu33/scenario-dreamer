@@ -23,10 +23,10 @@ from omegaconf import OmegaConf
 from ddpo.conditioning import LDMAdvConditioningPool
 from ddpo.ddpo_loss import AdaptiveKLController, DDPOConfig, compute_advantages, ddpo_loss
 from ddpo.policy_ldm_adv import LDMAdvDDPOPolicy
-from ddpo.planners import SimulatorConfig
+from sim.runner import SimulatorConfig
 from ddpo.reward import PufferSimulator, RewardConfig
-from ddpo.reward_hooks import GenInvalidCheck
-from ddpo.interfaces import GeneratedScenes
+from sim.hooks import GenInvalidCheck
+from sim.scenes import GeneratedScenes
 from utils.train_helpers import cache_latent_stats, set_latent_stats
 
 
@@ -36,15 +36,8 @@ def _set_dataset_name(cfg_node, dataset_name: str) -> None:
     OmegaConf.set_struct(cfg_node, True)
 
 
-def _cfg_get_renamed(cfg, key: str, legacy_key: str, default):
-    value = cfg.get(key, None)
-    if value is not None:
-        return value
-    return cfg.get(legacy_key, default)
-
-
 def _build_policy_and_pool(cfg_root, cfg, device: str):
-    model_type = cfg.get("model_type", "ldm_adv")
+    model_type = cfg.model_type
     dataset_name = cfg_root.dataset_name.name
 
     if model_type == "ldm_adv":
@@ -59,10 +52,10 @@ def _build_policy_and_pool(cfg_root, cfg, device: str):
             ldm_ckpt=cfg.ldm_adv_ckpt,
             ae_ckpt=cfg.ae_ckpt,
             device=device,
-            use_ema_weights=cfg.get("use_ema_weights", True),
-            sampler=cfg.get("sampler", "ddpm"),
-            ddim_steps=cfg.get("ddim_steps", None),
-            ddim_eta=cfg.get("ddim_eta", 1.0),
+            use_ema_weights=cfg.use_ema_weights,
+            sampler=cfg.sampler,
+            ddim_steps=cfg.ddim_steps,
+            ddim_eta=cfg.ddim_eta,
         )
         pool = LDMAdvConditioningPool(
             ldm_cfg.dataset,
@@ -70,10 +63,10 @@ def _build_policy_and_pool(cfg_root, cfg, device: str):
             pool_size=cfg.pool_size,
             device=device,
             seed=cfg.seed,
-            min_ego_drive=cfg.get("min_ego_drive", 10.0),
-            prune_base_to_ego=cfg.get("prune_base_to_ego", False),
-            insert_adv_as_extra=cfg.get("insert_adv_as_extra", False),
-            adv_cond_target=cfg.get("adv_cond_target", None),
+            min_ego_drive=cfg.min_ego_drive,
+            prune_base_to_ego=cfg.prune_base_to_ego,
+            insert_adv_as_extra=cfg.insert_adv_as_extra,
+            adv_cond_target=cfg.adv_cond_target,
         )
         eval_dataset_cfg = ldm_cfg.dataset
     else:
@@ -83,7 +76,7 @@ def _build_policy_and_pool(cfg_root, cfg, device: str):
 
 
 def _build_gen_invalid(cfg, dataset_cfg):
-    """Assemble the condition-violation check for RewardHookGenAgentInvalid.
+    """Assemble the condition-violation check for GenAgentInvalidHook.
 
     Bucket thresholds are sourced from the (ldm_adv) dataset config so they stay
     the single source of truth shared with the training-time discretization; the
@@ -107,7 +100,7 @@ def _build_gen_invalid(cfg, dataset_cfg):
 
 def _default_run_name(cfg, model_type: str) -> str:
     if model_type == "ldm_adv":
-        if cfg.get("sampler", "ddpm") == "ddim":
+        if cfg.sampler == "ddim":
             return f"ddpo_ldm_adv_ddim{cfg.ddim_steps}_eta{cfg.ddim_eta}"
         return "ddpo_ldm_adv"
     return f"ddpo_{model_type}"
@@ -117,7 +110,7 @@ def _checkpoint_prefix(cfg, model_type: str) -> str:
     # Checkpoint filename tracks the run name (experiment.run_name, surfaced as
     # cfg.wandb.run_name via the group config); fall back to the legacy derived
     # name for configs without an experiment.* block.
-    return cfg.wandb.get("run_name", None) or _default_run_name(cfg, model_type)
+    return cfg.wandb.run_name or _default_run_name(cfg, model_type)
 
 
 def _bf16_autocast(device: str, enabled: bool = True):
@@ -338,7 +331,7 @@ def _visualize_train_group_diversity(
     if group_ids is None:
         return {}
 
-    every = int(cfg.get("train_group_viz_every", 0))
+    every = int(cfg.train_group_viz_every)
     if every <= 0 or (it + 1) % every != 0:
         return {}
 
@@ -352,8 +345,8 @@ def _visualize_train_group_diversity(
     group_rows = []
     group_summaries = []
     selected_lookup: set[int] = set()
-    max_groups = max(int(cfg.get("train_group_viz_num_groups", 2)), 1)
-    extremes = max(int(cfg.get("train_group_viz_extremes", 1)), 1)
+    max_groups = max(int(cfg.train_group_viz_num_groups), 1)
+    extremes = max(int(cfg.train_group_viz_extremes), 1)
 
     for g in uniq.tolist():
         mask = group_ids_cpu == int(g)
@@ -416,7 +409,7 @@ def _visualize_train_group_diversity(
     import matplotlib.pyplot as plt
     from ddpo.viz import CONTROL_COLOR, render_rollout, render_rollout_frames, save_gif
 
-    save_gif_mode = bool(cfg.get("save_gif", False))
+    save_gif_mode = bool(cfg.save_gif)
     media_dir = Path(cfg.output_dir) / "eval_media" / "train_group"
     if save_gif_mode:
         media_dir.mkdir(parents=True, exist_ok=True)
@@ -466,14 +459,14 @@ def _visualize_train_group_diversity(
             frames = render_rollout_frames(
                 viz_metrics["trajectories"][local_s],
                 lanes[lane_scene_idx == local_s],
-                max_frames=int(cfg.get("gif_max_frames", 50)),
+                max_frames=int(cfg.gif_max_frames),
                 **kwargs,
             )
             path = str(
                 media_dir
                 / f"it_{it:05d}_g{group_by_scene[original_s]:03d}_s{original_s:03d}.gif"
             )
-            save_gif(frames, path, fps=int(cfg.get("gif_fps", 10)))
+            save_gif(frames, path, fps=int(cfg.gif_fps))
             media.append(wandb.Video(path, format="gif"))
         else:
             fig = render_rollout(
@@ -515,10 +508,10 @@ def evaluate_and_visualize(
     from ddpo.viz import CONTROL_COLOR, render_rollout, render_rollout_frames, save_gif
 
     n = min(int(cfg.eval_num_scenes), len(eval_pool))
-    media_n = min(n, int(cfg.get("eval_media_scenes", n)))
+    media_n = min(n, int(cfg.eval_media_scenes))
     cond = eval_pool.batch_from_indices(list(range(n)))
 
-    save_gif_mode = bool(cfg.get("save_gif", False))
+    save_gif_mode = bool(cfg.save_gif)
     gif_dir = Path(cfg.output_dir) / "eval_media" / media_tag
     if save_gif_mode:
         gif_dir.mkdir(parents=True, exist_ok=True)
@@ -531,13 +524,13 @@ def evaluate_and_visualize(
     variants["after_rl"] = policy.sample(cond)[0]
     if (
         include_static_baselines
-        and _cfg_get_renamed(cfg, "eval_visualize_before_rl", "eval_visualize_reference", True)
+        and cfg.eval_visualize_before_rl
     ):
         torch.manual_seed(int(cfg.seed))
         variants["before_rl"] = policy.sample(cond, use_reference=True)[0]
     if (
         include_static_baselines
-        and _cfg_get_renamed(cfg, "eval_visualize_no_adv", "eval_visualize_conditioning", True)
+        and cfg.eval_visualize_no_adv
     ):
         variants["no_adv"] = policy.conditioning_scenes(cond)
 
@@ -611,10 +604,10 @@ def evaluate_and_visualize(
             if save_gif_mode:
                 frames = render_rollout_frames(
                     metrics["trajectories"][s], lanes[lane_scene_idx == s],
-                    max_frames=int(cfg.get("gif_max_frames", 50)), **kwargs,
+                    max_frames=int(cfg.gif_max_frames), **kwargs,
                 )
                 path = str(gif_dir / f"{name}_scene_{s}.gif")
-                save_gif(frames, path, fps=int(cfg.get("gif_fps", 10)))
+                save_gif(frames, path, fps=int(cfg.gif_fps))
                 media.append(wandb.Video(path, format="gif"))
             else:
                 fig = render_rollout(metrics["trajectories"][s], lanes[lane_scene_idx == s], **kwargs)
@@ -743,7 +736,7 @@ def run_ddpo(cfg_root):
     start_it = 0
     resume_wandb_id = None
     resume_path = out_dir / "last.ckpt"
-    if cfg.get("resume", True) and resume_path.exists():
+    if cfg.resume and resume_path.exists():
         ckpt = torch.load(resume_path, map_location=device, weights_only=False)
         sd = ckpt["state_dict"]
         net_sd = {k[len("diff_model."):]: v for k, v in sd.items() if k.startswith("diff_model.")}
@@ -763,13 +756,13 @@ def run_ddpo(cfg_root):
 
     wandb = None
     wandb_run_id = None
-    if cfg.get("wandb", {}).get("enabled", False):
+    if cfg.wandb.enabled:
         import wandb as _wandb
 
         init_kwargs = dict(
-            project=cfg.wandb.get("project", "scenario_dreamer_ddpo"),
-            entity=cfg.wandb.get("entity", None),
-            name=cfg.wandb.get("run_name", None) or _default_run_name(cfg, model_type),
+            project=cfg.wandb.project,
+            entity=cfg.wandb.entity,
+            name=cfg.wandb.run_name or _default_run_name(cfg, model_type),
             config=OmegaConf.to_container(cfg, resolve=True),
         )
         # Continue the same wandb run (same id) so the curves don't split.
@@ -786,7 +779,7 @@ def run_ddpo(cfg_root):
         wandb = _wandb
         wandb_run_id = _wandb.run.id
 
-    eval_every = int(cfg.get("eval_every", 0))
+    eval_every = int(cfg.eval_every)
     eval_pool = None
     if eval_every > 0:
         eval_pool = LDMAdvConditioningPool(
@@ -795,13 +788,13 @@ def run_ddpo(cfg_root):
             pool_size=cfg.eval_num_scenes,
             device=device,
             seed=cfg.seed,
-            min_ego_drive=cfg.get("min_ego_drive", 10.0),
-            prune_base_to_ego=cfg.get("prune_base_to_ego", False),
-            insert_adv_as_extra=cfg.get("insert_adv_as_extra", False),
-            adv_cond_target=cfg.get("adv_cond_target", None),
+            min_ego_drive=cfg.min_ego_drive,
+            prune_base_to_ego=cfg.prune_base_to_ego,
+            insert_adv_as_extra=cfg.insert_adv_as_extra,
+            adv_cond_target=cfg.adv_cond_target,
         )
 
-    min_diffusion_t = int(cfg.get("min_diffusion_t", 5))  # TODO: understand the priciple
+    min_diffusion_t = int(cfg.min_diffusion_t)  # TODO: understand the priciple
     if min_diffusion_t < 1 or min_diffusion_t >= policy.net.n_timesteps:
         raise ValueError(
             f"min_diffusion_t must be in [1, {policy.net.n_timesteps - 1}], got {min_diffusion_t}"
@@ -822,7 +815,7 @@ def run_ddpo(cfg_root):
         raise ValueError(
             f"batch_size ({cfg.batch_size}) must be divisible by group_size ({group_size})"
         )
-    static_baselines_once = bool(cfg.get("eval_static_baselines_once", True))
+    static_baselines_once = bool(cfg.eval_static_baselines_once)
     static_baseline_prefixes_logged: set[str] = set()
 
     for it in range(start_it, cfg.num_iterations):
@@ -853,7 +846,7 @@ def run_ddpo(cfg_root):
             # denoiser forward used for sampling. Keep them in fp32 by default:
             # bf16 rounding at low-noise diffusion steps can make the immediate
             # on-policy ratio drift far from 1 even with inner_epochs == 1.
-            with _bf16_autocast(device, enabled=cfg.get("logprob_bf16", False)):
+            with _bf16_autocast(device, enabled=cfg.logprob_bf16):
                 new_lp, kl_term = policy.trajectory_logprob(
                     traj, cond, k_idx,
                     with_kl=kl_ctrl.coef > 0 or ddpo_cfg.kl_target > 0,
@@ -1024,7 +1017,7 @@ def run_ddpo(cfg_root):
             # rising train reward can be inspected visually. Reuses the already
             # loaded training pool's first eval_num_scenes slots (deterministic +
             # cached), logged under train_viz/* alongside the val/* media.
-            if cfg.get("eval_visualize_train", False):
+            if cfg.eval_visualize_train:
                 include_static = (
                     not static_baselines_once
                     or "train_viz" not in static_baseline_prefixes_logged
@@ -1057,7 +1050,7 @@ def run_ddpo(cfg_root):
                     "rng": _rng_snapshot(device),
                     "wandb_id": wandb_run_id,
                     "kl_coef": kl_ctrl.coef,
-                    "base_ckpt": cfg.get("ldm_adv_ckpt"),
+                    "base_ckpt": cfg.ldm_adv_ckpt,
                 },
             }
             tmp_path = out_dir / "last.ckpt.tmp"

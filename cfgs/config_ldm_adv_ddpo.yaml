@@ -33,11 +33,15 @@ defaults:
   - ddpo/algo@ddpo.algo: grpo
   # One planner per role: sut = ego (system under test), env = background
   # traffic, adv = the generated adversary. Each planner yaml also carries its
-  # policy's conditioning obs -- the adv runs the reckless variant
-  # (collision_factor 0) so only the adversary stops yielding.
-  - planner@ddpo.planner.sut: bad_driver
-  - planner@ddpo.planner.env: bad_driver
-  - planner@ddpo.planner.adv: bad_driver
+  # policy's conditioning obs (how defensively that role drives).
+  #
+  # All three roles currently run the SAME ppo config, i.e. the adversary
+  # is as avoidant as everyone else (collision_factor 2.0). To make only the
+  # adversary reckless, override its conditioning rather than adding a planner:
+  #   ddpo.planner.adv.conditioning.collision_factor=0
+  - planner@ddpo.planner.sut: ppo_normal
+  - planner@ddpo.planner.env: ppo_aggressive
+  - planner@ddpo.planner.adv: ppo_aggressive
   # Shared rollout dynamics (dt, goal lifecycle, conditioning ranges) -- a
   # property of the rollout, not of one role's policy.
   - rollout@ddpo.planner.sim: base
