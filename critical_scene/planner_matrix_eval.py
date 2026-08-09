@@ -311,13 +311,19 @@ SUMMARY_COLUMNS = (
 )
 
 
-def cell_label(sut: str, env: str, source: str) -> str:
+def cell_label(sut: str, env: str, adv: str, source: str) -> str:
     """One table row: which planner drove the ego, the traffic, and from where.
 
     ``/`` rather than ``|``: the label is emitted inside a markdown table, where a
     pipe would be read as a column separator and shear the row.
+
+    The adversary suffix is omitted when ``adv == env`` so the common case (no
+    distinct adversary planner) keeps the old, shorter label.
     """
-    return f"{sut}/{env}/{source}"
+    label = f"{sut}/{env}/{source}"
+    if adv != env:
+        label += f"[adv={adv}]"
+    return label
 
 
 def write_per_scene_csv(

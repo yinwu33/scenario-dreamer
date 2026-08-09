@@ -63,6 +63,16 @@ simulator:
 benchmark:
   split: val
   preprocess_dir: ${dataset_root}/advscene_preprocess_waymo
+  # Scene-initialization sources OTHER than the log, keyed by the name
+  # `--source` selects. Each value is a directory of samples cached by
+  # utils.data_helpers.convert_batch_to_scenarios (eval.py with
+  # <model>.eval.cache_samples=True), so adding a checkpoint to the table is one
+  # line here and no code -- see critical_scene/gen_scenes.py for the format and
+  # for what does and does not compare across sources.
+  gen_dirs:
+    # 10k unconditional samples from the ldm_adv base model (init_scene mode:
+    # layout from the prior, every conditioning label at its null token).
+    ldm_adv_base: ${dataset_root}/adv_scene_ldm_adv_base
   batch_size: 32
   # Ego spawn->goal distance (m) above which a scene counts as a "driving ego".
   # A parked ego reaches its goal for free, so the headline rates are also

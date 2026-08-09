@@ -71,6 +71,10 @@ MIN_ROUTE_PROGRESS = 1.0
 # 5 m away is legitimately much longer than 5 m.
 MAX_DETOUR_RATIO = 2.0
 MAX_DETOUR_SLACK = 10.0
+# Arc length (m) over which a route's end direction is measured when no lane
+# tangent is supplied, and against which a supplied one is sanity-checked. Wide
+# enough that the sub-metre goal jog (see Route.end_tangent) cannot dominate it.
+END_TANGENT_WINDOW = 3.0
 
 
 @dataclass
@@ -84,6 +88,10 @@ class Route:
 
     points: np.ndarray  # [P, 2], ordered spawn -> goal, roughly evenly spaced
     source: str         # "graph" (multi-lane path) | "lane" (single lane)
+    # Unit direction the path continues in past ``points[-1]``, normally the goal
+    # lane's own tangent (see ``_resolve_end_tangent`` for why it is not derived
+    # from the final segment). ``None`` falls back to measuring it off the path.
+    end_tangent: np.ndarray | None = None
 
     def __post_init__(self) -> None:
         self.seg_a = self.points[:-1]                          # [S, 2]
@@ -92,6 +100,45 @@ class Route:
         self.cum = np.concatenate([[0.0], np.cumsum(self.seg_len)]).astype(np.float32)
         self.total = float(self.cum[-1])
         self._denom = np.maximum((self.ab * self.ab).sum(-1), 1e-9)
+        self.end_tangent = self._resolve_end_tangent(self.end_tangent)
+
+    def _resolve_end_tangent(self, supplied: np.ndarray | None) -> np.ndarray:
+        """Unit direction to extrapolate along past the end of the route.
+
+        NOT the final segment's direction. ``_trim`` pins the goal as the route's
+        true endpoint, and a goal sits ~0.5 m off the centerline it belongs to
+        (p90 ~1 m), so the last sub-metre of the path is that lateral jog: its
+        direction is up to 60-90 degrees out from the lane on a fifth of all
+        routes. Extrapolating it steers the agent across into the neighbouring
+        lane starting a full ``lookahead`` BEFORE it reaches its goal.
+
+        ``supplied`` (the goal lane's tangent, from ``build_route``) is the right
+        answer. It is sanity-checked against the path's own coarse end direction,
+        measured over ``END_TANGENT_WINDOW`` metres: the jog is a small fraction
+        of that window, so the window is never wrong by more than ~10 degrees --
+        too coarse to extrapolate 12 m with, but plenty to catch a lane tangent
+        that points back down the route.
+        """
+        s_back = max(self.total - END_TANGENT_WINDOW, 0.0)
+        window = self.points[-1] - np.array(
+            [np.interp(s_back, self.cum, self.points[:, 0]),
+             np.interp(s_back, self.cum, self.points[:, 1])]
+        )
+        norm = float(np.linalg.norm(window))
+        window = window / norm if norm > 1e-6 else None
+
+        if supplied is not None:
+            tangent = np.asarray(supplied, dtype=np.float32).reshape(2)
+            norm = float(np.linalg.norm(tangent))
+            if norm > 1e-6:
+                tangent = tangent / norm
+                if window is None or float(tangent @ window) > 0.0:
+                    return tangent.astype(np.float32)
+        if window is not None:
+            return window.astype(np.float32)
+        # Degenerate route (every point coincident). ``_resample`` rejects these,
+        # so this only guards hand-built Routes.
+        return np.array([1.0, 0.0], dtype=np.float32)
 
     def project(self, points: np.ndarray):
         """Frenet ``(s, d)`` of ``points`` [N, 2] against this route."""
@@ -106,16 +153,14 @@ class Route:
     def point_at(self, s: float) -> np.ndarray:
         """The route point at arc length ``s``.
 
-        Past the end the path is EXTRAPOLATED along its final tangent rather than
+        Past the end the path is EXTRAPOLATED along ``end_tangent`` rather than
         clamped to the last point. Clamping makes an agent that has driven past
         its goal steer at a target behind itself, so it loiters in a circle --
         which reads as erratic traffic and causes collisions that have nothing to
         do with the planner being benchmarked.
         """
-        if s > self.total and self.seg_len[-1] > 1e-6:
-            return (self.points[-1] + self.ab[-1] / self.seg_len[-1] * (s - self.total)).astype(
-                np.float32
-            )
+        if s > self.total:
+            return (self.points[-1] + self.end_tangent * (s - self.total)).astype(np.float32)
         return np.array(
             [np.interp(s, self.cum, self.points[:, 0]),
              np.interp(s, self.cum, self.points[:, 1])],
@@ -170,6 +215,18 @@ def _lane_distances(lanes: np.ndarray, pos: np.ndarray):
         return d, np.zeros(len(lanes), dtype=np.int64)
     dist, _ = project_point_to_segments(lanes[:, :-1, :], lanes[:, 1:, :], pos)  # [L, S]
     return dist.min(axis=1), dist.argmin(axis=1)
+
+
+def _lane_tangent_at(lane: np.ndarray, pos: np.ndarray) -> np.ndarray | None:
+    """Unit direction of ``lane`` at the foot of the perpendicular from ``pos``.
+
+    ``None`` when the closest segment is degenerate.
+    """
+    dist, _ = project_point_to_segments(lane[:-1], lane[1:], pos)
+    k = int(dist.argmin())
+    direction = lane[k + 1] - lane[k]
+    norm = float(np.linalg.norm(direction))
+    return (direction / norm).astype(np.float32) if norm > 1e-6 else None
 
 
 def _segment_heading(lane: np.ndarray, seg: int) -> float:
@@ -390,7 +447,7 @@ def build_route(
     max_length = max(MAX_DETOUR_RATIO * straight_dist, straight_dist + MAX_DETOUR_SLACK)
 
     succ = _successors(lane_graph, len(lanes))
-    best: tuple[tuple[float, float], np.ndarray, int] | None = None
+    best: tuple[tuple[float, float], np.ndarray, int, int] | None = None
     for start, start_score in starts:
         for goal_lane, goal_score in goals:
             path = shortest_lane_path(
@@ -409,11 +466,15 @@ def build_route(
             # one.
             score = (start_score + goal_score, length)
             if best is None or score < best[0]:
-                best = (score, trimmed, len(path))
+                best = (score, trimmed, len(path), goal_lane)
     if best is None:
         return None
 
     points = _resample(best[1], spacing)
     if points is None:
         return None
-    return Route(points, "lane" if best[2] == 1 else "graph")
+    # The winning goal lane's tangent, so an agent that drives through its goal
+    # keeps going down the lane instead of along the goal-pinning jog -- see
+    # Route._resolve_end_tangent.
+    return Route(points, "lane" if best[2] == 1 else "graph",
+                 _lane_tangent_at(lanes[best[3]], goal))

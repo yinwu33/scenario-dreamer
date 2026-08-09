@@ -334,6 +334,63 @@ Each cell writes `benchmark/<sut>__<env>__<source>/{per_scene.csv,summary.json}`
 run rebuilds `table.{csv,md}` from every `summary.json` present, so cells accumulate into
 one table across invocations.
 
+## Scene initialization axis (`--source`)
+
+`--source log` reads the preprocessed Waymo pickles. Any other name is a directory of
+samples cached by `utils.data_helpers.convert_batch_to_scenarios` (i.e. `eval.py` with
+`<model>.eval.cache_samples=True`), declared under `benchmark.gen_dirs` in
+`cfgs/config_planner_matrix.yaml` — adding a checkpoint's cache to the table is one yaml
+line and no code. `ldm_adv_base` ships pointing at the 10k unconditional ldm_adv-base
+samples.
+
+```bash
+# same IDM x IDM cell, but on generated scenes
+python scripts/run_planner_matrix.py --sut idm --env idm --source ldm_adv_base \
+    --num-scenes 1000 --batch-size 50 \
+    --out-dir $DATASET_ROOT/critical_scene/planner_matrix_ldm_adv_base_1000
+
+# drive the generated adversary with a distinct planner instead of folding it into traffic
+python scripts/run_planner_matrix.py --sut idm --env ppo_normal --source ldm_adv_base \
+    --adv ppo_aggressive \
+    --num-scenes 1000 --batch-size 50 \
+    --out-dir $DATASET_ROOT/critical_scene/planner_matrix_ldm_adv_base_1000
+```
+
+The cache is already sim-ready: the goal autoencoder decodes goals as part of the agent
+state, so there is no `prepare_scene` step (and no trajectories to run one on). Only the
+lane graph is reconstructed — the cache stores `road_connection_types` for every ordered
+lane pair but not the edge index, which is the dense row-major enumeration
+(`gen_scenes.dense_lane_edge_index`, verified against the `edge_index_lane_to_lane` real
+scenes store next to the same array).
+
+Each scene's LAST agent — where `convert_batch_to_scenarios` appends the generated
+adversary — is always driven by `planner.adv`, which defaults to the same planner as
+`--env` (so the traffic column means the same thing as on the log row) and can be set to
+a distinct planner with `--adv`.
+
+Reading the generated rows against the log row (measured on 400 val scenes vs the 10k
+cache):
+
+* **Not paired.** `init_scene` samples are unconditional (layout from the prior, all
+  conditioning at the null token), so they correspond to no particular log scene. Only
+  distribution-level comparison is meaningful, and `dataset_scene_idx` indexes the cache.
+* **Generated egos have nearer goals** — spawn→goal median 15.3 m vs 29.5 m, driving-ego
+  share 57% vs 66%. Success rates are inflated by the shorter drive, so always read them
+  next to `ego_goal_dist_mean`.
+* **The maps are generated**, so lane connectivity is only approximately consistent with
+  lane geometry: an upstream lane's end sits a median 0.25 m (p90 1.0 m) from its `succ`
+  lane's start, against exactly 0 in the log. The topological route search absorbs this —
+  on 400 generated scenes ego route coverage is 99.6% (log: 97.8%), all-agent 88.5%
+  (91.3%), detour p99 2.09 (1.81). Watch `route_unavailable_rate` per run anyway, since
+  it is the generator's property, not the planner's:
+
+  ```bash
+  python test_scripts/test_routes.py --num-scenes 400 --gen-dir $DATASET_ROOT/adv_scene_ldm_adv_base
+  ```
+* **Agent sets are directly comparable**: 10.0 vs 9.2 agents/scene, 26.9 vs 27.8
+  lanes/scene, and 0.5% vs 0.7% of egos spawning beyond the 2.75 m off-road proxy from
+  every centerline — so `ego_offroad_rate_driving` needs no caveat.
+
 ## Visualization (GIF)
 
 `--gif N` re-rolls N of the evaluated scenes with trajectory recording and writes one

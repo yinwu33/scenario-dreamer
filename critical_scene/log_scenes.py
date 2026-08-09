@@ -43,8 +43,12 @@ def list_scene_files(preprocess_dir: str | Path, split: str) -> list[str]:
     return sorted(glob(str(Path(preprocess_dir) / split / "*.pkl")))
 
 
-def lane_graph_edges(record: dict[str, Any]) -> dict[str, np.ndarray]:
+def lane_graph_edges(edge_index, connection_types) -> dict[str, np.ndarray]:
     """``{"succ": [2, E], "lateral": [2, E]}`` lane connectivity over lane rows.
+
+    Takes the two arrays rather than the record so generated samples -- whose
+    caches store the connection types but not the edge index it is aligned to
+    (see ``critical_scene.gen_scenes``) -- share this decoding.
 
     ``succ`` runs in the driving direction; ``lateral`` pairs left/right
     neighbours (used to widen the route search's candidate lanes, not as
@@ -60,8 +64,13 @@ def lane_graph_edges(record: dict[str, Any]) -> dict[str, np.ndarray]:
     coincides with the start of the downstream one to 0.000 m; without it the gap
     is ~40 m.) Lateral edges are symmetric, so their orientation does not matter.
     """
-    edge_index = np.asarray(record["edge_index_lane_to_lane"], dtype=np.int64)
-    types = np.asarray(record["road_connection_types"]).argmax(axis=-1)
+    edge_index = np.asarray(edge_index, dtype=np.int64)
+    types = np.asarray(connection_types).argmax(axis=-1)
+    if edge_index.shape[1] != types.shape[0]:
+        raise ValueError(
+            "lane_graph_edges: edge index and connection types disagree "
+            f"({edge_index.shape[1]} edges vs {types.shape[0]} types)"
+        )
     succ = edge_index[:, types == LANE_CONNECTION_TYPES_WAYMO["succ"]]
     lateral = edge_index[
         :,
@@ -107,7 +116,11 @@ def load_log_scenes(
         agent_scene.append(np.full(len(agent_states), s, dtype=np.int64))
         lanes.append(road_points)
         lane_scene.append(np.full(len(road_points), s, dtype=np.int64))
-        lane_graph.append(lane_graph_edges(record))
+        lane_graph.append(
+            lane_graph_edges(
+                record["edge_index_lane_to_lane"], record["road_connection_types"]
+            )
+        )
         kept.append(int(idx))
 
     if not kept:
