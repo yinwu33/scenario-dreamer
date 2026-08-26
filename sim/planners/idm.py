@@ -78,6 +78,17 @@ class IDMPlanner(Planner):
     def _routes_for(self, sim: SimScene) -> dict[int, Route | None]:
         routes = getattr(sim, "_idm_routes", None)
         if routes is None:
+            # No lane graph means the route search cannot chain lanes: only an
+            # agent whose spawn and goal sit on the SAME polyline would get a
+            # route, everyone else would coast. That degradation is silent and
+            # is always a scene-source plumbing bug, so refuse to run instead.
+            if sim.lane_graph is None:
+                raise ValueError(
+                    f"planner {self.name!r} needs the lane graph, but this scene "
+                    "source did not provide one: set GeneratedScenes.meta"
+                    "['lane_graph'] (see sim.scenes.lane_graph_edges / "
+                    "batched_lane_graphs)"
+                )
             routes = sim._idm_routes = {}
             # Per-agent provenance of the route ("graph"/"lane"/"straight"/"none"),
             # aggregated after the rollout by the benchmark's diagnostics hook.

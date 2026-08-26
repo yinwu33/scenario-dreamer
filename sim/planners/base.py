@@ -112,6 +112,18 @@ class Planner(ABC):
         """Required setting from this planner's own yaml node."""
         return require(self.cfg, self.name, key)
 
+    # Does ``plan`` fuse every item into ONE cross-scene computation whose result
+    # depends on the batch composition?  A neural planner concatenates all items'
+    # observations into a single GEMM, so the same agent gets bitwise-different
+    # logits depending on which other scenes rode along in the batch (measured on
+    # this checkpoint: max|dlogits| ~1.4e-5 between a 65-row batch and 8-row
+    # shards).  ``sim.parallel`` therefore keeps such a planner's forward CENTRAL,
+    # in the parent process, with the batch assembled in exactly the order the
+    # single-process runner would have used -- that is what makes a sharded
+    # rollout bit-exact.  Pure per-agent planners (idm) are unaffected and run
+    # inside the workers.
+    batched_across_scenes: bool = False
+
     @abstractmethod
     def plan(self, items: Sequence[PlanItem]) -> list:
         """Decide actions for every ``(sim, agent_ids)`` item; return them aligned."""

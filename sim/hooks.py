@@ -24,7 +24,13 @@ from typing import Any
 import numpy as np
 import torch
 
-from .geometry import _corners, _obb_overlap_frac, sat_first_contact_time
+from .geometry import (
+    _corners,
+    _obb_overlap_frac,
+    point_line_offset,
+    sat_first_contact_time,
+    segment_closest_approach,
+)
 from .scenes import GeneratedScenes
 from .world import (
     COLLISION_DIST2_GATE,
@@ -97,7 +103,7 @@ def gen_invalid_gap(
     distance checks (motion / goal_dist / ego_dist); a wrong TYPE is categorical
     -- no metric distance exists -- and yields ``inf`` (full severity). A valid
     adversary returns ``(False, "", 0.0)``. The reward turns the gap into the
-    graded reject penalty (``RewardConfig.invalid_grade_scale``) so GRPO keeps a
+    graded reject penalty (the reward's ``invalid_grade_scale``) so GRPO keeps a
     "how far past the boundary" ordering instead of a flat -1 cliff.
     """
     bad = False
@@ -255,6 +261,144 @@ class InitOverlapHook(MetricHook):
             # gates on the continuous init_overlap_frac, not this boolean).
             if frac > self.invalid_frac:
                 ctx.metrics["init_invalid"][s] = 1.0
+
+
+@dataclass
+class PathConflictCheck:
+    """Config for ``PathConflictHook`` (``simulator.path_conflict`` in yaml).
+
+    ``conflict_dist`` is the admission threshold in metres: the adversary and the
+    ego are treated as being on conflicting paths when their spawn->goal chords
+    pass within this distance. ``skip_rollout`` turns the check into a compute
+    filter -- non-conflicting scenes are marked finished before the first step,
+    so they cost the spawn-time hooks only.
+    """
+
+    conflict_dist: float = 5.0
+    # Speed floor (m/s) for the arrival-time estimate, so a stopped-at-spawn
+    # agent does not read as "arrives at t=inf".
+    speed_floor: float = 1.0
+    skip_rollout: bool = False
+    # Car-following exclusion. The cheapest way to drive the chord clearance to
+    # zero is to put the adversary on the ego's OWN lane going the same way --
+    # collinear chords, clearance 0, and (under mutually avoidant planners)
+    # nothing ever happens. Left in, that geometry farms the conflict tier the
+    # way the approach term farmed the dense reward. A scene counts as
+    # car-following, and is denied the conflict tier, when the chords point the
+    # same way (cos >= follow_cos) AND the adversary is already inside the ego's
+    # corridor at BOTH ends (spawn and goal lateral offsets <= follow_lane_tol).
+    # Both conditions matter: a cut-in also has cos ~ 1 but starts a lane over,
+    # so its spawn offset saves it; a head-on has cos ~ -1 and is never excluded.
+    # follow_cos >= 1 disables the exclusion.
+    follow_cos: float = 0.8
+    follow_lane_tol: float = 2.0
+
+
+class PathConflictHook(MetricHook):
+    """Pre-rollout geometric screen: do the ego and adversary paths conflict?
+
+    Both agents' spawn->goal chords are known before any stepping, so whether
+    they can interact at all is decidable for free -- a rollout of two paths that
+    stay 30 m apart can only ever report "nothing happened". This hook measures
+    that geometry and, with ``skip_rollout``, retires the hopeless scenes before
+    the step loop, which is where a sparse adversarial reward spends most of its
+    compute.
+
+    Why chord DISTANCE and not a crossing test: a strict intersection predicate
+    is blind to the same-lane cases (rear-end, head-on) whose chords are
+    near-collinear and may never formally cross, and it has no gradient -- the
+    tiered reward needs to rank a near-miss geometry above a hopeless one, which
+    a boolean cannot do. Distance is 0 exactly when the chords cross and degrades
+    smoothly through the parallel cases.
+
+    Metrics (all defined without stepping, so they survive a skipped rollout):
+      * ``path_conflict``       -- 1.0 if the chords clear by <= conflict_dist
+        AND the pair is not car-following (see PathConflictCheck)
+      * ``path_conflict_dist``  -- min distance between the two chords (m)
+      * ``path_following``      -- 1.0 if the exclusion fired (same-direction,
+        adversary inside the ego corridor at both ends)
+      * ``path_conflict_cos``   -- cosine between the two chord directions:
+        +1 same direction, 0 transversal, -1 head-on. 0 for a parked adversary
+        (no direction).
+      * ``adv_spawn_offset`` / ``adv_goal_offset`` -- lateral distance (m) from
+        the adversary's spawn / goal to the EGO's chord. Separates a cut-in
+        (starts a lane over: large spawn offset, small goal offset) from
+        car-following (small at both ends) at the same near-1 cosine.
+      * ``path_conflict_pet``   -- |t_ego - t_adv| at the closest-approach points,
+        arrival times estimated from the spawn speeds (s). A crude
+        post-encroachment-time proxy: the planners accelerate and yield, so this
+        is a ranking feature only, never a gate.
+      * ``ego_adv_spawn_dist``  -- ||adv spawn - ego spawn|| (m). Duplicated from
+        EgoAdvMinDistHook's ``ego_adv_init_dist`` on purpose: that one is written
+        during the first step and is therefore missing exactly when the rollout
+        was skipped.
+
+    Scenes with no adversary get dist=inf / conflict=0 and are NOT skipped (they
+    carry no adversarial signal either way, and skipping them would silently
+    change what a non-adversarial scene source measures).
+    """
+
+    def __init__(self, check: PathConflictCheck):
+        self.check = check
+
+    def before_rollout(self, ctx: RolloutContext) -> None:
+        n = ctx.num_scenes
+        conflict = np.zeros(n, dtype=np.float32)
+        following = np.zeros(n, dtype=np.float32)
+        dist = np.full(n, np.inf, dtype=np.float32)
+        pet = np.full(n, np.inf, dtype=np.float32)
+        spawn_dist = np.full(n, np.inf, dtype=np.float32)
+        cosang = np.zeros(n, dtype=np.float32)
+        spawn_off = np.full(n, np.inf, dtype=np.float32)
+        goal_off = np.full(n, np.inf, dtype=np.float32)
+        adv = adv_local_indices(ctx.scenes, n)
+        chk = self.check
+        floor = max(float(chk.speed_floor), 1e-3)
+        for s, sim in enumerate(ctx.sims):
+            a = int(adv[s])
+            if a < 0 or sim.n == 0:
+                continue
+            e0, e1 = sim.spawn[0, :2], sim.goal[0]
+            a0, a1 = sim.spawn[a, :2], sim.goal[a]
+            d, arc_ego, arc_adv = segment_closest_approach(e0, e1, a0, a1)
+            dist[s] = d
+            spawn_dist[s] = float(np.hypot(a0[0] - e0[0], a0[1] - e0[1]))
+            v_ego = max(float(np.hypot(sim.vx[0], sim.vy[0])), floor)
+            v_adv = max(float(np.hypot(sim.vx[a], sim.vy[a])), floor)
+            pet[s] = abs(arc_ego / v_ego - arc_adv / v_adv)
+
+            # Chord directions; a parked agent (spawn == goal) has none.
+            u, v = np.asarray(e1) - np.asarray(e0), np.asarray(a1) - np.asarray(a0)
+            nu, nv = float(np.hypot(*u)), float(np.hypot(*v))
+            cosang[s] = float(u @ v / (nu * nv)) if nu > 1e-6 and nv > 1e-6 else 0.0
+            # LATERAL offsets of the adversary's two endpoints from the ego's
+            # path -- perpendicular to the infinite line, not distance to the
+            # segment: a car following 15 m behind the ego is 15 m from the
+            # segment but ~0 m from the line, and "same lane" is the line test.
+            spawn_off[s] = point_line_offset(a0, e0, e1)
+            goal_off[s] = point_line_offset(a1, e0, e1)
+
+            is_following = (
+                cosang[s] >= chk.follow_cos
+                and max(spawn_off[s], goal_off[s]) <= chk.follow_lane_tol
+            )
+            following[s] = 1.0 if is_following else 0.0
+            if d <= chk.conflict_dist and not is_following:
+                conflict[s] = 1.0
+            elif chk.skip_rollout:
+                # Nothing this rollout could measure is reachable: retire it
+                # before the first step. Every metric another hook writes stays
+                # at its no-event default (collision 0, TTC inf, ...), which is
+                # what the rollout would have reported anyway.
+                ctx.finished[s] = True
+        ctx.metrics["path_conflict"] = conflict
+        ctx.metrics["path_following"] = following
+        ctx.metrics["path_conflict_dist"] = dist
+        ctx.metrics["path_conflict_cos"] = cosang
+        ctx.metrics["adv_spawn_offset"] = spawn_off
+        ctx.metrics["adv_goal_offset"] = goal_off
+        ctx.metrics["path_conflict_pet"] = pet
+        ctx.metrics["ego_adv_spawn_dist"] = spawn_dist
 
 
 class EgoCollisionHook(MetricHook):

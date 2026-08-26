@@ -28,7 +28,12 @@ from typing import Any
 import numpy as np
 import torch
 
-from .hooks import GenInvalidCheck, RolloutContext, adv_local_indices
+from .hooks import (
+    GenInvalidCheck,
+    PathConflictCheck,
+    RolloutContext,
+    adv_local_indices,
+)
 from .planners import PlanItem, Planner, build_planner, parse_conditioning
 from .scenes import GeneratedScenes
 from .world import SimScene, load_sim_config, to_puffer_agent_types
@@ -70,6 +75,17 @@ class SimulatorConfig:
     # caller (thresholds come from the dataset config), never from yaml, so it is
     # spelled out at every call site rather than defaulted here.
     gen_invalid: GenInvalidCheck | None
+    # Pre-rollout ego/adversary path-conflict screen (PathConflictHook). Unlike
+    # gen_invalid this one IS spelled in yaml (``simulator.path_conflict``): it
+    # has no dataset-derived thresholds, and with ``skip_rollout`` it changes how
+    # much of the batch is stepped, which belongs next to sim_steps. ``None``
+    # skips the check entirely -- the tiered reward requires it and will fail
+    # loudly on the missing metric.
+    path_conflict: PathConflictCheck | dict | None = None
+
+    def __post_init__(self):
+        if isinstance(self.path_conflict, dict):
+            self.path_conflict = PathConflictCheck(**self.path_conflict)
 
 
 @dataclass
@@ -198,6 +214,48 @@ class RolloutRunner:
             out.append({"sut": sut, "env": env, "adv": adv_ids})
         return out
 
+    # ------------------------------------------------- parallel hook points
+    # The step loop below is shared verbatim with ``sim.parallel``, whose worker
+    # subclass owns only a SHARD of the batch. Two decisions differ there and
+    # nowhere else, so they are the only two things it overrides:
+    #
+    #   _should_stop  -- a shard running dry does not end the rollout; the
+    #                    workers stop together when EVERY shard is dry.
+    #   _stage_plans  -- a worker settles every centrally batched role in ONE
+    #                    barrier round, and must join that round even when its
+    #                    own shard contributes zero agents to a role.
+    #
+    # Keeping them as overrides (rather than forking the loop) is what makes the
+    # parallel rollout bit-exact by construction: every other line of stepping,
+    # planning and hook firing is the SAME code object in both paths.
+
+    def _should_stop(self, active: list[int]) -> bool:
+        """Single process: the rollout ends when no scene is still running."""
+        return not active
+
+    def _role_items(self, role, active, sims, role_ids) -> list[PlanItem]:
+        """The (scene, agent ids) work units this role drives right now."""
+        items: list[PlanItem] = []
+        for s in active:
+            ids = np.intersect1d(role_ids[s][role], sims[s].controlled)
+            if len(ids):
+                items.append((sims[s], ids))
+        return items
+
+    def _stage_plans(self, active, sims, role_ids) -> list:
+        """Plan EVERY role from the same pre-step state; the caller applies after.
+
+        Staged as one list so ``sim.parallel`` can settle all of its centrally
+        batched roles in a single barrier round instead of one round per role --
+        each round costs a full rendezvous plus the slowest shard's tail.
+        """
+        staged = []
+        for role, planner in self.planners.items():
+            items = self._role_items(role, active, sims, role_ids)
+            if items:
+                staged.append((planner, items, planner.plan(items)))
+        return staged
+
     # --------------------------------------------------------------- rollout
     @torch.no_grad()
     def rollout(
@@ -240,21 +298,13 @@ class RolloutRunner:
                     hook.before_step_scene(ctx, s, sim)
 
             active = [s for s in range(m) if not ctx.finished[s]]
-            if not active:
+            if self._should_stop(active):
                 break
 
             # Two-phase advance: every role plans from the same pre-step state,
             # then all actions are applied (no role sees another role's
             # same-step movement).
-            staged = []
-            for role, planner in self.planners.items():
-                items: list[PlanItem] = []
-                for s in active:
-                    ids = np.intersect1d(role_ids[s][role], sims[s].controlled)
-                    if len(ids):
-                        items.append((sims[s], ids))
-                if items:
-                    staged.append((planner, items, planner.plan(items)))
+            staged = self._stage_plans(active, sims, role_ids)
             for planner, items, plans in staged:
                 planner.apply(items, plans)
 
@@ -265,8 +315,9 @@ class RolloutRunner:
                 # re-emerge in front" TTC exploit at its source).
                 sims[s].latch_ego_crash()
                 ego_reached, _ = sims[s].goal_step()
-                # goal_behavior='continue' lets non-ego agents drive past their
-                # goal; retire them once their centre leaves the map square.
+                # Retire non-ego agents once their centre leaves the map square.
+                # A no-op under goal_behavior='continue', which retires nobody;
+                # the method owns that gate so every caller agrees.
                 sims[s].remove_out_of_bounds()
                 for hook in hooks:
                     hook.after_step_scene(ctx, s, sims[s], ego_reached=ego_reached)

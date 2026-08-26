@@ -86,6 +86,24 @@ def to_puffer_agent_types(agent_types) -> np.ndarray:
     ).clip(TYPE_VEHICLE, TYPE_CYCLIST)
 
 
+# Agent retirement lifecycles, on two independent axes: what happens when a
+# non-ego agent reaches its goal, and whether it is retired when it drives off
+# the map square. Every mode retires off-map agents except 'continue', which is
+# the literal "never retire anyone" mode.
+#
+#   mode             at its goal                       off the map
+#   ---------------- -------------------------------- -----------
+#   stop             freeze as a static obstacle       removed
+#   remove           removed                           removed
+#   remove_off_map   keeps driving                     removed
+#   continue         keeps driving                     kept
+#
+# 'remove_off_map' and 'continue' differ only off-map; they are the same at the
+# goal. See goal_step / remove_out_of_bounds, and cfgs/rollout/base.yaml for
+# which one the shared rollout uses and why.
+GOAL_BEHAVIORS = ("stop", "remove", "remove_off_map", "continue")
+
+
 @dataclass(frozen=True)
 class SimConfig:
     dt: float
@@ -100,7 +118,7 @@ def load_sim_config(cfg) -> SimConfig:
     """Build the strict SimConfig from the composed ``cfgs/rollout`` group node.
 
     The yaml must be COMPLETE: a missing or unknown key raises (same contract
-    as SimulatorConfig / RewardConfig). The per-agent conditioning obs
+    as SimulatorConfig / the reward config). The per-agent conditioning obs
     (collision_factor / offroad_factor / lane_width) are NOT here: they are
     policy inputs owned by each role's planner config (``conditioning:`` in
     ``cfgs/planner/<name>.yaml``, applied by ``RolloutRunner``).
@@ -276,14 +294,15 @@ class SimScene:
         self.dt = cfg.dt
         self.goal_radius = cfg.goal_radius
         self.goal_speed = cfg.goal_speed
-        if cfg.goal_behavior not in ("stop", "continue", "remove"):
+        if cfg.goal_behavior not in GOAL_BEHAVIORS:
             raise ValueError(
-                "goal_behavior must be one of 'stop', 'continue', or 'remove', "
+                f"goal_behavior must be one of {GOAL_BEHAVIORS}, "
                 f"got {cfg.goal_behavior!r}"
             )
         self.goal_behavior = cfg.goal_behavior
         # Half-extent of the square map. Non-ego agents whose centre leaves
-        # [-map_half, map_half] in x or y are removed (remove_out_of_bounds).
+        # [-map_half, map_half] in x or y are removed (remove_out_of_bounds),
+        # under every lifecycle except 'continue'.
         self.map_half = float(cfg.map_extent) / 2.0
 
         self.x = s[:, 0].copy()
@@ -316,7 +335,7 @@ class SimScene:
         # longer used for a respawn teleport, which has been removed).
         self.spawn = np.stack([self.x, self.y, self.heading, self.vx, self.vy], axis=1)
         # Inactive mask: an agent retired by ``_remove_agent`` (goal_behavior
-        # 'remove' or leaving the map) is dropped from controlled/static/slot_order
+        # 'remove', or leaving the map) is dropped from controlled/static/slot_order
         # and flagged here so the trajectory/viz layer hides it from that step on.
         self.removed = np.zeros(n, dtype=bool)
         self.stopped = np.zeros(n, dtype=bool)   # latched by GOAL_STOP; frozen in place
@@ -615,8 +634,9 @@ class SimScene:
         self.vy[crashed_now] = 0.0
 
     def _remove_agent(self, i: int) -> None:
-        """Retire an agent (goal_behavior='remove' or out-of-bounds): drop it from
-        control / collision / observation and flag it so the viz hides it."""
+        """Retire an agent (goal_behavior='remove', or out-of-bounds under any
+        mode but 'continue'): drop it from control / collision / observation and
+        flag it so the viz hides it."""
         self.removed[i] = True
         self.stopped[i] = False
         self.vx[i], self.vy[i] = 0.0, 0.0
@@ -632,13 +652,15 @@ class SimScene:
         reported - the caller finishes the scene. Non-ego agents that reach
         their goal (dist < goal_radius, speed <= goal_speed):
 
-          * ``goal_behavior="stop"`` (default, drive.h GOAL_STOP): freeze in
-            place with zero velocity; they stay in the world as parked
-            obstacles (collisions + partner observations still see them);
-          * ``goal_behavior="continue"``: leave the agent active and controlled;
-            no state is changed when it enters the goal radius;
+          * ``goal_behavior="stop"`` (drive.h GOAL_STOP): freeze in place with
+            zero velocity; they stay in the world as parked obstacles
+            (collisions + partner observations still see them);
           * ``goal_behavior="remove"``: delete the agent from subsequent control,
-            collision checks, and partner observations.
+            collision checks, and partner observations;
+          * ``goal_behavior="continue"`` / ``"remove_off_map"``: leave the agent
+            active and controlled; no state is changed when it enters the goal
+            radius. The two differ only in whether ``remove_out_of_bounds``
+            later retires it for leaving the map.
         """
         idx = self.controlled
         if len(idx) == 0:
@@ -654,21 +676,31 @@ class SimScene:
             if self.goal_behavior == "stop":
                 self.stopped[i] = True
                 self.vx[i], self.vy[i] = 0.0, 0.0
-            elif self.goal_behavior == "continue":
-                continue
-            else:  # remove
+            elif self.goal_behavior == "remove":
                 self._remove_agent(int(i))
+            else:  # 'continue' / 'remove_off_map': keep driving past the goal
+                continue
         return ego_reached, reached
 
     def remove_out_of_bounds(self) -> np.ndarray:
         """Remove non-ego controlled agents whose centre left the map square.
 
-        Called once per step after ``goal_step``. With ``goal_behavior='continue'``
-        agents keep driving past their goal, so the map boundary
-        (``|x| > map_half`` or ``|y| > map_half``) is what retires them. The ego
-        (agent 0) is exempt - its scene is finished by ``ReachedGoalHook`` when it
-        reaches its goal, never by leaving the map. Returns the removed indices.
+        Called once per step after ``goal_step``. Under ``goal_behavior=
+        'remove_off_map'`` agents keep driving past their goal, so the map
+        boundary (``|x| > map_half`` or ``|y| > map_half``) is the ONLY thing
+        that retires them; under 'stop' / 'remove' it additionally catches
+        agents that drive off the map without ever reaching their goal.
+
+        ``goal_behavior='continue'`` opts out entirely: it is the "nothing is
+        ever retired" lifecycle, so an agent that leaves the map keeps being
+        simulated out there. Every other mode retires it.
+
+        The ego (agent 0) is exempt under every mode - its scene is finished by
+        ``ReachedGoalHook`` when it reaches its goal, never by leaving the map.
+        Returns the removed indices.
         """
+        if self.goal_behavior == "continue":
+            return np.zeros(0, np.int64)
         idx = self.controlled
         if len(idx) == 0:
             return np.zeros(0, np.int64)

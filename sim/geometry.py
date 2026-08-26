@@ -261,6 +261,68 @@ def ego_offroad(ego, road_edges, dist_threshold: float = 0.0) -> bool:
     return False
 
 
+def point_line_offset(pt, a, b) -> float:
+    """Perpendicular distance from ``pt`` to the INFINITE line through a -> b.
+
+    The lateral half of a lane-corridor test: a car following 15 m behind the
+    ego is 15 m from the ego's spawn->goal *segment* but ~0 m from its line, and
+    it is the latter that says "same lane". Falls back to the point distance
+    when the line is degenerate (a == b).
+    """
+    pt, a, b = (np.asarray(v, dtype=np.float64) for v in (pt, a, b))
+    ab = b - a
+    n = float(np.hypot(*ab))
+    if n < 1e-6:
+        return float(np.hypot(*(pt - a)))
+    return float(abs(ab[0] * (pt[1] - a[1]) - ab[1] * (pt[0] - a[0])) / n)
+
+
+def segment_closest_approach(p0, p1, q0, q1):
+    """Closest approach of two 2D segments [p0,p1] and [q0,q1].
+
+    Returns ``(dist, s_p, s_q)``: the minimum distance between the segments and
+    the arc length travelled along each one to reach its closest point. Distance
+    0 means the segments intersect, so this is a graded generalisation of
+    ``_segments_cross`` -- which is what the path-conflict screen needs: a strict
+    crossing test answers "do these chords intersect" and misses the geometry a
+    rear-end or a same-lane head-on produces (near-collinear chords that never
+    formally cross), while the distance degrades smoothly through those cases.
+
+    Standard clamped segment-segment solve (Ericson, Real-Time Collision
+    Detection 5.1.9): solve the unconstrained quadratic, clamp each parameter to
+    its segment, and re-solve the other against the clamp.
+    """
+    p0, p1, q0, q1 = (np.asarray(v, dtype=np.float64) for v in (p0, p1, q0, q1))
+    u, v, w = p1 - p0, q1 - q0, p0 - q0
+    a = float(u @ u)          # |u|^2
+    c = float(v @ v)          # |v|^2
+    b = float(u @ v)
+    d = float(u @ w)
+    e = float(v @ w)
+    den = a * c - b * b
+    # Degenerate segments (a parked agent's spawn == goal) collapse to a point.
+    if a <= 1e-12 and c <= 1e-12:
+        return float(np.hypot(*w)), 0.0, 0.0
+    if a <= 1e-12:
+        t = min(max(e / c, 0.0), 1.0)
+        s = 0.0
+    elif c <= 1e-12:
+        s = min(max(-d / a, 0.0), 1.0)
+        t = 0.0
+    elif den <= 1e-12:                      # parallel: pin s, solve t
+        s = 0.0
+        t = min(max(e / c, 0.0), 1.0)
+    else:
+        s = min(max((b * e - c * d) / den, 0.0), 1.0)
+        t = (b * s + e) / c
+        if t < 0.0:
+            t, s = 0.0, min(max(-d / a, 0.0), 1.0)
+        elif t > 1.0:
+            t, s = 1.0, min(max((b - d) / a, 0.0), 1.0)
+    diff = w + s * u - t * v
+    return float(np.hypot(*diff)), float(s * np.sqrt(a)), float(t * np.sqrt(c))
+
+
 def _segments_cross(p1, p2, q1, q2) -> bool:
     d1 = p2 - p1
     d2 = q2 - q1

@@ -47,8 +47,7 @@ from typing import Any, Sequence
 import numpy as np
 import torch
 
-from critical_scene.log_scenes import lane_graph_edges
-from sim.scenes import GeneratedScenes
+from sim.scenes import GeneratedScenes, lane_graph_edges
 
 # ``GeneratedScenes.agent_states`` width. A cache written by a model without the
 # goal decoder (the baseline LDM) stores 7 columns and is rejected on sight.

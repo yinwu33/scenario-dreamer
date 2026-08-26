@@ -15,8 +15,9 @@ Two things the DDPO path does not carry are added:
     point, and the same call applies the off-road / valid-goal / max-agent
     filters the training datasets use, so this row sees the same agent set;
   * the lane GRAPH (``meta['lane_graph']``), which rule-based planners need to
-    route from spawn to goal. The DDPO conditioning path deliberately drops it
-    (``ddpo/conditioning.py``), keeping geometry only.
+    route from spawn to goal. Here it is decoded from the stored ground-truth
+    connectivity; the DDPO path builds the same structure from the
+    autoencoder's predicted connection types (``sim.scenes.batched_lane_graphs``).
 """
 
 from __future__ import annotations
@@ -29,8 +30,7 @@ from typing import Any, Sequence
 import numpy as np
 import torch
 
-from cfgs.config import LANE_CONNECTION_TYPES_WAYMO
-from sim.scenes import GeneratedScenes
+from sim.scenes import GeneratedScenes, lane_graph_edges
 from utils.goal_runtime import prepare_scene
 
 
@@ -41,43 +41,6 @@ def list_scene_files(preprocess_dir: str | Path, split: str) -> list[str]:
     an index here means the same scene it means there.
     """
     return sorted(glob(str(Path(preprocess_dir) / split / "*.pkl")))
-
-
-def lane_graph_edges(edge_index, connection_types) -> dict[str, np.ndarray]:
-    """``{"succ": [2, E], "lateral": [2, E]}`` lane connectivity over lane rows.
-
-    Takes the two arrays rather than the record so generated samples -- whose
-    caches store the connection types but not the edge index it is aligned to
-    (see ``critical_scene.gen_scenes``) -- share this decoding.
-
-    ``succ`` runs in the driving direction; ``lateral`` pairs left/right
-    neighbours (used to widen the route search's candidate lanes, not as
-    traversable edges -- see ``sim.routes``).
-
-    Edge-direction note, verified against the geometry on 60 val scenes: the
-    stored graph is in PyG message-passing form, where the type labels the SOURCE
-    node's relation to the destination. ``build_road_connection_types``
-    (``utils/goal_preprocess.py:189``) tags edge ``(src, dst)`` as ``succ`` when
-    ``suc_adj[dst, src]`` -- i.e. when *src is the successor of dst*. So the
-    driving direction of a ``succ`` edge is ``dst -> src`` and the column order
-    must be flipped here. (Checked: with the flip, the end of the upstream lane
-    coincides with the start of the downstream one to 0.000 m; without it the gap
-    is ~40 m.) Lateral edges are symmetric, so their orientation does not matter.
-    """
-    edge_index = np.asarray(edge_index, dtype=np.int64)
-    types = np.asarray(connection_types).argmax(axis=-1)
-    if edge_index.shape[1] != types.shape[0]:
-        raise ValueError(
-            "lane_graph_edges: edge index and connection types disagree "
-            f"({edge_index.shape[1]} edges vs {types.shape[0]} types)"
-        )
-    succ = edge_index[:, types == LANE_CONNECTION_TYPES_WAYMO["succ"]]
-    lateral = edge_index[
-        :,
-        (types == LANE_CONNECTION_TYPES_WAYMO["left"])
-        | (types == LANE_CONNECTION_TYPES_WAYMO["right"]),
-    ]
-    return {"succ": succ[::-1].copy(), "lateral": lateral.copy()}
 
 
 def load_log_scenes(
