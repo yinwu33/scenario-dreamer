@@ -102,24 +102,63 @@ scenario-dreamer 内置，单 venv，无需 dump / .bin。
 source scripts/define_env_variables.sh
 
 # 训练（统一走 train.py；只微调 adversary 分支，基座场景冻结）
-python train.py --config-name config_ldm_adv_ddpo                    # DDPM 采样
-python train.py --config-name config_ldm_adv_ddpo ddpo.sampler=ddim  # 随机 DDIM 子采样
+# 二元名称 = SUT/ego planner - (background + generated adversary) planner；
+# 这里的 PPO 固定为 ppo_normal。四个入口只声明「哪个 planner 驱动哪个角色」和
+# 「从哪些 context 采样」，其余（reward=hierarchical_v2、DDIM-30、lr、k_steps、
+# 有效性门控）全部继承自 cfgs/config_ldm_adv_ddpo.yaml。
+python train.py --config-name config_ldm_adv_ddpo_idm_idm
+python train.py --config-name config_ldm_adv_ddpo_idm_ppo
+python train.py --config-name config_ldm_adv_ddpo_ppo_idm
+python train.py --config-name config_ldm_adv_ddpo_ppo_ppo
+
+# rollout 并行：把 rollout 分片到 N 个 worker 进程（sim/parallel.py）。rollout 占
+# 一个 iteration 的 ~66%，且几乎全是 sim/world.py 里的纯 numpy 逐场景计算。
+# 结果与单进程 BIT-EXACT（44 个指标 max|delta|=0，四种组合 × 4/8/16 workers 全部
+# 验证过，见 scripts/rollout_fingerprint.py）。
+# 约束：ceil(batch_size / 8) >= rollout_workers，保证每个 worker 拿到完整的 GRPO
+# context group（batch 128 -> 最多 16）。
+#
+# 实测 rollout 阶段（H100 + 96 核，batch 128）：
+#   idm-idm  11.6s -> 5.0s (8w, 2.3x) -> 3.1s (16w, 3.8x)   # 无中心前向，零同步
+#   ppo-ppo  10.6s -> 5.8s (8w, 1.8x) -> 4.8s (16w, 2.2x)   # 三个角色的前向留在父进程
+# 含 PPO 的组合上限更低：为了逐位一致，PPO 的批量前向必须留在父进程，workers 每步
+# 要在 barrier 上会合（重batch 会让 logits 漂移 ~1e-5，足以在近似平局处翻转 argmax）。
+python train.py --config-name config_ldm_adv_ddpo_ppo_ppo ddpo.rollout_workers=16
+
+# 验证任何 rollout 改动仍然逐位一致：
+python scripts/rollout_fingerprint.py --config-name config_ldm_adv_ddpo_idm_ppo --batch-size 128 \
+    --workers 16 --selfcheck 4      # 同进程内单进程 vs 分片，连续多个 batch
+
+# reward 是命令行上的一个轴，没有 per-reward 的入口文件；每个变体自带
+# reward_run_tag，落在各自的 output_dir，resume 不会串。
+python train.py --config-name config_ldm_adv_ddpo_idm_idm ddpo/reward=full
+
+# 通用入口仍可用于临时组合/覆盖（默认是 legacy 的全 PPO 三角色）
+python train.py --config-name config_ldm_adv_ddpo ddpo.sampler=ddpm  # 退回 DDPM 采样
 ```
 
 入口配置 `cfgs/config_ldm_adv_ddpo.yaml`（`experiment.*` 派生 run_name / output_dir /
-wandb）。四个正交的配置组由入口 defaults 组装：
+wandb）。五个正交的配置组由入口 defaults 组装：
 
-* **flow**：`cfgs/ddpo/ldm_adv.yaml`（conditioning / ckpt / pool + simulator / reward +
+* **flow**：`cfgs/ddpo/ldm_adv.yaml`（conditioning / ckpt / pool + simulator +
   优化与采样）
 * **算法**：`cfgs/ddpo/algo/grpo.yaml`（group_size / 白化 / clip / KL 信任域；换 PPO 时
   加一个 sibling yaml，`ddpo/algo@ddpo.algo=ppo` 一键切换，代码读 `cfg.algo` 不变）
+* **reward**：`cfgs/ddpo/reward/*.yaml`（标量奖励由哪些项、以什么权重组装。yaml 里的
+  `name:` 选中变体，其余 key 1:1 映射该变体的 config，见 `ddpo/reward/<name>.py`）。
+  `full` = 一直在用的那套（TTC + approach + lane/overlap
+  约束 + collision bonus）；`ttc_only` = 只保留 min-TTC 的消融基线。切换：
+  `ddpo/reward=ttc_only`。每个变体自带 `ddpo.reward_run_tag` 后缀（`full` 为空串，其余
+  为 `_<变体名>`），所以消融跑进自己的 output_dir，不会被 `resume=true` 接到默认那次
+  run 的 checkpoint 上。做“逐项加回来”的实验时，复制一份 yaml、只打开一个权重、改一
+  下 `reward_run_tag` 即可
 * **planner**：`cfgs/planner/ppo_*.yaml`（checkpoint / 网络结构 + 该策略的
   conditioning obs：collision/offroad factor、lane_width，标量或 `[lo,hi]` 采样），
-  按角色组装 `planner@ddpo.planner.{sut,env,adv}`。当前组装：
-  sut = `ppo_normal`，env / adv = `ppo_aggressive`。
-  ⚠️ 三个 ppo 变体现在的 conditioning **数值还完全一样**（`collision_factor` 都是
-  2.0，yaml 里留着 TODO），所以此刻它们的行为并无区别。填好 factor 之前，也可以直接
-  覆盖：`ddpo.planner.adv.conditioning.collision_factor=0`
+  按角色组装 `planner@ddpo.planner.{sut,env,adv}`。通用入口当前组装：
+  sut = `ppo_normal`，env / adv = `ppo_aggressive`；上面的四个 planner-pair 入口则把
+  名称中的 `ppo` 固定为 `ppo_normal`。三个 PPO 变体的 `collision_factor` 分别为
+  aggressive=0.5、normal=1.0、caution=2.0；也可按角色覆盖，例如：
+  `ddpo.planner.adv.conditioning.collision_factor=0`。
 * **rollout 动力学**：`cfgs/rollout/base.yaml`（dt / goal 行为 / map_extent；组装到
   `ddpo.planner.sim`，完整显式、无隐藏默认）
 
