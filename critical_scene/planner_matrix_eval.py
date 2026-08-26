@@ -7,7 +7,7 @@ rollout's own role axes -- ``planner.sut`` is the row, ``planner.env`` the colum
 -- so selecting a cell is pure config composition; nothing here special-cases a
 particular planner.
 
-Deliberately does NOT go through ``ddpo.reward.PufferSimulator``. That class is
+Deliberately does NOT go through ``ddpo.reward.RewardModel``. That class is
 the consumer of the *adversarial* reward: it scores collisions as a positive
 (``collision_bonus``) because DDPO is trying to manufacture critical scenes, and
 it restricts collisions and TTC to the generated adversary, which log scenes do

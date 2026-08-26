@@ -1,0 +1,121 @@
+# @package _global_
+#
+# Six-level GRPO fallback reward.  Same skeleton as `hierarchical`, with the
+# three defects the offline redesign found in it repaired:
+#
+#   invalid < fallback < parked-close < closing-close < TTC < collision
+#
+# The 14 m chord predicate is still only a compute gate -- passing it earns no
+# reward.  Evidence below is from re-scoring the frozen-base dump
+# data/reward_screen/idm-idm-idm_512x32.npz (512 contexts x 32 samples), with
+# the prefilter's skip semantics applied (the rollout metrics are masked back to
+# their hook defaults wherever the predicate would have skipped the scene, so a
+# dmin-graded design is not credited with a measurement it never had).
+#
+#   metric (groups of 8)              hierarchical   this
+#   winner=collision | available            99.5%   99.5%
+#   winner=TTC       | available            95.2%   95.2%
+#   winner=close     | available            99.9%   99.9%
+#   winner won by PARKING next to ego       11.6%    7.6%   <- 18.1% vs 10.0%
+#                                                              under a drift
+#                                                              toward parking
+#   Spearman(fallback grade, event)        -0.068  +0.250   <- sign flip
+#   fallback samples tied on the floor       8.7%    0.4%
+#   collisions ranked below a quiet sample   3.8%    0.35%
+#   samples pinned at their band ceiling    10.5%    3.0%
+#   degenerate groups                       0.20%   0.44%   <- the one regression
+#
+# This is the DEFAULT reward, composed by cfgs/config_ldm_adv_ddpo.yaml, so
+# every pair entrypoint gets it with no override:
+#   python train.py --config-name config_ldm_adv_ddpo_idm_idm
+
+ddpo:
+  reward_run_tag: "_hier_v2"
+
+  # Unchanged from `hierarchical`: admission is a pure compute gate, 14 m keeps
+  # 99.5% of valid non-trivial collisions and 98.1% of TTC<1.5 s events while
+  # skipping 17.3% of rollouts, and the car-following exclusion stays off
+  # because the dump shows it removes real events.
+  simulator:
+    path_conflict:
+      conflict_dist: 14.0
+      speed_floor: 1.0
+      follow_cos: 1.1
+      follow_lane_tol: 2.0
+      skip_rollout: true
+
+  reward:
+    name: hierarchical
+
+    ttc_tau: 3.0
+
+    lane_soft: 1.75
+    lane_hard: 2.75
+    lane_penalty: 0.10
+
+    invalid_grade_scale: 10.0
+    collision_warmup: 0.75
+    collision_window: 0.5
+    trivial_collision_t: 0.75
+
+    # --- fix 1: the fallback band was graded by the wrong quantity -----------
+    # `hierarchical` ranked it by ego_adv_spawn_dist. On this dump the event
+    # rate is flat in spawn distance (2.95% collisions <8 m, 1.26% at 12-16 m,
+    # 2.36% at 22-30 m) and the near-miss rate RISES with it (1.5% -> 5.2%), so
+    # that grade scored -0.068 against the objective and -0.254 once the policy
+    # drifts toward parking -- 64% of samples and 27% of group winners pushed
+    # the wrong way. Ranking a rolled-out sample by its measured dmin instead
+    # scores +0.250 (chord clearance, the pre-rollout runner-up, scores +0.178
+    # but pins 38% of the band on one value).
+    h_fallback_mode: measured
+    # Both ramps start at 0 and end past the data (clearance is capped at 40 m,
+    # dmin tops out at 45.8), so no sample saturates at either end of the band:
+    # ceiling-pinned samples fall 10.5% -> 3.0%.
+    h_fb_dmin_near: 0.0
+    h_fb_dmin_far: 45.0
+    h_fb_clr_near: 0.0
+    h_fb_clr_far: 40.0
+    # Unused with h_fallback_mode=measured; kept so the legacy grade stays
+    # reproducible by flipping the mode back.
+    h_init_near: 8.0
+    h_init_far: 30.0
+
+    # --- fix 2: the close band was farmable by standing still ---------------
+    # It was graded on dmin alone, with no closing requirement -- 29.7% of the
+    # band never closed in by more than 1 m and 37.8% was already inside 8 m at
+    # spawn, i.e. exactly the "spawn the adversary on top of the ego" hack the
+    # EgoAdvMinDistHook docstring warns about (the 0.5 s warmup barely dents
+    # it). The band now splits: closed in <= h_close_delta is parked, and lands
+    # in a strictly lower band than a sample that actually drove at the ego.
+    h_split_close: true
+    h_close_delta: 1.0
+    # ...and the grade inside both halves is scaled by how much it closed in,
+    # so proximity alone cannot top the band either.
+    h_close_gate: true
+    h_close_static_floor: 0.30
+    h_close_floor: 2.0
+    h_close_dist: 8.0
+
+    # --- fix 3: pre-warmup collisions ranked below quiet samples -------------
+    # A contact before collision_warmup earns no collision credit (correct: it
+    # is a spawn-adjacent crash), but its post-warmup dmin is often large
+    # because the cars have separated again, which dropped 3.8% of all
+    # collisions into the FALLBACK band -- below a sample that did nothing.
+    # Pinning them to the close band leaves them uncredited but correctly
+    # ordered: 3.8% -> 0.35%.
+    h_trivial_collision_floor: true
+
+    # --- bands (strictly ordered; validated in the config's __post_init__) ---
+    tier0_lo: -1.00
+    tier0_hi: -0.82
+    h_fallback_lo: -0.75
+    h_fallback_hi: -0.50
+    h_park_lo: -0.40
+    h_park_hi: -0.25
+    h_close_lo: -0.15
+    h_close_hi: 0.00
+    h_ttc_lo: 0.10
+    h_ttc_hi: 0.70
+    h_collision_lo: 0.80
+    h_collision_hi: 1.40
+    h_ego_fault_extra: 0.40

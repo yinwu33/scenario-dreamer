@@ -1,0 +1,85 @@
+# @package _global_
+#
+# Five-level GRPO fallback reward selected by the frozen-base reward screen:
+#
+#   invalid < spawn-distance fallback < rollout closeness < TTC < collision
+#
+# The pre-rollout path check is only a compute gate.  Passing it does not earn
+# reward: the measured rollout must actually get close, produce finite TTC, or
+# collide to enter a higher band.  Strict bands implement the desired group
+# fallback without making reward depend explicitly on the other seven samples.
+#
+# Superseded by `hierarchical_v2`; kept as an ablation.
+#   python train.py --config-name config_ldm_adv_ddpo_idm_idm ddpo/reward=hierarchical
+
+ddpo:
+  reward_run_tag: "_hierarchical"
+
+  # Frozen-base screen (512 contexts x 32 samples) selected 14 m with the
+  # car-following exclusion disabled: ~17% of rollouts skipped while retaining
+  # 99.5% of valid non-trivial collisions, 98.1% of TTC<1.5 s events and 99.6%
+  # of actual <8 m approaches.  PET arms were tested but did not improve this
+  # recall/compute Pareto enough to justify another brittle threshold.
+  simulator:
+    path_conflict:
+      conflict_dist: 14.0
+      speed_floor: 1.0
+      follow_cos: 1.1             # >1 disables the unsafe following exclusion
+      follow_lane_tol: 2.0
+      skip_rollout: true
+
+  reward:
+    name: hierarchical
+
+    # Shared metric shapes.  TTC<3 s is the first true interaction tier; the
+    # <8 m distance tier supplies a denser bootstrap when TTC has no support.
+    ttc_tau: 3.0
+
+    lane_soft: 1.75
+    lane_hard: 2.75
+    # A small within-tier grade deduction: it cannot push an event into a lower
+    # tier, but breaks ties in favour of the more plausible on-lane sample.
+    lane_penalty: 0.10
+
+    invalid_grade_scale: 10.0
+    collision_warmup: 0.75
+    collision_window: 0.5
+    trivial_collision_t: 0.75
+
+    # Invalid band (shared names with the older tiered implementation).
+    tier0_lo: -1.00
+    tier0_hi: -0.82
+
+    # Selected hierarchy.  Every band is strictly above the previous one.
+    h_fallback_lo: -0.75
+    h_fallback_hi: -0.45
+    # Unused with h_split_close: false, but the bands are validated as a whole,
+    # so they still have to sit between the fallback and close bands.
+    h_park_lo: -0.44
+    h_park_hi: -0.40
+    h_close_lo: -0.35
+    h_close_hi: -0.05
+    h_ttc_lo: 0.05
+    h_ttc_hi: 0.65
+    h_collision_lo: 0.75
+    h_collision_hi: 1.35
+    h_ego_fault_extra: 0.40
+
+    # Close band: dmin only, no split and no closing gate (see hierarchical_v2
+    # for the repaired version).
+    h_close_floor: 2.0
+    h_close_dist: 8.0
+    h_split_close: false
+    h_close_delta: 1.0
+    h_close_gate: false
+    h_close_static_floor: 0.30
+    h_trivial_collision_floor: false
+
+    # Fallback band: graded by the adversary's spawn distance to the ego.
+    h_fallback_mode: spawn
+    h_init_near: 8.0
+    h_init_far: 30.0
+    h_fb_dmin_near: 0.0
+    h_fb_dmin_far: 45.0
+    h_fb_clr_near: 0.0
+    h_fb_clr_far: 40.0

@@ -63,17 +63,17 @@ from critical_scene.metrics_common import (
     write_json,
 )
 from ddpo.conditioning import LDMAdvConditioningPool
-from sim.scenes import GeneratedScenes
+from sim.scenes import batched_lane_graphs, GeneratedScenes
 from sim.runner import SimulatorConfig
 from ddpo.policy_ldm_adv import LDMAdvDDPOPolicy
-from ddpo.reward import PufferSimulator, RewardConfig
+from ddpo.reward import RewardModel, build_reward_config
 from ddpo.train_loop import _build_gen_invalid
 from utils.data_helpers import unnormalize_latents, unnormalize_scene
 from utils.train_helpers import cache_latent_stats, set_latent_stats
 
 SOURCES = ("original", "base_gen", "ddpo_gen", "original_ddpo_adv")
 
-# Per-scene metric columns copied from PufferSimulator.evaluate into the CSV.
+# Per-scene metric columns copied from RewardModel.evaluate into the CSV.
 METRIC_KEYS = (
     "reached_goal",
     "ego_collision",
@@ -143,18 +143,23 @@ def build_policy(cfg_root, ldm_cfg, *, ckpt: str, device: str) -> LDMAdvDDPOPoli
     )
 
 
-def build_reward(cfg_root, ldm_cfg) -> PufferSimulator:
+def build_reward(cfg_root, ldm_cfg, num_workers: int = 0, batch_size: int = 64) -> RewardModel:
     """The evaluation simulator, constructed exactly like ``run_ddpo`` (same
-    planner yaml incl. the adv collision-factor override, same strict configs)."""
+    planner yaml incl. the adv collision-factor override, same strict configs).
+
+    ``num_workers`` shards each rollout across processes (sim.parallel); it is
+    bit-exact, so it changes throughput and nothing else."""
     cfg = cfg_root.ddpo
-    return PufferSimulator(
+    return RewardModel(
         planner_cfg=cfg.planner,
         simulator_cfg=SimulatorConfig(
             seed=int(cfg.seed),
             gen_invalid=_build_gen_invalid(cfg, ldm_cfg.dataset),
             **OmegaConf.to_container(cfg.simulator, resolve=True),
         ),
-        reward_cfg=RewardConfig(**OmegaConf.to_container(cfg.reward, resolve=True)),
+        reward_cfg=build_reward_config(cfg.reward),
+        num_workers=num_workers,
+        train_batch_size=batch_size,
     )
 
 
@@ -187,6 +192,12 @@ def scenes_to_payload(scenes: GeneratedScenes) -> dict[str, Any]:
             else torch.full((num_scenes,), -1, dtype=torch.long)
         ),
     }
+    if "lane_graph" in scenes.meta:
+        # Rule-based planners route on this; without it sim.planners.idm raises.
+        # Stored as plain per-scene arrays so the payload stays pickle-free.
+        payload["lane_graph"] = [
+            {k: np.asarray(v) for k, v in g.items()} for g in scenes.meta["lane_graph"]
+        ]
     if "gen_agent_mask" in scenes.meta:
         payload["gen_agent_mask"] = _cpu(scenes.meta["gen_agent_mask"]).bool()
     if "adv_cond" in scenes.meta:
@@ -196,6 +207,8 @@ def scenes_to_payload(scenes: GeneratedScenes) -> dict[str, Any]:
 
 def payload_to_scenes(payload: dict[str, Any]) -> GeneratedScenes:
     meta = {"lane_scene_idx": payload["lane_scene_idx"]}
+    if "lane_graph" in payload:
+        meta["lane_graph"] = payload["lane_graph"]
     if "gen_agent_mask" in payload:
         meta["gen_agent_mask"] = payload["gen_agent_mask"]
     if "adv_cond" in payload:
@@ -215,6 +228,9 @@ def cat_payloads(chunks: list[dict[str, Any]]) -> dict[str, Any]:
     out: dict[str, Any] = {}
     offset = 0
     parts: dict[str, list[torch.Tensor]] = {}
+    # Per-scene lists rather than tensors: the lane graph is one dict of
+    # scene-local edge arrays per scene, so it concatenates by extension.
+    lane_graph: list[dict] = []
     for c in chunks:
         n = int(c["num_scenes"])
         for key in ("agent_states", "agent_types", "lane_polylines", "gen_agent_mask", "adv_cond", "adv_local_idx"):
@@ -222,9 +238,17 @@ def cat_payloads(chunks: list[dict[str, Any]]) -> dict[str, Any]:
                 parts.setdefault(key, []).append(c[key])
         parts.setdefault("agent_scene_idx", []).append(c["agent_scene_idx"] + offset)
         parts.setdefault("lane_scene_idx", []).append(c["lane_scene_idx"] + offset)
+        if "lane_graph" in c:
+            lane_graph.extend(c["lane_graph"])
         offset += n
     for key, vals in parts.items():
         out[key] = torch.cat(vals, dim=0)
+    if lane_graph:
+        if len(lane_graph) != offset:
+            raise ValueError(
+                f"lane_graph has {len(lane_graph)} scenes but the merged payload has {offset}"
+            )
+        out["lane_graph"] = lane_graph
     out["num_scenes"] = offset
     return out
 
@@ -243,6 +267,9 @@ def slice_payload(payload: dict[str, Any], start: int, end: int) -> GeneratedSce
         "num_scenes": end - start,
         "adv_local_idx": payload["adv_local_idx"][start:end],
     }
+    if "lane_graph" in payload:
+        # Already scene-local; the slice only re-bases which scenes are present.
+        sub["lane_graph"] = payload["lane_graph"][start:end]
     if "gen_agent_mask" in payload:
         sub["gen_agent_mask"] = payload["gen_agent_mask"][a_sel]
     if "adv_cond" in payload:
@@ -251,7 +278,38 @@ def slice_payload(payload: dict[str, Any], start: int, end: int) -> GeneratedSce
 
 
 # ------------------------------------------------------------------ sources
-def _gt_scenes(cond, dataset_cfg) -> GeneratedScenes:
+def _predicted_lane_graph(policy, cond) -> list[dict]:
+    """Per-scene lane connectivity for a REAL conditioning batch.
+
+    Uses the autoencoder's predicted ``lane_conn``, exactly as the DDPO decode
+    does, and for the same reason: the ldm_adv dataset runs ``reorder_indices``,
+    which permutes lanes and remaps ``edge_index_lane_to_lane`` while the raw
+    pickle's ``road_connection_types`` stay in PRE-permutation edge order. The
+    prediction is emitted one row per edge of the edge_index actually handed to
+    the decoder, so its alignment is automatic. This is the gap that previously
+    left the ``original`` source without a graph and made it unusable with any
+    route-planning planner (idm).
+    """
+    from utils.data_helpers import unnormalize_latents
+
+    agent_latents, lane_latents = unnormalize_latents(
+        policy._agent_latents(cond)[:, 0],
+        policy._lane_latents(cond)[:, 0],
+        policy.agent_latents_mean,
+        policy.agent_latents_std,
+        policy.lane_latents_mean,
+        policy.lane_latents_std,
+    )
+    _, _, _, _, lane_conn = policy.ae.forward_decoder(agent_latents, lane_latents, cond)
+    return batched_lane_graphs(
+        cond["lane", "to", "lane"].edge_index,
+        lane_conn,
+        cond["lane"].batch,
+        int(cond.batch_size),
+    )
+
+
+def _gt_scenes(cond, dataset_cfg, policy) -> GeneratedScenes:
     """Source ``original``: the real dataset scene from the conditioning batch.
 
     In insertion mode (``insert_adv_as_extra=true``) ``data['agent']`` already
@@ -289,7 +347,10 @@ def _gt_scenes(cond, dataset_cfg) -> GeneratedScenes:
         lane_polylines=cond["lane"].road_points,
         num_scenes=num_scenes,
         adv_local_idx=torch.full((num_scenes,), -1, dtype=torch.long, device=gt_states.device),
-        meta={"lane_scene_idx": cond["lane"].batch},
+        meta={
+            "lane_scene_idx": cond["lane"].batch,
+            "lane_graph": _predicted_lane_graph(policy, cond),
+        },
     )
 
 
@@ -381,7 +442,7 @@ def generate_chunk(
     out: dict[str, dict[str, Any]] = {}
 
     if "original" in sources:
-        out["original"] = scenes_to_payload(_gt_scenes(cond, ldm_cfg.dataset))
+        out["original"] = scenes_to_payload(_gt_scenes(cond, ldm_cfg.dataset, base_policy))
 
     if "base_gen" in sources or "ddpo_gen" in sources:
         _seed_all(seed * 1_000_003 + 1000 + chunk_id, device)
@@ -465,7 +526,7 @@ _mean_finite = mean_finite
 
 
 def benchmark_payload(
-    reward: PufferSimulator, payload: dict[str, Any], *, batch_size: int, label: str = ""
+    reward: RewardModel, payload: dict[str, Any], *, batch_size: int, label: str = ""
 ) -> dict[str, np.ndarray]:
     """Roll the artifact out in batches and concatenate per-scene metrics."""
     n = int(payload["num_scenes"])

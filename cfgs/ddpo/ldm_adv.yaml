@@ -98,9 +98,21 @@ use_ema_weights: true
 train_split: train
 eval_split: val
 pool_size: 40000
+# Prioritized context sampling for the TRAIN pool (the val pool stays uniform).
+# path: a manifest from scripts/build_context_prior.py -- per-dataset-scene
+# weights derived from a headroom probe (scripts/headroom_probe.py) run with the
+# SAME planner trio as this config, so it encodes where that planner pair is
+# attackable at all. focus_frac of every batch draw comes from the manifest
+# (weighted), the rest stays uniform for coverage. Rationale (2026-08-09 probe,
+# idm-idm): base-model collisions exist in only ~25% of contexts, so uniform
+# sampling spends ~75% of each batch on contexts with zero collision gradient.
+# null / 0.0 = legacy uniform sampling.
+context_prior:
+  path: null
+  focus_frac: 0.0
 
 # --- rollout / reward --------------------------------------------------------
-# Strict configs feed ddpo.reward.PufferSimulator; every key must match a
+# Strict configs feed ddpo.reward.RewardModel; every key must match a
 # dataclass field (missing or unknown keys raise at construction). Two of the
 # four sections are composed by the entrypoint defaults list, not defined here:
 #
@@ -122,50 +134,24 @@ simulator:
   goal_onroad_threshold: 2.75      # diagnostic off-lane flag: adv spawn lane dist (m)
   approach_warmup_time: 0.5        # ignore first N s when measuring closing
   ego_offroad_threshold: 2.75      # off-road proxy: ego dist to nearest centerline (m)
+  # Pre-rollout ego/adv path-conflict screen (sim.hooks.PathConflictHook). The
+  # metrics are always measured (they cost one segment-distance per scene and
+  # are the tiered reward's tier key); skip_rollout additionally retires
+  # non-conflicting scenes before the first step, which is a pure compute win
+  # but makes the batch's measured rates depend on the predicate -- so it is
+  # opt-in, turned on by the reward variant that relies on it (see
+  # cfgs/ddpo/reward/tiered.yaml).
+  path_conflict:
+    conflict_dist: 5.0             # chord clearance (m) at/below which paths "conflict"
+    speed_floor: 1.0               # m/s floor for the arrival-time (PET) estimate
+    skip_rollout: false
 
-# reward: HOW the scalar reward is assembled from the rollout metrics
-# (ddpo.reward.RewardConfig). criticality = risk_coef * noisy_OR(R_ttc,
-# w_app * R_approach), hard-gated to 0 on rejected / overlapping-init scenes;
-# lane constraints are soft-subtracted on the valid branch; a time-ramped
-# collision / ego-fault bonus is added on top (valid branch only).
-reward:
-  ttc_tau: 3.0                     # TTC horizon normalising the dense risk term (s)
-  risk_coef: 1.0
-  approach_d_safe: 6.0             # adversary "close" scale for the proximity gate (m)
-  approach_d_scale: 2.0
-  approach_close_delta: 2.0        # min (d0 - dmin) closed-in distance to score (m)
-  approach_close_scale: 1.0        # closing-gate sharpness (smaller = crisper gate)
-  lane_soft: 1.75                  # lane penalty ramps from lane_soft to lane_hard (m)
-  lane_hard: 2.75
-  lane_penalty: 0.25               # weight on each continuous lane-distance penalty
-  init_overlap_penalty: 0.5        # weight on the graded spawn-overlap fraction
-  # Graded reject penalty: a condition-violating adversary scores
-  # -(base + (1-base) * clip(gap/scale, 0, 1)) instead of a flat -1, where gap
-  # is how many metres it landed outside the target bucket. The flat cliff was
-  # the reward-collapse engine (run 3zjnupnh): the criticality optimum sits
-  # right at the goal_dist bucket edge, and once a GRPO group slid over it the
-  # uniform -1 had zero within-group contrast -> zero restoring gradient.
-  invalid_penalty_base: 0.5        # penalty right at the bucket boundary
-  invalid_grade_scale: 10.0        # metres past the boundary to reach the full -1 (0 = flat -1)
-  collision_warmup: 0.75           # bonus ramp: a contact before this earns nothing (s)
-  collision_window: 0.5            # ramp reaches 1 at warmup + window (s)
-  trivial_collision_t: 0.75        # c_trivial diagnostic flag only
-  # Explicit collision bonus (run 8rlw8ay8 post-mortem): the dense-only reward
-  # paid a real collision only ~0.1 more than a deep near-miss -- ~0.5 sigma of
-  # the within-group std, invisible to GRPO whitening, so ego_collision_rate
-  # stayed flat at ~2% while the approach term absorbed the whole gradient.
-  # 0.5 puts a collision ~2.5 sigma above its group; an ego-fault collision
-  # (the actual target behavior: cut-ins the ego crashes into) earns 1.5 total.
-  collision_bonus: 0.5
-  ego_fault_bonus: 1.0
-  # Approach-weight annealing: keep the dense approach gradient as a bootstrap
-  # (without it the TTC/collision signal has near-zero support early on), then
-  # ramp it down once the policy reliably closes in (~7 m plateau by ~it 1500 in
-  # 8rlw8ay8) so it stops substituting for actual criticality.
-  approach_coef: 1.0
-  approach_coef_final: 0.25
-  approach_anneal_begin: 2000
-  approach_anneal_end: 6000
+# reward: HOW the scalar reward is assembled from the rollout metrics (the
+# config of the variant its `name:` key selects, ddpo/reward/<name>.py). NOT
+# defined here -- it is a swappable axis composed by cfgs/config_ldm_adv_ddpo.yaml
+# from the cfgs/ddpo/reward group, defaulting to `hierarchical_v2`. Switch with
+# `ddpo/reward=full`. Each variant declares ddpo.reward_run_tag, the run-name
+# suffix that keeps its output_dir separate.
 
 # --- DDPO ------------------------------------------------------------------
 # The RL-algorithm knobs (advantage whitening, group_size, clip / KL trust
@@ -176,6 +162,15 @@ sampler: ddpm                 # ddim variant overrides this in its entrypoint
 ddim_steps: 30
 ddim_eta: 1.0
 batch_size: 128
+# Shard the rollout across this many worker processes (sim.parallel). The
+# rollout is ~66% of an iteration and is pure-numpy per-scene work, so this is
+# the main throughput knob; 0 keeps the single-process runner. The result is
+# BIT-EXACT either way -- the workers never run a network, they only run their
+# own scenes' numpy, and each centrally batched planner's single forward stays
+# in the parent (see sim/parallel.py). Requires
+# ceil(batch_size / 8) >= rollout_workers so every worker owns a whole GRPO
+# context group.
+rollout_workers: 0
 num_iterations: 40000
 inner_epochs: 1
 k_steps: 16

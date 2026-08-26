@@ -1,0 +1,60 @@
+# @package _global_
+#
+# Ablation rung 1: min-TTC only.
+#
+#   reward(valid) = clip(1 - min_TTC / ttc_tau, 0, 1)
+#
+# Every other reward TERM is switched off by weight: no approach bootstrap, no
+# lane penalty, no spawn-overlap penalty, no collision / ego-fault bonus. This
+# is the bottom of the ablation ladder for "which reward terms actually help":
+# copy this file, turn ONE weight back on (approach_coef, lane_penalty,
+# init_overlap_penalty, collision_bonus, ...), give it its own reward_run_tag,
+# and compare against this baseline and against `full`. The shape parameters of
+# a disabled term keep their `full.yaml` values, so re-enabling one is a single
+# weight edit and the two runs stay comparable.
+#
+# What is NOT a weight and therefore still applies (both are branch structure in
+# the flat assembler, ddpo/reward/flat.py, not reward terms):
+#   * reject branch -- a condition-violating adversary (ddpo.gen_agent_invalid)
+#     still scores the graded -0.5..-1 instead of its TTC. Kept because that
+#     gate is what makes the generated adversary match its conditioning target
+#     at all; add `ddpo.gen_agent_invalid.enabled=false` if the ablation is
+#     meant to cover it too.
+#   * init_invalid branch -- an adversary interpenetrating a neighbour at spawn
+#     is credited 0 criticality (exactly 0 here, since the overlap penalty is
+#     off). Without it, spawning on top of the ego would be a free min_TTC = 0.
+#
+# Usage:
+#   python train.py --config-name config_ldm_adv_ddpo_idm_idm ddpo/reward=ttc_only
+
+ddpo:
+  # Own output_dir / wandb run: `..._idm-idm_ttc_only` instead of `..._idm-idm`.
+  reward_run_tag: "_ttc_only"
+
+  reward:
+    name: flat
+    ttc_tau: 3.0                     # TTC horizon normalising the dense risk term (s)
+    risk_coef: 1.0
+    # --- approach term: OFF (w_app = 0 throughout, annealing disabled) --------
+    approach_d_safe: 6.0
+    approach_d_scale: 2.0
+    approach_close_delta: 2.0
+    approach_close_scale: 1.0
+    approach_coef: 0.0
+    approach_coef_final: 0.0
+    approach_anneal_begin: 0
+    approach_anneal_end: 0
+    # --- constraints: OFF -----------------------------------------------------
+    lane_soft: 1.75
+    lane_hard: 2.75
+    lane_penalty: 0.0
+    init_overlap_penalty: 0.0
+    # --- reject branch: unchanged from full (see header) ----------------------
+    invalid_penalty_base: 0.5
+    invalid_grade_scale: 10.0
+    # --- collision bonus: OFF (r_collision / c_trivial stay logged diagnostics)
+    collision_warmup: 0.75
+    collision_window: 0.5
+    trivial_collision_t: 0.75
+    collision_bonus: 0.0
+    ego_fault_bonus: 0.0

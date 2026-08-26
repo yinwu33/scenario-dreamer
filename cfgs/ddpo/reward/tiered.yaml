@@ -1,0 +1,115 @@
+# @package _global_
+#
+# Three-tier reward keyed on the PRE-rollout ego/adversary path geometry.
+#
+#   tier 2  spawn->goal chords pass within conflict_dist  -> [0, 1] + collision bonus
+#           (the scene is actually rolled out; criticality = TTC, lane penalty
+#            orders within the band)
+#   tier 1  no path conflict -> [-0.70, -0.10], graded by how close it came
+#           (chord clearance blended with the adversary's spawn distance to ego)
+#   tier 0  spawn interpenetration / condition violation -> [-1.0, -0.80], graded
+#
+# The point of the ordering: the "get closer to the ego" bootstrap now lives in
+# a band strictly BELOW every conflicting sample, so it can rank the hopeless
+# samples among themselves without ever outranking a real conflict. In the flat
+# reward that bootstrap (the approach term) was paid in the same currency as
+# criticality, and the iteration-0 screen measured the consequence -- 80% of live
+# groups crowned a merely-nearby adversary as their winner. Here that is
+# structurally impossible.
+#
+# The second point is compute: a rollout of two paths that never come within
+# conflict_dist can only report "nothing happened", so this variant also turns on
+# ``simulator.path_conflict.skip_rollout`` and retires those scenes before the
+# step loop. The predicate is measured, not assumed -- see the recall figure in
+# the header of scripts/reward_screen.py's output for this planner pair.
+#
+# Superseded by `hierarchical_v2`; kept as an ablation.
+#   python train.py --config-name config_ldm_adv_ddpo_idm_idm ddpo/reward=tiered
+
+ddpo:
+  reward_run_tag: "_tiered"
+
+  simulator:
+    path_conflict:
+      # Tier-2 admission: chord clearance (m). Calibrated on 16k base-model
+      # rollouts (idm-idm-idm), scripts/reward_screen.py. A missed event cannot
+      # be rewarded at all -- it is demoted to tier 1 and reported as "nothing
+      # happened" -- so recall is bought first and compute second:
+      #
+      #   m    coll recall  TTC<3s recall  rollout time  P(win=coll|group has)
+      #   5       91.2%        74.9%         -53%              57.2%
+      #   8       96.4%        87.2%         -45%              60.0%
+      #  12       99.2%        95.2%         -21%              61.8%
+      #  20      100.0%        99.0%          -7%                 --
+      #
+      # 12 m: signal is the scarce resource here, not compute (the rollout is
+      # 83% of an iteration, so -21% of it is still -17% wall clock). Drop to 8
+      # for a 37% faster iteration at the cost of 13% of the TTC events.
+      conflict_dist: 12.0
+      speed_floor: 1.0
+      # Car-following exclusion: same direction AND already inside the ego's
+      # corridor at both ends. Without it the cheapest route into tier 2 is to
+      # put the adversary on the ego's own lane going the same way (clearance 0,
+      # nothing ever happens) -- the approach-term farm, one level up. A cut-in
+      # has the same near-1 cosine but starts a lane over, so it is not caught.
+      follow_cos: 0.8
+      follow_lane_tol: 2.0
+      # The whole point: do not step a scene that cannot produce an event.
+      skip_rollout: true
+
+  reward:
+    name: tiered
+    # --- band layout (disjoint, strictly ordered) ----------------------------
+    tier2_floor: 0.0
+    tier1_hi: -0.10
+    tier1_lo: -0.70
+    tier0_hi: -0.80
+    tier0_lo: -1.0
+    # --- tier-1 grade --------------------------------------------------------
+    # Single source of truth for the tier boundary: the grade is 1 exactly where
+    # tier 2 begins, so the reward is continuous across the band edge (up to the
+    # deliberate tier1_hi -> tier2_floor gap that keeps the ordering strict).
+    tier1_path_near: ${ddpo.simulator.path_conflict.conflict_dist}
+    tier1_path_far: 25.0
+    tier1_ego_near: 8.0
+    tier1_ego_far: 30.0
+    # Chord clearance dominates: it is the tier-2 admission criterion itself, so
+    # it points straight at the band boundary. Spawn distance is the secondary
+    # signal (measured: the near<10m bucket collides at 4.5% vs 1.8% overall).
+    tier1_path_weight: 0.7
+    tier1_ego_weight: 0.3
+    # --- tier 2: criticality --------------------------------------------------
+    ttc_tau: 3.0
+    risk_coef: 1.0
+    # Approach term at a LOW weight, and only inside tier 2. The unfenced
+    # version was the substitution engine (it decided 80% of group winners at
+    # iteration 0); here a sample can only reach it by already having
+    # conflicting geometry, so what it rewards is "closed in along a conflicting
+    # path". Measured contribution: degenerate groups 4.0% -> 0.2% with no
+    # change in P(winner = collision). Set 0 to remove it entirely.
+    approach_d_safe: 6.0
+    approach_d_scale: 2.0
+    approach_close_delta: 2.0
+    approach_close_scale: 1.0
+    approach_coef: 0.15
+    approach_coef_final: 0.15
+    approach_anneal_begin: 0
+    approach_anneal_end: 0
+    # Lane penalty orders within tier 2 (it can no longer push a conflicting
+    # sample below a hopeless one -- the band is floored). Spawn overlap has no
+    # penalty weight here: it is demoted to tier 0 and only feeds that band's
+    # severity grade via init_overlap_frac.
+    lane_soft: 1.75
+    lane_hard: 2.75
+    lane_penalty: 0.25
+    # --- collision bonus (paid on top of tier 2's ceiling) --------------------
+    collision_warmup: 0.75
+    collision_window: 0.5
+    trivial_collision_t: 0.75
+    collision_bonus: 0.5
+    ego_fault_bonus: 1.0
+    # --- condition-violation grading (tier 0) --------------------------------
+    # Only used when ddpo.gen_agent_invalid.enabled is true. The tiered
+    # entrypoint turns check_goal_dist off (99% of rejects were goal_dist bucket
+    # misses with a 1.9 m median gap, burning 34% of the gradient mass).
+    invalid_grade_scale: 10.0

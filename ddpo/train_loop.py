@@ -9,7 +9,7 @@ taken (train.py imports this module lazily inside its dispatch branch).
 Pipeline per iteration:
     LDMAdvConditioningPool.sample_batch(B)    # real conditioning graphs
     policy.sample(cond)                       # record denoising trajectory + logprob
-    PufferSimulator.evaluate(scenes)          # numpy sim port + frozen planner
+    RewardModel.evaluate(scenes)              # numpy sim port + frozen planner
     compute_advantages -> ddpo_loss over k random denoising steps (+ optional KL)
 """
 
@@ -24,7 +24,7 @@ from ddpo.conditioning import LDMAdvConditioningPool
 from ddpo.ddpo_loss import AdaptiveKLController, DDPOConfig, compute_advantages, ddpo_loss
 from ddpo.policy_ldm_adv import LDMAdvDDPOPolicy
 from sim.runner import SimulatorConfig
-from ddpo.reward import PufferSimulator, RewardConfig
+from ddpo.reward import RewardModel, build_reward_config
 from sim.hooks import GenInvalidCheck
 from sim.scenes import GeneratedScenes
 from utils.train_helpers import cache_latent_stats, set_latent_stats
@@ -67,6 +67,9 @@ def _build_policy_and_pool(cfg_root, cfg, device: str):
             prune_base_to_ego=cfg.prune_base_to_ego,
             insert_adv_as_extra=cfg.insert_adv_as_extra,
             adv_cond_target=cfg.adv_cond_target,
+            # Prioritized context sampling (train pool only; the val eval pool
+            # below stays uniform so held-out metrics are unbiased).
+            context_prior=cfg.context_prior,
         )
         eval_dataset_cfg = ldm_cfg.dataset
     else:
@@ -154,7 +157,7 @@ _ADV_TABLE_COLUMNS = [
 ]
 
 _REWARD_COMPONENT_KEYS = (
-    "criticality", "r_ttc", "r_approach",
+    "tier", "criticality", "r_ttc", "r_approach",
     "constraint", "c_spawn_lane", "c_goal_lane", "c_overlap", "c_parking", "c_invalid",
     "c_invalid_sev",
     "spawn_lane_dist", "goal_lane_dist", "init_overlap_frac",
@@ -256,6 +259,12 @@ def _subset_scenes(scenes: GeneratedScenes, scene_ids: list[int]) -> GeneratedSc
         lane_polylines = np.asarray(lanes)[_to_numpy_index(lane_mask)]
 
     meta = {"lane_scene_idx": new_lane_idx}
+    # One entry per scene, already in scene-LOCAL lane indices, so the subset is
+    # just a reordered pick -- no reindexing. Route-planning planners (idm) fail
+    # loudly without it, so it must survive every re-slicing of a batch.
+    lane_graph = scenes.meta.get("lane_graph")
+    if lane_graph is not None:
+        meta["lane_graph"] = [lane_graph[s] for s in selected]
     gen_agent_mask = scenes.meta.get("gen_agent_mask")
     if gen_agent_mask is not None:
         meta["gen_agent_mask"] = _index_like(gen_agent_mask, agent_mask)
@@ -321,7 +330,7 @@ def _visualize_train_group_diversity(
     rewards: torch.Tensor,
     advantages: torch.Tensor,
     group_ids: torch.Tensor | None,
-    reward_model: PufferSimulator,
+    reward_model: RewardModel,
     cfg,
     ddpo_cfg: DDPOConfig,
     it: int,
@@ -707,14 +716,16 @@ def run_ddpo(cfg_root):
     model_type, policy, pool, eval_dataset_cfg = _build_policy_and_pool(cfg_root, cfg, device)
     # Strict three-config construction: every yaml key under simulator:/reward:
     # must match a dataclass field (missing or unknown keys raise a TypeError).
-    reward = PufferSimulator(
+    reward = RewardModel(
         planner_cfg=cfg.planner,
         simulator_cfg=SimulatorConfig(
             seed=int(cfg.seed),
             gen_invalid=_build_gen_invalid(cfg, eval_dataset_cfg),
             **OmegaConf.to_container(cfg.simulator, resolve=True),
         ),
-        reward_cfg=RewardConfig(**OmegaConf.to_container(cfg.reward, resolve=True)),
+        reward_cfg=build_reward_config(cfg.reward),
+        num_workers=int(cfg.rollout_workers),
+        train_batch_size=int(cfg.batch_size),
     )
     ddpo_cfg = DDPOConfig(**OmegaConf.to_container(cfg.algo, resolve=True))
     # Adaptive KL-to-base coefficient (inert unless ddpo.kl_target > 0); its
@@ -934,6 +945,12 @@ def run_ddpo(cfg_root):
         near_miss = float((metrics["r_risk"] > 0.5).mean())
         coll_rate = float(metrics["ego_collision"].mean())
         fault_rate = float(metrics["ego_fault_collision"].mean())
+        tier_text = ""
+        if "tier" in metrics:
+            tier_text = " tiers=" + "/".join(
+                f"{float((metrics['tier'] == level).mean()):.2f}"
+                for level in range(int(metrics["tier"].max()) + 1)
+            )
         print(
             f"[it {it:04d}] reward={rewards.mean():.3f} pos_reward_rate={crit:.3f} "
             f"near_miss={near_miss:.3f} coll={coll_rate:.3f} fault={fault_rate:.3f} "
@@ -944,7 +961,7 @@ def run_ddpo(cfg_root):
             f"init_invalid={inval:.3f} loss={log['loss']:.4f} grp_std={grp_std:.3f} "
             f"ratio={log.get('ratio_mean', 1.0):.3f} kl={log.get('kl_to_base', 0.0):.4f} "
             f"kl_coef={kl_ctrl.coef:.3g} drop={log.get('ratio_dropped_frac', 0.0):.3f} "
-            f"skipped_updates={skipped_updates}"
+            f"skipped_updates={skipped_updates}{tier_text}"
         )
 
         group_viz_log = _visualize_train_group_diversity(
@@ -992,6 +1009,11 @@ def run_ddpo(cfg_root):
             if "pg_grad_norm" in log:
                 log_payload["train/pg_grad_norm"] = log["pg_grad_norm"]
                 log_payload["train/kl_grad_norm"] = log["kl_grad_norm"]
+            if "tier" in metrics:
+                for level in range(int(metrics["tier"].max()) + 1):
+                    log_payload[f"train/tier{level}_rate"] = float(
+                        (metrics["tier"] == level).mean()
+                    )
             log_payload.update(group_log)
             log_payload.update(group_viz_log)
             wandb.log(log_payload)
@@ -1056,6 +1078,10 @@ def run_ddpo(cfg_root):
             tmp_path = out_dir / "last.ckpt.tmp"
             torch.save(resume_ckpt, tmp_path)
             tmp_path.replace(out_dir / "last.ckpt")
+
+    # Rollout workers are daemons and die with the parent, but an ordinary
+    # return should not leave 16 processes and their shared-memory blocks behind.
+    reward.close()
 
     if wandb is not None:
         wandb.finish()
