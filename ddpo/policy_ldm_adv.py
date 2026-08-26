@@ -28,7 +28,7 @@ from torch_geometric.data import Batch
 
 from nn_modules.autoencoder import AutoEncoder
 from nn_modules.ldm_adv import LDMAdv
-from sim.scenes import GeneratedScenes, single_adv_local_idx
+from sim.scenes import GeneratedScenes, batched_lane_graphs, single_adv_local_idx
 from utils.data_container import ScenarioDreamerData
 from utils.data_helpers import unnormalize_latents, unnormalize_scene
 
@@ -410,7 +410,7 @@ class LDMAdvDDPOPolicy:
             self.lane_latents_mean,
             self.lane_latents_std,
         )
-        agent_states, lane_states, agent_types, _, _ = self.ae.forward_decoder(
+        agent_states, lane_states, agent_types, _, lane_conn = self.ae.forward_decoder(
             agent_latents, lane_latents, data
         )
         agent_states, _ = unnormalize_scene(
@@ -430,12 +430,16 @@ class LDMAdvDDPOPolicy:
         )
         agent_types = agent_types.clone()
 
-        meta = {"lane_scene_idx": data["lane"].batch}
-        lane_edge_store = data["lane", "to", "lane"]
-        if "edge_index" in lane_edge_store:
-            meta["lane_edge_index"] = lane_edge_store.edge_index
-        if "type" in lane_edge_store:
-            meta["lane_edge_type"] = lane_edge_store.type
+        lane_batch = data["lane"].batch
+        meta = {
+            "lane_scene_idx": lane_batch,
+            "lane_graph": batched_lane_graphs(
+                data["lane", "to", "lane"].edge_index,
+                lane_conn,
+                lane_batch,
+                int(data.batch_size),
+            ),
+        }
         return GeneratedScenes(
             agent_states=agent_states,
             agent_types=agent_types,
@@ -481,7 +485,7 @@ class LDMAdvDDPOPolicy:
         dec_data["agent", "to", "agent"].edge_index = a2a_edge_index
         dec_data["lane", "to", "agent"].edge_index = l2a_edge_index
 
-        agent_states, lane_states, agent_types, _, _ = self.ae.forward_decoder(
+        agent_states, lane_states, agent_types, _, lane_conn = self.ae.forward_decoder(
             combined_latents, lane_latents, dec_data
         )
         agent_states, _ = unnormalize_scene(
@@ -507,7 +511,24 @@ class LDMAdvDDPOPolicy:
         )
         gen_agent_mask[num_base:] = True  # the appended adv rows
 
-        meta = {"lane_scene_idx": lane_batch, "gen_agent_mask": gen_agent_mask}
+        meta = {
+            "lane_scene_idx": lane_batch,
+            "gen_agent_mask": gen_agent_mask,
+            # Lane connectivity for route-planning planners (idm). It comes from
+            # the autoencoder's own predicted connection types, NOT the dataset's
+            # ground truth: lane_conn is emitted one row per edge of the very
+            # edge_index passed into the decoder above, which is already the
+            # reorder_indices-permuted one the ldm_adv dataset stores
+            # (datasets/waymo/dataset_ldm_adv_waymo.py). Row alignment is
+            # therefore automatic, while the raw pickle's road_connection_types
+            # are ordered against the PRE-permutation edge list.
+            "lane_graph": batched_lane_graphs(
+                data["lane", "to", "lane"].edge_index,
+                lane_conn,
+                lane_batch,
+                num_scenes,
+            ),
+        }
         # Carry the adv conditioning target ([type, motion, goal_dist, ego_dist]
         # bucket ids, one row per scene) through to the reward so it can check the
         # realized adversary against its requested condition (GenAgentInvalidHook).
@@ -517,11 +538,6 @@ class LDMAdvDDPOPolicy:
             )
             adv_cond[adv_batch.cpu()] = data["adv"].cond.cpu()
             meta["adv_cond"] = adv_cond
-        lane_edge_store = data["lane", "to", "lane"]
-        if "edge_index" in lane_edge_store:
-            meta["lane_edge_index"] = lane_edge_store.edge_index
-        if "type" in lane_edge_store:
-            meta["lane_edge_type"] = lane_edge_store.type
         adv_local_idx = single_adv_local_idx(gen_agent_mask, combined_batch, num_scenes)
         return GeneratedScenes(
             agent_states=agent_states,
