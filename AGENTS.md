@@ -1,207 +1,210 @@
-# CLAUDE.md
+# AGENTS.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+## Project Overview
 
-## Introduction
+AdvScene is a research project built on [Scenario Dreamer](https://github.com/princeton-computational-imaging/scenario-dreamer).
 
-This is a research repo. The original repo is clone from [Scenario Dreamer](https://github.com/princeton-computational-imaging/scenario-dreamer.git). Scenario Dreamer provides an autoencoder and latent diffusion model to geenrate initial scene. Then use ctrl-sim to rollout the scenario. This is the baseline of this work. This work is called AdvScene, aiming to generate more challenging initial scene, rollout with pretrained planner and increase criticality.
+Baseline pipeline:
 
-The idea of AdvScene is to train autoencoder with goal firstly, then train latent diffusion model with a dedicated adv_agent network, then using DDPO to finetune this adv_agent network only with maintaining the other generation components fixed.
+```text
+autoencoder / latent diffusion
+→ initial scene generation
+→ ctrl-sim rollout
+```
 
-The evaluation should consider different combinations of SUT (system under test) ego planner, the environment's planners and the adversarial planner. Currently environment's planners and adv planner are same entity.
+AdvScene extends this by:
 
-## Setup
+1. training a goal-conditioned autoencoder;
+2. training a latent diffusion model with a dedicated `adv_agent` branch;
+3. fine-tuning only the adversarial branch with DDPO while keeping the remaining generation components frozen;
+4. evaluating scene criticality under different combinations of SUT, environment, and adversarial planners.
 
-Every command assumes both of these, run from the repo root (`define_env_variables.sh` uses `$(pwd)`):
+Currently the environment planner and adversarial planner use the same planner configuration.
+
+`MYREADME.md` is the working command reference for this fork. Prefer it over the upstream `README.md` for project-specific workflows.
+
+## Setup Commands
+
+### Environment Setup
+
+Run all commands from the repository root:
 
 ```bash
 source .venv/bin/activate
-source scripts/define_env_variables.sh   # PROJECT_ROOT / SCRATCH_ROOT / DATASET_ROOT / CONFIG_PATH / PYTHONPATH
+source scripts/define_env_variables.sh
 ```
 
-`SCRATCH_ROOT` and `DATASET_ROOT` both point at `<repo>/data`. The configs read them via
-`${oc.env:...}` (`cfgs/_base.yaml`), so an unsourced shell fails at config resolution, not later.
+`define_env_variables.sh` sets:
 
-`MYREADME.md` is the working command reference (bilingual EN/中文) and is kept current — read it
-before inventing a command line. `README.md` is the upstream Scenario Dreamer readme.
+- `PROJECT_ROOT`
+- `SCRATCH_ROOT`
+- `DATASET_ROOT`
+- `CONFIG_PATH`
+- `PYTHONPATH`
 
-## Commands
+Hydra configs depend on these environment variables, so source the script before running training or evaluation.
 
-Everything trains through `train.py` and evaluates through `eval.py`, both Hydra entrypoints over
-`cfgs/`. `--config-name` picks the entry config; `model_name` inside it selects the pipeline
-(`model_registry.py` maps it to a Lightning module, except `model_name: ddpo`, which train.py
-dispatches to its own RL loop before the registry collapse).
+### Run Commands
+
+Main entry points:
 
 ```bash
-# --- generative pipeline (in order) ---
-python train.py --config-name config_ae_goal                       # goal autoencoder
-python eval.py  --config-name config_ae_goal \
-    ae_goal.eval.cache_latents.enable_caching=True \
-    ae_goal.eval.cache_latents.split_name=train                    # latent cache (train, then val)
-python train.py --config-name config_ldm_adv_base                  # ldm_adv on the goal latents
+python train.py --config-name <config>
+python eval.py --config-name <config>
+```
 
-# --- Stage 2: DDPO fine-tuning of the adversary branch ---
-# Entry name = <sut planner>_<env+adv planner>; everything else is inherited from
-# config_ldm_adv_ddpo.yaml (reward=hierarchical_v2, DDIM-30, lr, k_steps, validity gates).
+Main training pipeline:
+
+```bash
+python train.py --config-name config_ae_goal
+python train.py --config-name config_ldm_adv_base
+
 python train.py --config-name config_ldm_adv_ddpo_idm_idm
 python train.py --config-name config_ldm_adv_ddpo_idm_ppo
 python train.py --config-name config_ldm_adv_ddpo_ppo_idm
 python train.py --config-name config_ldm_adv_ddpo_ppo_ppo
-
-python train.py --config-name config_ldm_adv_ddpo_idm_idm ddpo/reward=full   # reward is a CLI axis
-python train.py --config-name config_ldm_adv_ddpo_ppo_ppo ddpo.rollout_workers=16
-
-# --- planner benchmark (one table cell per invocation, cells accumulate into table.{csv,md}) ---
-python scripts/run_planner_matrix.py --sut idm --env ppo_aggressive \
-    --num-scenes 1000 --batch-size 50 --gif 8 \
-    --out-dir $DATASET_ROOT/critical_scene/planner_matrix_log_1000
-
-# --- four-source ldm_adv evaluation ---
-.venv/bin/python scripts/run_ldm_adv_ppo_table.py --num-scenes 1000 --chunk-size 32 \
-    --out-dir data/critical_scene/ldm_adv_ppo_eval
 ```
 
-**Tests.** `unittest`, no pytest in the venv:
+Planner benchmark:
 
 ```bash
-python -m unittest discover -s tests -v          # whole suite
-python -m unittest tests.test_hierarchical_reward.HierarchicalV2Test.test_six_levels_strictly_ordered
+python scripts/run_planner_matrix.py --sut <planner> --env <planner> ...
 ```
 
-`test_scripts/` holds manual diagnostic scripts (gitignored), not the suite — e.g.
-`python test_scripts/test_routes.py --num-scenes 200` sanity-checks lane-graph route search before
-trusting any IDM row.
+For long Hydra override lists, explicitly set:
 
-**Pin `hydra.run.dir` on any multi-override run.** The default run dir embeds
-`${hydra.job.override_dirname}` (`cfgs/_base.yaml`), which blows up on long override lists. Add
-`hydra.run.dir=$PROJECT_ROOT/slurm_logs/<name>`.
+```text
+hydra.run.dir=$PROJECT_ROOT/slurm_logs/<name>
+```
+
+to avoid overly long default output paths.
+
+## Code Style
+
+### 简洁优先
+
+- 用最少的代码解决问题，拒绝冗余实现。
+- 不使用 fallback、默认值或 defensive code 掩盖错误；非预期状态应直接报错。
+- 不滥用 `if-else`、`try-except` 或 `dict.get(key, default)` 静默恢复错误。
+- 只对真实、预期的业务条件进行显式处理。
+- 不为一次性需求创建额外 abstraction 或复杂架构。
+- 不为“未来可能需要”盲目增加扩展性或可配置性。
+- 在当前任务范围内，如果实现明显可以简化，优先使用更简单的方案。
+- 不以简化为理由扩大修改范围。
+- 引入新 pattern、helper、dependency 或 abstraction 前，先检查项目已有实现。
+
+### 精确修改
+
+- 仅修改当前任务直接相关的代码。
+- 不顺手优化相邻代码、注释或格式。
+- 不重构与当前任务无关且正常工作的模块。
+- 严格匹配项目现有代码风格。
+- 可删除由本次修改直接产生的无效 import 或变量。
+- 原有死代码或冗余内容仅提醒，不擅自删除。
+- 当歧义会明显改变行为、接口、数据或修改范围时，再请求澄清。
 
 ## Architecture
 
-The repo is layered so simulation knows nothing about RL and vice versa; DDPO and the planner
-benchmark are two consumers of the same simulation layer.
+Repository layout:
 
+- `/sim`: simulation and measurement; should not depend on RL or diffusion internals.
+- `/sim/planners`: planner implementations sharing the same planner API.
+- `/ddpo`: DDPO sampling, loss, training loop, and reward implementations.
+- `/critical_scene`: scene sources and evaluation harnesses.
+- `/models`, `/nn_modules`, `/datasets`, `/datamodules`: Lightning / diffusion stack.
+- `/checkpoints/planners`: planner checkpoints.
+- `/tests`: automated test suite.
+- `/test_scripts`: manual diagnostic scripts, not the formal test suite.
+- `/temp_scripts`: temporary or one-off scripts.
+- `/research`: LaTeX, references, experiment notes, and paper-related outputs.
+
+### Simulation Roles
+
+`RolloutRunner` treats controlled agents as three independent roles:
+
+- `sut`: ego / system under test
+- `adv`: generated adversarial agent
+- `env`: remaining controlled agents
+
+Each role uses the same `Planner` interface. Avoid role-specific branches when the behavior can be expressed through planner configuration.
+
+Planning is two-phase: all planners observe the same pre-step state before actions are applied.
+
+### Shared Interfaces
+
+All planners use:
+
+```text
+(planner_cfg, *, role, device)
 ```
-sim/          simulation + measurement, zero RL/diffusion concepts
-  scenes.py     GeneratedScenes — the ONLY contract any scene source hands the rollout
-  runner.py     RolloutRunner + SimulatorConfig — steps the three roles, fires hooks
-  planners/     one Planner(cfg, *, role, device) per policy; base.py holds the contract
-  hooks.py      metric hooks — measure only, never judge; polarity is the caller's
-  world.py      SimScene, a pure-numpy reimplementation of the PufferDrive rollout
-  routes.py     lane-graph path search (rule-based planners only)
-  parallel.py   bit-exact sharded rollout across worker processes
-  schema.py     single source of truth for the 9/12-dim agent-state layout
-nets/         frozen network architectures (selfplay_drive/net.py = the PufferDrive Drive net)
-checkpoints/planners/   planner weights (kept out of source dirs)
-ddpo/         RL only: policy_ldm_adv.py (sampling) / ddpo_loss.py / train_loop.py / reward/
-critical_scene/  scene sources + eval harnesses (log_scenes, gen_scenes, ldm_adv_eval,
-                 planner_matrix_eval) that feed sim/ and score its metrics
-models/, nn_modules/, datasets/, datamodules/   the Lightning/diffusion stack
+
+and are registered through `PLANNER_REGISTRY`.
+
+All DDPO reward implementations subclass `RewardAssembler` and are registered through `ddpo/reward/registry.py`.
+
+Hydra configuration should be preferred over introducing hard-coded planner, reward, or algorithm branches.
+
+## Validation
+
+Run the smallest relevant validation after modifying code.
+
+Tests use `unittest`:
+
+```bash
+python -m unittest discover -s tests -v
+python -m unittest <module.TestClass.test_method>
 ```
 
-The repo aims to give a paper. In folder `research/`, latex files, references can be found.
+Do not assume pytest is available.
 
-### Three roles, one runner
+Manual diagnostics live under `test_scripts/` and are not substitutes for the automated test suite.
 
-`RolloutRunner` partitions every scene's agents into `sut` (the ego / system under test, local
-index 0), `adv` (THE generated adversary, `scenes.adv_local_idx`), and `env` (all remaining
-controlled agents). Each is driven by its own `Planner`, and the runner never special-cases which
-planner sits in which role. Planning is two-phase: every role's `plan` runs off the same pre-step
-state, then every `apply` integrates — so no role observes another's same-step movement.
+Do not modify unrelated behavior just to make tests pass.
 
-The only asymmetry in the whole rollout is that the hooks score the ego. That is what lets the
-benchmark's table axes literally be the rollout's role axes: a cell is selected by config
-composition alone (`planner@ddpo.planner.sut` = row, `.env` = column).
+If validation cannot be run, explicitly state why.
 
-### Config composition (Hydra groups)
+For DDPO:
 
-A DDPO entry config composes five orthogonal groups; adding a variant is a yaml plus (for
-planners/rewards) one registry line, never a code branch:
+```text
+ceil(batch_size / 8) >= rollout_workers
+```
 
-* `cfgs/ddpo/ldm_adv.yaml` — flow: conditioning, checkpoints, pools, `simulator:`, optimizer/sampler
-* `cfgs/ddpo/algo/*.yaml` — RL algorithm (`grpo`); code reads `cfg.algo`, so swapping is one override
-* `cfgs/ddpo/reward/*.yaml` — the `name:` key selects the assembler in `ddpo/reward/<name>.py`, and
-  the remaining keys map **1:1** onto that variant's dataclass fields
-* `cfgs/planner/*.yaml` — per-role planner: checkpoint/net plus that policy's `conditioning:` obs.
-  The `ppo_*` family is one frozen checkpoint at three `collision_factor` values
-  (aggressive 0.5 / normal 1.0 / caution 2.0), so they are three planners, not three policies.
-* `cfgs/rollout/base.yaml` — shared rollout dynamics (dt, goal lifecycle, map extent), composed to
-  `ddpo.planner.sim`
+must hold so each worker owns a complete GRPO context group.
 
-Every reward variant carries a `ddpo.reward_run_tag` suffix so ablations land in their own
-`output_dir` and `resume: true` never picks up a checkpoint trained under a different reward.
-Run artifacts go to `${SCRATCH_ROOT}/critical_scene/<run_name>/`; DDPO checkpoints are saved in
-Lightning-compatible form (`diff_model.*` prefix) so `eval.py` and the viz scripts can load them.
+## Git
 
-## Conventions
+- NEVER run `git add` or `git commit`.
+- Only the user may stage or commit changes.
+- Git operations should otherwise remain read-only unless explicitly requested.
+- `git status`, `git diff`, `git log`, and `git show` are allowed.
 
-**No fallbacks.** Do not write defensive code that hides errors or invalid states. Avoid fallbacks, silent recovery, and default-value access such as `dict.get(key, default)`. Do not use `try/except` or defensive `if/else` to mask unexpected failures; let errors propagate and fail loudly. Handle only genuinely expected business conditions explicitly.
+## Research Workflow
 
-**Shared capability, shared base class and API.** All planners take `(planner_cfg, *, role, device)`
-and are looked up in `PLANNER_REGISTRY`, so any planner can fill any role. All rewards subclass
-`RewardAssembler` and are looked up in `ddpo/reward/registry.py`.
+Before spending a large training run, prefer cheap diagnostics when applicable:
 
-Constraint: `ceil(batch_size / 8) >= rollout_workers`, so every worker owns a whole GRPO context group.
+- `scripts/headroom_probe.py`
+- `scripts/reward_screen.py`
+- `scripts/build_context_prior.py`
+- `scripts/profile_ddpo.py`
 
-**Measure before spending a training run.** `scripts/headroom_probe.py` (best-of-N from the frozen
-base: DDPO anchored by KL can only sharpen what the base can already sample),
-`scripts/reward_screen.py` (re-scores one rollout dump under every candidate reward),
-`scripts/build_context_prior.py` (turns a probe into the `ddpo.context_prior` manifest — the probe
-found only ~25% of contexts attackable, so uniform sampling wastes most of a batch), and
-`scripts/profile_ddpo.py` (per-phase wall clock; rollout is ~66%).
+Use measurements to validate that the base generator, reward, and rollout configuration have enough headroom before launching DDPO training.
 
+## Current Blocker
 
-## TODO — BLOCKER: the frozen PPO checkpoint's conditioning values are wrong
+The frozen PPO planner checkpoint appears to require conditioning values around:
 
-`cfgs/planner/ppo_normal.yaml` has carried `collision_factor: 1.0 / offroad_factor: 1.0`
-since commit `232b1b8` (2026-08-09, "adv env two planners"). The frozen PufferDrive
-checkpoint expects **2.0 / 2.0** — the value the file held at `ff4f45f` (2026-08-06).
-Anything run between 2026-08-09 and 2026-08-26 that used a `ppo_*` planner drove a
-degraded policy.
+```text
+collision_factor = 2.0
+offroad_factor = 2.0
+```
 
-Measured on 64 scenes, ego = ppo_normal, traffic = idm (`reached_goal`):
+Recent configs using `1.0 / 1.0` produced severely degraded planner behavior and invalidate experiments involving PPO roles.
 
-| collision_factor / offroad_factor | reached | travelled | final dist to goal |
-|---|---|---|---|
-| 0.0 / 0.0 | 10.9% | 21.4 m | 20.8 m |
-| **1.0 / 1.0** (the regression) | **14.1%** | 19.4 m | 12.9 m |
-| **2.0 / 2.0** (correct) | **93.8%** | 27.3 m | 2.9 m |
+Before rerunning affected experiments:
 
-IDM reference on the same scenes: 93.8%, 29.1 m, 2.8 m. Goal distance to cover: 29.0 m.
+1. verify the conditioning distribution used to train the original PufferDrive checkpoint;
+2. sweep the relevant conditioning values;
+3. correct the planner configs;
+4. rebuild/rescore experiments that used the incorrect PPO conditioning.
 
-**Failure mode.** At 1.0 the ego does not accelerate: it coasts on its spawn momentum
-and stops ~13 m short. Success then correlates with *spawn speed*, not with driving —
-0% for egos starting below 10 m/s, 33% above; forcing every ego to start at rest drops
-it to 0%. The observation is out of distribution, so the policy stops commanding
-acceleration.
-
-**Two severities, do not conflate them.**
-* PPO in the `sut` role — catastrophic and obvious: the rollout measures a car that
-  cannot drive.
-* PPO in the `adv` (or `env`) role — silent: a crippled adversary cannot accelerate
-  into the ego, so it caps the collision rate DDPO can ever observe. This is the prime
-  suspect for the "collisions stall at 1-2%" seen in every recent ppo-adversary run,
-  ahead of context-prior coverage or approach substitution.
-
-### What must be redone (all runs postdate the regression)
-
-| artefact | roles | status |
-|---|---|---|
-| `..._idm-idm_hier_v2` | idm/idm/idm | **clean, keep** |
-| `..._idm-ppo_hier_v2` | idm/**ppo**/**ppo** | retrain (adversary was crippled) |
-| `..._ppo-idm_hier_v2` | **ppo**/idm/idm | retrain (ego paralysed) |
-| `..._ppo-ppo_hier_v2_no_prior` | ppo/ppo/ppo | discarded |
-| `..._ppo-ppo_hier_v2` | ppo/ppo/ppo | stopped at it 1279, discarded |
-| `headroom_probe/ppo*` + `context_prior_ppo-ppo.json` | ppo | rebuild |
-| `table_main/` cells with a PPO role | ppo | rescore |
-
-`data/critical_scene/planner_matrix_*_1000/` predates the regression — its
-`summary.json` records `collision_factor: 2.0` — so those rows are valid.
-
-### Do this first, before any rerun
-
-Confirm 2.0 is the *correct* value and not merely a working one. `0.0` is documented in
-the yaml as "reckless" yet scores 10.9%, i.e. as broken as 1.0. If that setting is genuinely
-dead, then `ppo_aggressive` (collision_factor 0) is broken too and the table's PPO
-columns are mis-defined. Sweep 0 / 0.5 / 1 / 1.5 / 2 for monotonicity and check what
-conditioning distribution the checkpoint was trained under on the PufferDrive side.
+Do not treat previous PPO-based DDPO or planner-evaluation results as valid until this is resolved.
