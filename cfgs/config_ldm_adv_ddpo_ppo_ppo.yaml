@@ -1,0 +1,24 @@
+# Critical-scene Stage 2, PPO-PPO planner pair.
+# See cfgs/config_ldm_adv_ddpo_idm_idm.yaml for the pair convention.
+#
+# Usage:
+#   python train.py --config-name config_ldm_adv_ddpo_ppo_ppo
+
+defaults:
+  - config_ldm_adv_ddpo
+  - override planner@ddpo.planner.sut: ppo_normal
+  - override planner@ddpo.planner.env: ppo_normal
+  - override planner@ddpo.planner.adv: ppo_normal
+  - _self_
+
+ddpo:
+  # 2026-08-26 probe (ppo_normal x3, 1024 contexts x 32 samples): 13.9% of
+  # contexts yield a collision from the frozen base, while the first ppo-ppo run
+  # (uniform sampling) plateaued at 0.9% -- i.e. the ceiling is optimization, not
+  # capacity, which is exactly what the prior addresses.
+  context_prior:
+    path: ${project_root}/data/headroom_probe/context_prior_ppo-ppo.json
+    focus_frac: 0.7
+
+experiment:
+  planner_name: ppo-ppo

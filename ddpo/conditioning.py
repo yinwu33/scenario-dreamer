@@ -7,6 +7,7 @@ slot as the ego) and batched with ``Batch.from_data_list``.
 
 from __future__ import annotations
 
+import json
 import pickle
 
 import numpy as np
@@ -105,6 +106,16 @@ class LDMAdvConditioningPool:
         drives (GT goal within ``min_ego_drive`` metres of spawn) gives the
         criticality reward no signal, so it is skipped at pool-build time (the
         ego keeps its real, on-road goal).
+      * **context_prior** (optional) -- prioritized context sampling from a
+        headroom-probe manifest (``scripts/build_context_prior.py``). The
+        2026-08-09 idm-idm probe showed base-model collisions exist in only
+        ~25% of contexts; uniform sampling therefore spends ~75% of every
+        batch on contexts with zero collision gradient. With a prior, a
+        ``focus_frac`` share of every draw comes from the manifest's scene
+        indices (weighted), the rest stays uniform over the full pool for
+        coverage. The manifest is planner-pair specific (it encodes where THAT
+        planner pair is attackable), so each pair's entry config points at its
+        own file; ``path: null`` or ``focus_frac: 0`` disables (legacy uniform).
 
     Sorted physical lane polylines (needed by the reward) are attached to every
     graph from the latent-cache pickle.
@@ -122,6 +133,7 @@ class LDMAdvConditioningPool:
         prune_base_to_ego: bool = False,
         insert_adv_as_extra: bool = False,
         adv_cond_target=None,
+        context_prior=None,
     ):
         self.dataset = WaymoDatasetLDMAdv(
             dataset_cfg,
@@ -159,9 +171,90 @@ class LDMAdvConditioningPool:
         # pool slot -> dataset index the slot actually resolved to after the
         # driving-ego probing in _get (for reproducibility manifests).
         self.resolved_scene_idx: dict[int, int] = {}
+        # Prioritized context sampling (see class docstring). Priority scenes
+        # are appended as extra pool slots (dedup'd against the uniform slots),
+        # so _get / caching / batch_from_indices work unchanged and the first
+        # pool slots -- which the fixed train_viz eval reuses -- keep their
+        # legacy identity.
+        self.focus_frac = 0.0
+        self.priority_slots = np.empty(0, dtype=np.int64)
+        self.priority_probs = np.empty(0, dtype=np.float64)
+        self._init_context_prior(context_prior)
 
     def __len__(self) -> int:
         return len(self.pool_indices)
+
+    # ---------------------------------------------------- context prior
+    def _init_context_prior(self, spec) -> None:
+        """Load the optional prioritized-sampling manifest.
+
+        ``spec`` is a mapping (OmegaConf node or dict) with ``path`` (JSON from
+        scripts/build_context_prior.py: ``{"scene_idx": [...], "weight": [...]}``,
+        weights > 0, keyed by DATASET index so the manifest is independent of
+        pool_size / seed) and ``focus_frac`` (share of draws taken from the
+        manifest). ``None`` / null path / focus_frac <= 0 keeps legacy uniform
+        sampling."""
+        if spec is None:
+            return
+        if OmegaConf.is_config(spec):
+            spec = OmegaConf.to_container(spec, resolve=True)
+        path = spec.get("path")
+        focus = float(spec.get("focus_frac", 0.0) or 0.0)
+        if not path or focus <= 0.0:
+            return
+        manifest = json.loads(open(path).read())
+        scene_idx = np.asarray(manifest["scene_idx"], dtype=np.int64)
+        weight = np.asarray(manifest["weight"], dtype=np.float64)
+        if scene_idx.shape != weight.shape or scene_idx.size == 0:
+            raise ValueError(f"malformed context-prior manifest {path}")
+        keep = (weight > 0) & (scene_idx >= 0) & (scene_idx < len(self.dataset))
+        scene_idx, weight = scene_idx[keep], weight[keep]
+        if scene_idx.size == 0:
+            raise ValueError(f"context-prior manifest {path} has no usable rows")
+        # Map each priority scene to a pool slot, appending slots for scenes the
+        # uniform permutation did not include.
+        slot_of = {int(ds): s for s, ds in enumerate(self.pool_indices)}
+        slots = np.empty(len(scene_idx), dtype=np.int64)
+        new_indices = []
+        for i, ds in enumerate(scene_idx):
+            ds = int(ds)
+            if ds not in slot_of:
+                slot_of[ds] = len(self.pool_indices) + len(new_indices)
+                new_indices.append(ds)
+            slots[i] = slot_of[ds]
+        if new_indices:
+            self.pool_indices = np.concatenate(
+                [self.pool_indices, np.asarray(new_indices, dtype=self.pool_indices.dtype)]
+            )
+        self.focus_frac = min(focus, 1.0)
+        self.priority_slots = slots
+        self.priority_probs = weight / weight.sum()
+        print(
+            f"[pool] context prior: {len(slots)} priority contexts "
+            f"({len(new_indices)} appended), focus_frac={self.focus_frac:.2f} ({path})"
+        )
+
+    def _draw_slots(self, n: int) -> np.ndarray:
+        """Draw ``n`` pool slots: a ``focus_frac`` share from the (weighted)
+        priority contexts, the rest uniform over the whole pool. Draws are
+        without replacement per stratum when possible, so one batch keeps
+        context diversity; falls back to replacement for tiny strata."""
+        n = int(n)
+        if self.focus_frac <= 0.0 or len(self.priority_slots) == 0:
+            replace = n > len(self.pool_indices)
+            return self.rng.choice(len(self.pool_indices), size=n, replace=replace)
+        n_focus = int(round(n * self.focus_frac))
+        n_focus = min(max(n_focus, 0), n)
+        replace_f = n_focus > len(self.priority_slots)
+        focus = self.rng.choice(
+            self.priority_slots, size=n_focus, replace=replace_f, p=self.priority_probs
+        )
+        n_rest = n - n_focus
+        replace_u = n_rest > len(self.pool_indices)
+        rest = self.rng.choice(len(self.pool_indices), size=n_rest, replace=replace_u)
+        out = np.concatenate([focus, rest]).astype(np.int64)
+        self.rng.shuffle(out)
+        return out
 
     # ------------------------------------------------------------- helpers
     @staticmethod
@@ -304,8 +397,7 @@ class LDMAdvConditioningPool:
         return Batch.from_data_list([self._get(int(i)) for i in indices]).to(self.device)
 
     def sample_batch(self, batch_size: int) -> Batch:
-        idx = self.rng.integers(0, len(self.pool_indices), size=batch_size)
-        return self.batch_from_indices(idx)
+        return self.batch_from_indices(self._draw_slots(batch_size))
 
     def sample_group_batch(self, num_groups: int, group_size: int):
         """Sample ``num_groups`` distinct contexts, each replicated ``group_size``
@@ -319,9 +411,7 @@ class LDMAdvConditioningPool:
         resulting rewards then isolates "which generation is more critical in
         THIS context" from "which contexts are intrinsically easy".
         """
-        pool_n = len(self.pool_indices)
-        replace = int(num_groups) > pool_n
-        groups = self.rng.choice(pool_n, size=int(num_groups), replace=replace)
+        groups = self._draw_slots(int(num_groups))
         idx = np.repeat(groups, int(group_size))
         group_ids = torch.repeat_interleave(
             torch.arange(int(num_groups)), int(group_size)

@@ -1,15 +1,10 @@
-# Critical-scene Stage 2: DDPO fine-tuning of ldm_adv (latent-space single
-# adversary, DDPM sampler) against a frozen planner. Adapts the map-conditioned
-# dm flow (config_critical_scene_map_conditioned_dm_goal) to ldm_adv: the base
-# scene is pruned to the ego, only the adversary latent is generated/trained, and
-# the SAME Phase-2 reward + GRPO settings are reused (see cfgs/ddpo/ldm_adv.yaml).
-#
-# Uses the pretrained ldm_adv checkpoint plus the frozen goal autoencoder:
-#   ${scratch_root}/checkpoints/scenario_dreamer_ldm_adv_train/last.ckpt
-#   ${scratch_root}/checkpoints/scenario_dreamer_ae_goal_waymo/last.ckpt
+# Critical-scene Stage 2: DDPO fine-tuning of ldm_adv against a frozen planner
+# trio. Carries everything a DDPO run needs except which planner drives each
+# role and which contexts to draw -- those live in the pair entrypoints
+# (config_ldm_adv_ddpo_<sut>_<env>.yaml).
 #
 # Usage:
-#   python train.py --config-name config_advscene_ldm_adv_ddpo
+#   python train.py --config-name config_ldm_adv_ddpo
 
 model_name: ddpo
 
@@ -28,22 +23,20 @@ defaults:
   - ae_goal/model@ae_goal.model
   - ae_goal/datamodule@ae_goal.datamodule
   - ddpo/ldm_adv@ddpo
-  # RL-algorithm axis (advantage whitening, group_size, clip / KL trust
-  # region): swap with e.g. ddpo/algo@ddpo.algo=ppo once a sibling yaml exists.
+  # RL-algorithm axis: ddpo/algo@ddpo.algo=<name>
   - ddpo/algo@ddpo.algo: grpo
-  # One planner per role: sut = ego (system under test), env = background
-  # traffic, adv = the generated adversary. Each planner yaml also carries its
-  # policy's conditioning obs (how defensively that role drives).
-  #
-  # All three roles currently run the SAME ppo config, i.e. the adversary
-  # is as avoidant as everyone else (collision_factor 2.0). To make only the
-  # adversary reckless, override its conditioning rather than adding a planner:
+  # Reward axis, no per-reward entrypoint file:
+  #   python train.py --config-name config_ldm_adv_ddpo_idm_idm ddpo/reward=full
+  - ddpo/reward: hierarchical_v2
+  # sut = ego (system under test), env = background traffic, adv = the generated
+  # adversary. Each planner yaml carries that role's conditioning obs; override
+  # it rather than adding a planner:
   #   ddpo.planner.adv.conditioning.collision_factor=0
   - planner@ddpo.planner.sut: ppo_normal
   - planner@ddpo.planner.env: ppo_aggressive
   - planner@ddpo.planner.adv: ppo_aggressive
-  # Shared rollout dynamics (dt, goal lifecycle, conditioning ranges) -- a
-  # property of the rollout, not of one role's policy.
+  # Shared rollout dynamics (dt, goal lifecycle, map extent); the same values
+  # the planner benchmark composes.
   - rollout@ddpo.planner.sim: base
   - _self_
 
@@ -55,11 +48,23 @@ ldm_adv:
 ddpo:
   output_dir: ${experiment.output_dir}
 
+  # Shared training recipe (overrides cfgs/ddpo/ldm_adv.yaml defaults).
+  lr: 3e-5
+  sampler: ddim
+  ddim_steps: 30
+  ddim_eta: 1.0
+  k_steps: 32
+
+  gen_agent_invalid:
+    check_goal_dist: false
+
 experiment:
   project: advscene
   stage: ddpo
   generator: ldm_adv
   sampler: ${ddpo.sampler}
   planner_name: ${oc.select:ddpo.planner.sut.name,none}
-  run_name: critical_scene_${experiment.stage}_${experiment.generator}_${experiment.sampler}_${experiment.planner_name}
+  # ddpo.reward_run_tag keeps each reward variant in its own output_dir; without
+  # it resume=true would continue a run trained under a different reward.
+  run_name: critical_scene_${experiment.stage}_${experiment.generator}_${experiment.sampler}_${experiment.planner_name}${ddpo.reward_run_tag}
   output_dir: ${scratch_root}/critical_scene/${experiment.run_name}

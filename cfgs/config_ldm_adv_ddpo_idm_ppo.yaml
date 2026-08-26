@@ -1,0 +1,20 @@
+# Critical-scene Stage 2, IDM-PPO planner pair.
+# See cfgs/config_ldm_adv_ddpo_idm_idm.yaml for the pair convention.
+#
+# Usage:
+#   python train.py --config-name config_ldm_adv_ddpo_idm_ppo
+
+defaults:
+  - config_ldm_adv_ddpo
+  - override planner@ddpo.planner.sut: idm
+  - override planner@ddpo.planner.env: ppo_normal
+  - override planner@ddpo.planner.adv: ppo_normal
+  - _self_
+
+ddpo:
+  context_prior:
+    path: ${project_root}/data/headroom_probe/context_prior_idm-ppo.json
+    focus_frac: 0.7
+
+experiment:
+  planner_name: idm-ppo

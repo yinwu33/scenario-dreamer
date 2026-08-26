@@ -1,0 +1,24 @@
+# Critical-scene Stage 2, IDM-IDM planner pair.
+# Pair name = SUT/ego planner - (background traffic + generated adversary)
+# planner. Everything but the roles and the context prior is inherited from
+# cfgs/config_ldm_adv_ddpo.yaml.
+#
+# Usage:
+#   python train.py --config-name config_ldm_adv_ddpo_idm_idm
+
+defaults:
+  - config_ldm_adv_ddpo
+  - override planner@ddpo.planner.sut: idm
+  - override planner@ddpo.planner.env: idm
+  - override planner@ddpo.planner.adv: idm
+  - _self_
+
+ddpo:
+  # Manifests are planner-pair specific; build one with
+  # scripts/headroom_probe.py then scripts/build_context_prior.py.
+  context_prior:
+    path: ${project_root}/data/headroom_probe/context_prior_idm-idm.json
+    focus_frac: 0.7
+
+experiment:
+  planner_name: idm-idm
