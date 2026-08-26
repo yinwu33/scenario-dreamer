@@ -55,7 +55,7 @@ def _chunks(n: int, size: int) -> list[list[int]]:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config-name", default="config_critical_scene_ldm_adv_ddpo")
+    ap.add_argument("--config-name", default="config_ldm_adv_ddpo")
     ap.add_argument("--overrides", nargs="*", default=[])
     ap.add_argument("--out-dir", default="data/critical_scene/ldm_adv_ppo_eval")
     ap.add_argument("--num-scenes", type=int, default=1000)
@@ -70,10 +70,11 @@ def main() -> int:
         default=None,
         help="base ldm_adv checkpoint (default: ddpo.ldm_adv_ckpt from the config)",
     )
-    ap.add_argument(
-        "--ddpo-ckpt",
-        default="data/critical_scene/critical_scene_ddpo_ldm_adv_ddpm_ppo_normal/last.ckpt",
-    )
+    ap.add_argument("--ddpo-ckpt", required=True,
+                    help="the DDPO checkpoint whose adversary defines the 'AdvScene' row; "
+                         "it must match the planner trio of --config-name")
+    ap.add_argument("--workers", type=int, default=0,
+                    help="shard each benchmark rollout across N processes (bit-exact)")
     ap.add_argument("--skip-generation", action="store_true")
     ap.add_argument("--skip-benchmark", action="store_true")
     ap.add_argument("--force-benchmark", action="store_true")
@@ -166,7 +167,8 @@ def main() -> int:
 
     # ------------------------------------------------------------ benchmark
     if not args.skip_benchmark:
-        reward = build_reward(cfg_root, ldm_cfg)
+        reward = build_reward(cfg_root, ldm_cfg, num_workers=int(args.workers),
+                              batch_size=int(args.benchmark_batch_size))
         min_ego_drive = float(cfg_root.ddpo.min_ego_drive)
         summaries = {}
         for source in sources:
@@ -197,6 +199,8 @@ def main() -> int:
             )
             print(f"[benchmark] wrote {summary_path}", flush=True)
         write_table(out_dir, summaries)
+        # Rollout workers outlive the script as orphans otherwise.
+        reward.close()
 
     return 0
 
