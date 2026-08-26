@@ -1,19 +1,52 @@
- # Shared rollout dynamics for the DDPO numpy sim (sim.world.SimConfig).
+ # Shared rollout dynamics for the numpy sim (sim.world.SimConfig).
 #
-# Composed at ddpo.planner.sim (rollout@ddpo.planner.sim: base): the simulation
-# (dt, goal lifecycle, map extent) is a property of the rollout shared by every
-# planner role. WHICH policy drives each role -- and that policy's conditioning
-# obs (collision_factor / offroad_factor / lane_width, policy INPUTS) -- lives
-# in cfgs/planner/<name>.yaml.
+# Composed at <entry>.planner.sim (rollout@<...>.planner.sim: base): the
+# simulation (dt, goal lifecycle, map extent) is a property of the rollout shared
+# by every planner role, and by every consumer of the rollout -- DDPO training
+# (cfgs/config_ldm_adv_ddpo.yaml), the planner benchmark
+# (cfgs/config_planner_matrix.yaml) and the paired-source eval all get their
+# lifecycle from HERE, so their numbers stay comparable. WHICH policy drives each
+# role -- and that policy's conditioning obs (collision_factor / offroad_factor /
+# lane_width, policy INPUTS) -- lives in cfgs/planner/<name>.yaml.
 #
 # This file is the COMPLETE config: construction is strict (every SimConfig
 # field must be present, unknown keys raise), there are no hidden defaults.
 dt: 0.1
 goal_radius: 2.0
 goal_speed: 100.0
-# Non-ego agents continue driving past their goal and are only retired when
-# their centre leaves the [-map_extent/2, map_extent/2] square (the generated
-# FOV is 64; the extra margin keeps agents that drift slightly outside alive).
-goal_behavior: continue
+# Non-ego agent lifecycle (sim.world.GOAL_BEHAVIORS). Two independent axes --
+# what happens at the goal, and whether leaving the map square retires the agent:
+#
+#   stop            freeze as a static obstacle | off-map removed
+#   remove          removed                     | off-map removed
+#   remove_off_map  keeps driving               | off-map removed
+#   continue        keeps driving               | off-map kept
+#
+# 'remove' is the shared default because it is the only lifecycle whose
+# post-goal behaviour is both defined and planner-independent, which matters
+# whenever the traffic planner is a variable (it is a column of the benchmark
+# table, and a swappable role in DDPO): under 'remove_off_map' an agent past its
+# goal has no objective left, so what it does next is an artefact of that
+# particular policy and contaminates the comparison.
+#
+# It is also what the log says happened. Measured on 400 val scenes, of the
+# background agents that actually drive, 51.5% have their goal on the FOV
+# boundary and are still moving at a median 11.1 m/s when they reach it -- they
+# left the crop, they did not stop. 'stop' would freeze half the traffic into
+# phantom roadblocks in live lanes, and would do so more often the further the
+# ego drives, i.e. biased against exactly what is being measured (it costs 17.7
+# points of success, vs the 5.4-point IDM/PPO gap).
+#
+# Genuinely parked cars need no help from this setting: SimScene already makes
+# any agent whose goal is within MIN_DISTANCE_TO_GOAL of its spawn a permanent
+# static obstacle. The ego is exempt too -- its scene ends when it arrives.
+# Matching PufferDrive's own training config (goal_behavior = 3) additionally
+# keeps the frozen PPO planner in-distribution.
+#
+# 'remove_off_map' is the lifecycle DDPO used before this became shared; set it
+# to reproduce a pre-switch run. Agents are then retired only when their centre
+# leaves the [-map_extent/2, map_extent/2] square (the generated FOV is 64; the
+# extra margin keeps agents that drift slightly outside alive).
+goal_behavior: remove
 map_extent: 72.0
 max_controlled_agents: 64

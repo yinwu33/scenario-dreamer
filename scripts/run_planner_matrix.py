@@ -241,7 +241,7 @@ def main() -> None:
     p.add_argument("--num-scenes", type=int, default=1000)
     p.add_argument("--batch-size", type=int, default=32)
     p.add_argument("--seed", type=int, default=0, help="seeds the scene sample")
-    p.add_argument("--out-dir", default=Path("output/planner_matrix"))
+    p.add_argument("--out-dir", type=Path, default=Path("output/planner_matrix"))
     p.add_argument("--config-name", default="config_planner_matrix")
     p.add_argument(
         "--override",

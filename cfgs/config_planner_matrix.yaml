@@ -27,34 +27,14 @@ defaults:
   - planner@planner.sut: idm
   - planner@planner.env: idm
   - planner@planner.adv: idm
-  # Shared rollout dynamics -- the SAME group the DDPO rollout composes. The one
-  # deliberate difference is goal_behavior, overridden below.
+  # Shared rollout dynamics -- the SAME group, with the SAME values, that the
+  # DDPO rollout composes. Nothing is overridden here any more: the lifecycle
+  # this table needs (goal_behavior: remove, and why) is the shared default, see
+  # cfgs/rollout/base.yaml. Each row records the goal_behavior it actually ran
+  # under (run_planner_matrix.rebuild_table), so a future change to the shared
+  # default cannot silently mix two lifecycles into one table.
   - rollout@planner.sim: base
   - _self_
-
-planner:
-  sim:
-    # Background agents are DESPAWNED when they reach their goal (DDPO's rollout
-    # uses 'continue'). This is the only lifecycle whose post-goal behaviour is
-    # both defined and planner-independent, which matters here because the
-    # traffic planner is a column of the table: under 'continue' an agent past
-    # its goal has no objective left, so what it does next is an artefact of that
-    # particular policy and contaminates the comparison.
-    #
-    # It is also what the log says happened. Measured on 400 val scenes, of the
-    # background agents that actually drive, 51.5% have their goal on the FOV
-    # boundary and are still moving at a median 11.1 m/s when they reach it --
-    # they left the crop, they did not stop. 'stop' would freeze half the traffic
-    # into phantom roadblocks in live lanes, and would do so more often the
-    # further the ego drives, i.e. biased against exactly what is being measured
-    # (it costs 17.7 points of success, vs the 5.4-point IDM/PPO gap).
-    #
-    # Genuinely parked cars need no help from this setting: SimScene already
-    # makes any agent whose goal is within MIN_DISTANCE_TO_GOAL of its spawn a
-    # permanent static obstacle. The ego is exempt too -- its scene ends when it
-    # arrives. Matching PufferDrive's own training config (goal_behavior = 3)
-    # additionally keeps the frozen PPO planner in-distribution.
-    goal_behavior: remove
 
 simulator:
   sim_steps: 91   # 9.1 s at dt=0.1, the length of the stored Waymo trajectories
