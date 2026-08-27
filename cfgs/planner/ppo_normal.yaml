@@ -13,7 +13,7 @@
 # defaults file and no built-in fallbacks, so removing a key below raises rather
 # than quietly building a differently-shaped network.
 name: ppo_normal
-checkpoint: ${project_root}/checkpoints/planners/ppo/ppo_178352180650.pt
+checkpoint: ${project_root}/checkpoints/planners/cond_drive/cond_drive_178774809225.pt
 device: auto
 deterministic: true
 
@@ -23,9 +23,9 @@ deterministic: true
 # role's agents by RolloutRunner; a planner without conditioning slots
 # declares `conditioning: null`. collision_factor 0 = reckless, 2 = maximally
 # defensive.
-conditioning:  # TODO: change factor to be aggressive
-  collision_factor: 2.0
-  offroad_factor: 2.0
+conditioning:  
+  collision_factor: 0.5
+  offroad_factor: 0.5
   lane_width: 4.0
 
 policy:

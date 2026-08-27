@@ -102,9 +102,20 @@ class RouteDiagnosticsHook(MetricHook):
         ctx.metrics["route_multi_lane"] = multi_lane
 
 
-def build_runner(cfg) -> RolloutRunner:
-    """The benchmark rollout: per-role planners + shared dynamics, from config."""
-    return RolloutRunner(
+def build_runner(cfg, *, num_workers: int = 0, batch_size: int = 0) -> RolloutRunner:
+    """The benchmark rollout: per-role planners + shared dynamics, from config.
+
+    ``num_workers`` shards each rollout across processes (``sim.parallel``); the
+    result is bit-exact, so it only buys throughput.
+    """
+    cls = RolloutRunner
+    extra = {}
+    if num_workers > 0:
+        from sim.parallel import ParallelRolloutRunner
+
+        cls = ParallelRolloutRunner
+        extra = {"num_workers": num_workers, "train_batch_size": batch_size}
+    return cls(
         cfg.planner,
         SimulatorConfig(
             **OmegaConf.to_container(cfg.simulator, resolve=True),
@@ -120,6 +131,7 @@ def build_runner(cfg) -> RolloutRunner:
             gen_invalid=None,
             ego_offroad_threshold=float(cfg.benchmark.ego_offroad_threshold),
         ),
+        **extra,
     )
 
 
