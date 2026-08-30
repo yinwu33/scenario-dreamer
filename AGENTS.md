@@ -65,6 +65,24 @@ python train.py --config-name config_ldm_adv_ddpo_ppo_idm
 python train.py --config-name config_ldm_adv_ddpo_ppo_ppo
 ```
 
+Current DDPO launch example (`ppo-ppo_aggressive`):
+
+```bash
+python train.py --config-name config_ldm_adv_ddpo \
+  planner@ddpo.planner.sut=ppo_normal \
+  planner@ddpo.planner.env=ppo_aggressive \
+  planner@ddpo.planner.adv=ppo_aggressive \
+  experiment.planner_name=ppo-ppo_aggressive \
+  ddpo.context_prior.path=$PROJECT_ROOT/data/headroom_probe/context_prior_ppo-ppo_aggressive.json \
+  ddpo.context_prior.focus_frac=0.7 \
+  ddpo.rollout_workers=16 \
+  ddpo.num_iterations=3000 \
+  hydra.run.dir=$PROJECT_ROOT/slurm_logs/ddpo_ppo-ppo_aggressive
+```
+
+`ddpo.resume=true` resumes from an existing `<output_dir>/last.ckpt`; use a unique
+`experiment.planner_name` for a new run.
+
 Planner benchmark:
 
 ```bash
@@ -130,6 +148,19 @@ Each role uses the same `Planner` interface. Avoid role-specific branches when t
 
 Planning is two-phase: all planners observe the same pre-step state before actions are applied.
 
+Current planner-pair convention:
+
+| Pair | SUT | Environment / adversary |
+| --- | --- | --- |
+| `ppo-ppo_norm` | `ppo_normal` | `ppo_normal` |
+| `ppo-ppo_aggressive` | `ppo_normal` | `ppo_aggressive` |
+| `ppo-ppo_caution` | `ppo_normal` | `ppo_caution` |
+| `idm-ppo_norm` | `idm` | `ppo_normal` |
+| `idm-ppo_aggressive` | `idm` | `ppo_aggressive` |
+| `idm-ppo_caution` | `idm` | `ppo_caution` |
+
+For PPO-SUT experiments, keep the SUT on `ppo_normal`.
+
 ### Shared Interfaces
 
 All planners use:
@@ -169,7 +200,9 @@ For DDPO:
 ceil(batch_size / 8) >= rollout_workers
 ```
 
-must hold so each worker owns a complete GRPO context group.
+must hold so each worker owns a complete GRPO context group. The same constraint
+applies to any sharded rollout, so `score_paired_sources.py --workers 16` needs
+`--batch-size 128`; below that `ParallelRolloutRunner` raises at construction.
 
 ## Git
 
@@ -189,22 +222,98 @@ Before spending a large training run, prefer cheap diagnostics when applicable:
 
 Use measurements to validate that the base generator, reward, and rollout configuration have enough headroom before launching DDPO training.
 
-## Current Blocker
+A context prior is valid only for the exact `sut/env/adv` trio used by its
+headroom probe. The standard probe is 1024 contexts x 32 samples with 16 workers;
+the standard DDPO run uses batch size 128, 16 workers, 3000 iterations, and
+`context_prior.focus_frac=0.7`.
 
-The frozen PPO planner checkpoint appears to require conditioning values around:
+Periodic DDPO validation uses 64 scenes and is diagnostic only. Compare the base
+model and selected checkpoints on the same 1000 validation scenes before drawing
+conclusions about collision-rate improvements.
 
-```text
-collision_factor = 2.0
-offroad_factor = 2.0
-```
+Low GPU utilization during CPU rollout does not imply that another DDPO run fits.
+Measure peak memory first; a batch-128 run has used about 47 GB on the 96 GB H100.
 
-Recent configs using `1.0 / 1.0` produced severely degraded planner behavior and invalidate experiments involving PPO roles.
+## Paper Evaluation
 
-Before rerunning affected experiments:
+Results for the paper's tables live in `data/critical_scene/table_main_20260830/`,
+one directory per planner pair plus `PROVENANCE.json`, which records every printed
+number with its checkpoint, planner trio and denominator. Read that file rather
+than re-deriving numbers.
 
-1. verify the conditioning distribution used to train the original PufferDrive checkpoint;
-2. sweep the relevant conditioning values;
-3. correct the planner configs;
-4. rebuild/rescore experiments that used the incorrect PPO conditioning.
+Protocol for every cell: `--split val --num-scenes 1000`, the pair's `_03000.ckpt`,
+`--workers 16`. Scene sources map to table rows as:
 
-Do not treat previous PPO-based DDPO or planner-evaluation results as valid until this is resolved.
+| Table row | Source | Produced by |
+| --- | --- | --- |
+| Log | `original` | `run_ldm_adv_ppo_table.py` |
+| Log + proximity adversary | `proximity_adv` | `make_proximity_adv.py` |
+| AdvScene-base (1 sample) | `base_gen` | `run_ldm_adv_ppo_table.py` |
+| AdvScene-base (best-of-K) | `base_gen_bok{K}` | `run_best_of_k.py` |
+| AdvScene | `ddpo_gen` | `run_ldm_adv_ppo_table.py` |
+| Log + AdvScene adversary | `original_ddpo_adv` | `run_ldm_adv_ppo_table.py` |
+
+`run_ldm_adv_ppo_table.py` benchmarks through `RewardModel`, whose collision is
+ego-vs-ADVERSARY. Table numbers come from `score_paired_sources.py`, which is
+ego-vs-ANY. Never mix the two in one table; state which one a figure uses.
+
+Scene artifacts carry no SUT, so evaluating one model against another planner is
+pure re-scoring with a different `--sut` -- the transfer table costs no generation.
+
+### Evaluation traps
+
+- `insert_adv_as_extra` appends adversaries after all base agents, so
+  `agent_scene_idx` is NOT monotonic. Group scenes with a stable argsort, never
+  `searchsorted`. Payloads produced by slicing are scene-major instead, so two
+  payloads of the same scenes can differ row-by-row while being identical
+  per scene -- compare per scene, not element-wise.
+- `original` is bit-reproducible; `base_gen` is not (float-level kernel
+  nondeterminism, max ~5 cm per agent). It is planner-independent and
+  semantically stable, so cross-cell numbers are comparable, but do not expect
+  identical bytes.
+- Generated rows report ~983 driving egos against 1000 for `original`. That is
+  autoencoder reconstruction jitter around the 10 m threshold; the ego moves a
+  median of 3 cm. Not a bug, but say so if a caption claims identical scenes.
+- DDPO checkpoints store raw `state_dict` with no EMA shadow, so the base model
+  is evaluated with EMA weights and AdvScene without. This understates the
+  AdvScene-vs-base delta rather than inflating it.
+- The proximity baseline's clearance is load-bearing. 8 m is the smallest value
+  that leaves the spawn-overlap rate at the log distribution's own 6.8%; 5 m
+  inflates it to 14.8% and turns the baseline into an overlap generator (16.50%
+  vs 6.50% collisions). The result is flat from 8 m to 16 m.
+- `set -eu` breaks `scripts/define_env_variables.sh` (`PYTHONPATH` unbound). Use
+  `set -eo pipefail` in launcher scripts.
+- `pkill -f <script>` matches the wrapper shell running the command and kills the
+  session's own bash. Kill by PID.
+
+### Findings that should shape further work
+
+- Most of the criticality gain comes from the generator, not from DDPO. Against
+  logged scenes the base model gains +3.4 to +6.5 points; DDPO adds -0.19 to
+  +7.67 on top, and that increment tracks how aggressive the traffic is
+  (largest for `ppo_aggressive`, negative for `idm-idm`).
+- Best-of-K from the frozen base overtakes AdvScene: one AdvScene sample is worth
+  K=3 (IDM SUT) to K=6 (PPO SUT) base samples, and best-of-32 beats it outright.
+  Report the strongest K, not a favourable one.
+- Selecting best-of-K by reward recovers only ~45% of the oracle headroom
+  (6.92% vs 15.97% at K=32), so the headroom probe's curve is a ceiling, not the
+  baseline a practitioner achieves.
+- Spawn overlap: log scenes 6.8%, `original_ddpo_adv` 12.8%, fully generated
+  ~28%. Part of the fully-generated rows' collision rate is artifact, which is
+  why `original_ddpo_adv` is the clean control.
+- Results in `data/critical_scene/table_main/` (2026-08-26) are void: they were
+  measured with the broken `1.0 / 1.0` PPO config, which reported 9.80% ego
+  success where the healthy planner reports 95.21%.
+
+## Current PPO Setup
+
+The active planner configs are:
+
+| Planner | Checkpoint | Collision / offroad conditioning |
+| --- | --- | --- |
+| `ppo_normal` | `cond_drive_178774809225.pt` | `0.5 / 0.5` |
+| `ppo_aggressive` | `sut_drive_178776072918_aggressive.pt` | `0.1 / 0.1` |
+| `ppo_caution` | `sut_drive_178777020497_caution.pt` | `3.0 / 3.0` |
+
+These are distinct checkpoints, not a conditioning-only ablation. PPO results made
+with the old `1.0 / 1.0` setup or a mismatched context prior must be regenerated.

@@ -48,12 +48,13 @@ from critical_scene.planner_matrix_eval import (
     summarize,
 )
 
-SOURCES = ("original", "base_gen", "ddpo_gen")
-# The three columns the results table reports, on the driving-ego subset.
+SOURCES = ("original", "base_gen", "ddpo_gen", "original_ddpo_adv")
+# The columns the results table reports, on the driving-ego subset.
 COLUMNS = (
     ("Succ.", "reached_goal_rate_driving"),
     ("Off.", "ego_offroad_rate_driving"),
     ("Coll.", "ego_collision_rate_driving"),
+    ("Coll._f", "ego_fault_collision_rate_driving"),
 )
 
 
@@ -82,7 +83,7 @@ def main() -> int:
                 f"planner@planner.adv={adv}",
             ],
         )
-    runner = build_runner(cfg)
+    runner = build_runner(cfg, num_workers=int(args.workers), batch_size=int(args.batch_size))
     min_ego_drive = float(cfg.benchmark.min_ego_drive)
 
     summaries = {}
@@ -99,6 +100,9 @@ def main() -> int:
             chunks.append(metrics)
             print(f"[score] {source} {end}/{n}", flush=True)
         summaries[source] = summarize(concat_metrics(chunks), min_ego_drive=min_ego_drive)
+    if args.workers:
+        # Rollout workers outlive the script as orphans otherwise.
+        runner.close()
 
     header = f"| source | n_driving | " + " | ".join(c[0] for c in COLUMNS) + " |"
     lines = [
