@@ -1,0 +1,30 @@
+# CtRL-Sim (sim/planners/ctrl_sim.py) for one rollout role: the frozen
+# return-conditioned decision transformer of Rowe et al., driven at its NEUTRAL
+# return-to-go. Use this variant when CtRL-Sim is ordinary traffic; use
+# ctrl_sim_adv when it is the behavior-driven adversary.
+#
+# Unlike every other planner here, CtRL-Sim does not emit an index into the
+# shared 7x13 accel/steer table: it emits a k-disks token, integrated by
+# utils.k_disks_helpers.forward_k_disks. That is how the published method moves
+# agents, and it is a deliberate exception to the "one integrator for every
+# role" property the other planners share.
+#
+# Single-process only: sim.parallel's shared-memory gather is shaped for one
+# flat observation matrix and cannot carry this planner's agent-centric buffers.
+name: ctrl_sim
+checkpoint: ${scratch_root}/checkpoints/ctrl_sim_waymo_1M_steps/last.ckpt
+
+# The model has no PufferDrive conditioning obs; its behaviour knob is `tilt`.
+conditioning: null
+
+# Added to the predicted return-to-go logits before sampling, over the
+# discretized RTG bins (0 = the model's own prediction, untouched). Negative
+# values bias towards LOW return, i.e. towards collisions -- that is the
+# adversarial direction.
+tilt: 0.0
+# Softmax temperature for the action token. 1.0 samples from the model's own
+# action distribution.
+action_temperature: 1.0
+# Sample a return-to-go before each action (the return-conditioned path). With
+# false the stored RTG is used unchanged and `tilt` has no effect.
+predict_rtgs: true

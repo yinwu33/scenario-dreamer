@@ -305,6 +305,50 @@ pure re-scoring with a different `--sut` -- the transfer table costs no generati
   measured with the broken `1.0 / 1.0` PPO config, which reported 9.80% ego
   success where the healthy planner reports 95.21%.
 
+## CtRL-Sim as the Behavior-Driven Baseline
+
+`sim/planners/ctrl_sim.py` runs the frozen CtRL-Sim checkpoint
+(`data/checkpoints/ctrl_sim_waymo_1M_steps/last.ckpt`) as a rollout role. Two
+registry names share it: `ctrl_sim` (tilt 0) and `ctrl_sim_adv` (negative tilt).
+It exists to give the paper the behavior-driven adversary it otherwise never
+compares against.
+
+Three properties that constrain how it may be used:
+
+- **It emits a k-disks token, not an entry of the 7x13 accel/steer table**, and is
+  integrated by `utils.k_disks_helpers.forward_k_disks`. This is the only planner
+  that does not share the common integrator, and the paper states it as an
+  explicit exception.
+- **It has no goal input.** Its agent state is
+  `[x, y, vx, vy, heading, length, width, exist]`. So driving an AdvScene-placed
+  adversary with CtRL-Sim discards the generated goal, i.e. half of what AdvScene
+  produces. A placement x behavior 2x2 built this way does NOT isolate placement:
+  the behavior axis silently removes goal-conditioning too.
+- **It cannot be sharded.** `sim.parallel`'s shared memory is one flat
+  `[rows, obs_dim]` matrix; this planner's input is agent-centric buffers plus
+  lanes. Score it with `--workers 0` (~15 min per 1000 scenes). `sim/parallel.py`
+  raises a named error rather than failing on a missing `obs_dim`.
+
+### Measured, and not worth rediscovering
+
+- **The RTG tilt is a weak knob here.** Forcing the return-to-go to its extremes
+  (bin 349 vs bin 0) moves the action distribution by only TV ~= 0.08, at context
+  depths 0/5/20/40. Since tilt only moves the *sampled* RTG inside that range,
+  that is an upper bound on what any tilt can do, and the measured sweep is flat:
+  ego collision 14.20 / 13.60 / 13.90 / 13.90 at tilt 0 / -2 / -5 / -10.
+  The strength of this baseline comes from the model swap, not from the tilt.
+- **It is not a neutral third SUT.** As traffic at tilt 0 on 1000 log scenes it
+  yields ego `Succ. 89.97 / Coll. 10.78`, against `4.94` for `ppo_normal` traffic
+  and `8.83` for `idm`. It imitates real drivers including bad ones, so using it
+  as a system under test would not be comparable to the other two columns.
+- **As an adversary it beats our method on the log-scene family**: inserted by the
+  proximity rule it reaches `14.20`, against `7.65` for the AdvScene adversary and
+  `6.50` for the same placement driven by `ppo_normal` (PPO SUT, 1000 val scenes).
+  Report this; it is the comparison a reviewer will construct anyway.
+- No behavior-realism metric exists in this repo. The realism proxy covers the
+  INITIALIZATION (spawn overlap) only, so the objection "that baseline is strong
+  because its behavior is implausible" currently cannot be answered with a number.
+
 ## Current PPO Setup
 
 The active planner configs are:

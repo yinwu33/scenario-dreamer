@@ -180,6 +180,11 @@ def concat_metrics(chunks: Sequence[dict[str, np.ndarray]]) -> dict[str, np.ndar
     return {k: np.concatenate([c[k] for c in chunks], axis=0) for k in keys}
 
 
+# Contacts before this many seconds are spawn-adjacent, not developed conflicts.
+# Matches the DDPO reward's own cut-off (see the reward-bands appendix).
+EARLY_COLLISION_S = 0.75
+
+
 def summarize(metrics: dict[str, np.ndarray], *, min_ego_drive: float) -> dict[str, float]:
     """Headline rates, plus the same rates on the driving-ego subset.
 
@@ -202,6 +207,15 @@ def summarize(metrics: dict[str, np.ndarray], *, min_ego_drive: float) -> dict[s
         "ego_offroad_rate_driving": rate(metrics["ego_offroad_proxy"][driving]),
         "ego_fault_collision_rate_driving": rate(
             metrics["ego_fault_collision_any"][driving]
+        ),
+        # A contact inside the first EARLY_COLLISION_S is a spawn-adjacent
+        # placement rather than a conflict that developed during the rollout --
+        # the same distinction the DDPO reward makes when it declines to credit
+        # them. Reporting the late-only rate is what separates an adversary that
+        # creates a situation from one that simply starts on top of the ego.
+        "ego_collision_rate_driving_late": rate(
+            (metrics["ego_collision_any"] > 0)[driving]
+            & (metrics["ego_collision_time"][driving] >= EARLY_COLLISION_S)
         ),
         "ego_offroad_frac_mean_driving": mean_finite(metrics["ego_offroad_frac"][driving]),
         # Diagnostics: a low success rate means something different when most
@@ -316,6 +330,7 @@ SUMMARY_COLUMNS = (
     "ego_collision_rate_driving",
     "ego_offroad_rate_driving",
     "ego_fault_collision_rate_driving",
+    "ego_collision_rate_driving_late",
     "ego_offroad_frac_mean_driving",
     "route_from_graph_rate",
     "route_unavailable_rate",

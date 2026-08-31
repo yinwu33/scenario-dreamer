@@ -427,6 +427,17 @@ class ParallelRolloutRunner(RolloutRunner):
         specs: dict[str, _BufferSpec] = {}
         for role in self._remote_roles:
             planner = self.planners[role]
+            # The shared-memory layout below is one flat [rows, obs_dim] matrix
+            # plus an optional recurrent carry. A planner whose gather is not
+            # that shape (ctrl_sim: agent-centric buffers plus lanes) cannot be
+            # shuttled through it, and would silently be re-batched if it were.
+            if not hasattr(planner, "obs_dim"):
+                raise NotImplementedError(
+                    f"sim.parallel cannot shard a rollout whose {role!r} role is "
+                    f"{planner.name!r}: its plan() input is not a flat observation "
+                    f"matrix, so it has no shared-memory layout here. Run this "
+                    f"rollout single-process (num_workers=0 / --workers 0)."
+                )
             recurrent = bool(planner.recurrent)
             hidden = int(planner.net.hidden_size) if recurrent else 0
 

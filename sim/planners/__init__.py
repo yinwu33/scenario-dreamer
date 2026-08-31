@@ -12,11 +12,16 @@ Two implementations back the current roster:
     checkpoint, different ``conditioning.collision_factor``, i.e. different
     driving styles rather than different policies.
   * ``IDMPlanner`` -- rule-based IDM + pure pursuit on a lane-graph route.
+  * ``CtRLSimPlanner`` -- the frozen CtRL-Sim decision transformer. Its ``tilt``
+    knob biases the predicted return-to-go, so ``ctrl_sim`` is ordinary traffic
+    and ``ctrl_sim_adv`` is the behavior-driven adversary. It is the one planner
+    that does not use the shared accel/steer table (see its module docstring).
 """
 
 from __future__ import annotations
 
 from .base import CONDITIONING_FIELDS, PlanItem, Planner, parse_conditioning, require
+from .ctrl_sim import CtRLSimPlanner
 from .idm import IDMPlanner
 from .ppo import PPOPlanner
 
@@ -29,10 +34,13 @@ PLANNER_REGISTRY: dict[str, type[Planner]] = {
     "ppo_normal": PPOPlanner,
     "ppo_caution": PPOPlanner,
     "idm": IDMPlanner,
+    "ctrl_sim": CtRLSimPlanner,
+    "ctrl_sim_adv": CtRLSimPlanner,
 }
 
 __all__ = [
     "CONDITIONING_FIELDS",
+    "CtRLSimPlanner",
     "IDMPlanner",
     "PLANNER_REGISTRY",
     "PPOPlanner",

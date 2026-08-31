@@ -55,6 +55,9 @@ COLUMNS = (
     ("Off.", "ego_offroad_rate_driving"),
     ("Coll.", "ego_collision_rate_driving"),
     ("Coll._f", "ego_fault_collision_rate_driving"),
+    # Collisions after the first 0.75 s only: an adversary that starts on top of
+    # the ego and one that develops a conflict look identical in Coll. but not here.
+    ("Coll._late", "ego_collision_rate_driving_late"),
 )
 
 
@@ -68,6 +71,8 @@ def _parse():
     p.add_argument("--workers", type=int, default=0)
     p.add_argument("--out", default=None, help="write the markdown table here")
     p.add_argument("--sources", nargs="+", default=list(SOURCES))
+    p.add_argument("--override", action="append", default=[],
+                   help="extra hydra override, repeatable (e.g. planner.adv.tilt=-10)")
     return p.parse_args()
 
 
@@ -81,6 +86,7 @@ def main() -> int:
                 f"planner@planner.sut={args.sut}",
                 f"planner@planner.env={args.env}",
                 f"planner@planner.adv={adv}",
+                *args.override,
             ],
         )
     runner = build_runner(cfg, num_workers=int(args.workers), batch_size=int(args.batch_size))
@@ -106,7 +112,8 @@ def main() -> int:
 
     header = f"| source | n_driving | " + " | ".join(c[0] for c in COLUMNS) + " |"
     lines = [
-        f"cell: SUT={args.sut}  traffic={args.env}  adv={adv}",
+        f"cell: SUT={args.sut}  traffic={args.env}  adv={adv}"
+        + (f"  [{' '.join(args.override)}]" if args.override else ""),
         "metrics: planner-quality (ego vs ANY vehicle), driving-ego subset",
         "",
         header,
