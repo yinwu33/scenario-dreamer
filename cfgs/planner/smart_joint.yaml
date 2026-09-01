@@ -1,0 +1,21 @@
+# smart family, JOINT variant: SMART's factorised attention (smart/joint_planner.py).
+#
+# A scene is processed once and an agent attends to the ENCODED motion of the
+# other agents and to the map, instead of reading seven handcrafted numbers per
+# neighbour out of its own flat row. That is what SMART does, and it is why this
+# planner CANNOT be sharded: its input is per-scene, so sim/parallel.py refuses
+# it by name and it must run with --workers 0. Use cfgs/planner/smart*.yaml (the
+# per-agent net) for anything that has to go inside DDPO.
+name: smart_joint
+weights: random
+device: auto
+deterministic: true
+temperature: 1.0
+seed: 0
+
+conditioning: null
+
+policy:
+  hidden_size: 128
+  num_layers: 3
+  num_heads: 4

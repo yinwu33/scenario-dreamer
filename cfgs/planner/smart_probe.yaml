@@ -1,0 +1,30 @@
+# smart family, PROBE variant: the SMART-style traffic net (smart/planner.py)
+# with UNTRAINED weights. It exists for one purpose -- measuring what this
+# planner costs in a sharded rollout before any training is spent -- so it must
+# never appear in a results table. `weights: random` is seeded, so the cost
+# measurement is reproducible.
+#
+# The trained variant will be cfgs/planner/smart.yaml with `weights` pointing at
+# a checkpoint; everything else below is the architecture and must match it.
+#
+# This file is the COMPLETE config of the net: smart/net.py has no
+# defaults file and no built-in fallbacks, so removing a key below raises rather
+# than quietly building a differently-shaped network.
+name: smart_probe
+weights: random
+device: auto
+deterministic: true
+# Only read when deterministic is false.
+temperature: 1.0
+# Seeds both the untrained weights and the action sampler.
+seed: 0
+
+# This net has no PufferDrive conditioning slots: how defensively it drives is
+# whatever it imitates from the data, not a dial. Declared null explicitly
+# because sim/runner.py requires every role's planner to state it.
+conditioning: null
+
+policy:
+  hidden_size: 128
+  num_layers: 4
+  num_heads: 4
