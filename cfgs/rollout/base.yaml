@@ -50,3 +50,11 @@ goal_speed: 100.0
 goal_behavior: remove
 map_extent: 72.0
 max_controlled_agents: 64
+# True: a general ego<->vehicle contact freezes the ego (sim.world.latch_ego_crash),
+# so a scene with a collision can never also reach the goal -- this is what every
+# existing run (DDPO, the benchmark table) uses. False: only the vehicle the ego
+# hit freezes; the ego keeps driving on its planner's actions. Diagnostic-only,
+# for measuring the geometric completion rate decoupled from the collision
+# freeze -- override per-run (planner.sim.ego_crash_freeze=false), do not flip
+# the shared default.
+ego_crash_freeze: true

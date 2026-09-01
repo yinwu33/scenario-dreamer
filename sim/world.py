@@ -112,6 +112,13 @@ class SimConfig:
     goal_behavior: str
     map_extent: float
     max_controlled_agents: int
+    # True (default, matches every existing run): a general ego<->vehicle
+    # contact freezes the ego (see latch_ego_crash) so it can never reach its
+    # goal after crashing. False: only the vehicle the ego hit is frozen: the
+    # ego keeps driving on its planner's actions. Diagnostic-only knob for
+    # measuring the geometric completion rate decoupled from the collision
+    # freeze; DDPO / the standard benchmark must keep this True.
+    ego_crash_freeze: bool
 
 
 def load_sim_config(cfg) -> SimConfig:
@@ -300,6 +307,7 @@ class SimScene:
                 f"got {cfg.goal_behavior!r}"
             )
         self.goal_behavior = cfg.goal_behavior
+        self.ego_crash_freeze = bool(cfg.ego_crash_freeze)
         # Half-extent of the square map. Non-ego agents whose centre leaves
         # [-map_half, map_half] in x or y are removed (remove_out_of_bounds),
         # under every lifecycle except 'continue'.
@@ -628,7 +636,9 @@ class SimScene:
         self.last_ego_fault_partners = hit[fault_mask].copy()
         if fault_mask.any():
             self.ego_caused_collision = True
-        crashed_now = np.concatenate(([0], hit)).astype(np.int64)
+        crashed_now = (
+            np.concatenate(([0], hit)) if self.ego_crash_freeze else hit
+        ).astype(np.int64)
         self.crashed[crashed_now] = True
         self.vx[crashed_now] = 0.0
         self.vy[crashed_now] = 0.0
