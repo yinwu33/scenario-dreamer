@@ -1,0 +1,38 @@
+# Centerline-only PDM-Closed adaptation (sim/planners/pdm.py).
+#
+# Rule-based and checkpoint-free. It reuses IDM's lane-graph route and expands
+# several longitudinal IDM policies over that one centerline. Proposals are
+# scored by collision, short-horizon TTC and route progress; comfort and
+# nuPlan-only map semantics are intentionally absent.
+name: pdm
+conditioning: null
+
+# Shared IDM dynamics. The proposal grid below varies the three behaviour
+# parameters that most directly trade progress against yielding.
+target_speed: 15.0
+min_gap: 1.0
+headway_time: 1.5
+max_accel: 2.0
+comfort_decel: 6.0
+accel_exponent: 4.0
+
+lateral_margin: 0.3
+lead_search_radius: 40.0
+
+lookahead_time: 0.9
+lookahead_min: 3.0
+lookahead_max: 12.0
+steer_preview_steps: 5
+
+route:
+  spacing: 1.0
+  max_depth: 12
+
+proposal:
+  horizon_steps: 30       # 3 s at rollout dt=0.1
+  ttc_steps: 10           # continue proposals 1 s for the TTC score
+  target_speeds: [8.0, 12.0, 15.0]
+  min_gaps: [1.0]
+  headway_times: [0.8, 1.5, 2.2]
+  progress_weight: 5.0
+  ttc_weight: 5.0

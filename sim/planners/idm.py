@@ -49,6 +49,64 @@ _IDLE_STEER_IDX = int(np.argmin(np.abs(STEERING_VALUES)))
 IDLE_ACTION = _IDLE_ACCEL_IDX * NUM_STEER + _IDLE_STEER_IDX
 
 
+def steering_indices(
+    route: Route,
+    s_ego: np.ndarray,
+    x: np.ndarray,
+    y: np.ndarray,
+    heading: np.ndarray,
+    length: float,
+    signed_speed: np.ndarray,
+    accel: np.ndarray,
+    dt: float,
+    *,
+    lookahead_time: float,
+    lookahead_min: float,
+    lookahead_max: float,
+    preview_steps: int,
+) -> np.ndarray:
+    """Vectorized discrete pure-pursuit action used by IDM-style planners."""
+    s_ego = np.asarray(s_ego, dtype=np.float64)
+    x = np.asarray(x, dtype=np.float64)
+    y = np.asarray(y, dtype=np.float64)
+    heading = np.asarray(heading, dtype=np.float64)
+    signed_speed = np.asarray(signed_speed, dtype=np.float64)
+    accel = np.asarray(accel, dtype=np.float64)
+
+    lookahead = np.clip(
+        lookahead_time * np.abs(signed_speed), lookahead_min, lookahead_max
+    )
+    target_s = s_ego + lookahead
+    target = np.stack(
+        [
+            np.interp(target_s, route.cum, route.points[:, 0]),
+            np.interp(target_s, route.cum, route.points[:, 1]),
+        ],
+        axis=-1,
+    )
+    past_end = target_s > route.total
+    target[past_end] = (
+        route.points[-1]
+        + (target_s[past_end] - route.total)[:, None] * route.end_tangent
+    )
+
+    steer = STEERING_VALUES[None, :]
+    beta = np.tanh(0.5 * np.tan(steer))
+    speed = np.clip(signed_speed + accel * dt, -100.0, 100.0)[:, None]
+    px = np.broadcast_to(x[:, None], (len(x), NUM_STEER)).copy()
+    py = np.broadcast_to(y[:, None], (len(y), NUM_STEER)).copy()
+    ph = np.broadcast_to(heading[:, None], (len(heading), NUM_STEER)).copy()
+    yaw_rate = speed * np.cos(beta) * np.tan(steer) / length
+    for _ in range(max(preview_steps, 1)):
+        px += speed * np.cos(ph + beta) * dt
+        py += speed * np.sin(ph + beta) * dt
+        ph += yaw_rate * dt
+    return np.argmin(
+        (px - target[:, 0, None]) ** 2 + (py - target[:, 1, None]) ** 2,
+        axis=1,
+    )
+
+
 class IDMPlanner(Planner):
     def __init__(self, planner_cfg, *, role: str, device: str | None = None):
         super().__init__(planner_cfg, role=role, device=device)
@@ -200,25 +258,23 @@ class IDMPlanner(Planner):
         steps (rather than one) accounts for the heading catching up to the slip
         angle, which is what stops the agent from crabbing and oscillating.
         """
-        lookahead = float(
-            np.clip(self.lookahead_time * abs(signed_speed), self.lookahead_min, self.lookahead_max)
+        return int(
+            steering_indices(
+                route,
+                np.array([s_ego]),
+                np.array([sim.x[i]]),
+                np.array([sim.y[i]]),
+                np.array([sim.heading[i]]),
+                float(sim.length[i]),
+                np.array([signed_speed]),
+                np.array([accel]),
+                dt,
+                lookahead_time=self.lookahead_time,
+                lookahead_min=self.lookahead_min,
+                lookahead_max=self.lookahead_max,
+                preview_steps=self.steer_preview_steps,
+            )[0]
         )
-        target = route.point_at(s_ego + lookahead)
-
-        steer = STEERING_VALUES                                  # [13]
-        beta = np.tanh(0.5 * np.tan(steer))
-        # Speed is shared by all candidates: the acceleration is already chosen.
-        speed = np.clip(signed_speed + accel * dt, -100.0, 100.0)
-
-        x = np.full(NUM_STEER, sim.x[i], dtype=np.float64)
-        y = np.full(NUM_STEER, sim.y[i], dtype=np.float64)
-        heading = np.full(NUM_STEER, sim.heading[i], dtype=np.float64)
-        yaw_rate = speed * np.cos(beta) * np.tan(steer) / float(sim.length[i])
-        for _ in range(max(self.steer_preview_steps, 1)):
-            x += speed * np.cos(heading + beta) * dt
-            y += speed * np.sin(heading + beta) * dt
-            heading += yaw_rate * dt
-        return int(np.argmin((x - target[0]) ** 2 + (y - target[1]) ** 2))
 
     # --------------------------------------------------------------- plan
     def plan(self, items: Sequence[PlanItem]) -> list:
