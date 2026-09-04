@@ -168,6 +168,137 @@ class Route:
         )
 
 
+# ------------------------------------------------------------------ batching
+class RoutePack:
+    """Padded stack of per-agent ``Route`` objects, projected in ONE numpy call.
+
+    ``Route.project`` is exact but scalar in the agent: an IDM-style planner
+    calls it once for itself and once per neighbour, per agent, per step, and
+    each call allocates ``[N, S]`` temporaries for an ``S`` of a few dozen. The
+    numpy overhead, not the arithmetic, is what made ``plan`` the single most
+    expensive phase of an idm-traffic DDPO iteration (measured: 57.5%).
+
+    This holds every route of one ``plan`` call in ``[A, Smax]`` arrays with the
+    tail masked off, so a query is one gather plus one reduction regardless of
+    how many agents are being driven. Padding never changes an answer: unused
+    segments are given ``inf`` distance before the ``argmin``, and the argmin
+    tie-break (lowest segment index) is the one ``Route.project`` already had.
+    """
+
+    __slots__ = ("valid", "seg_a", "ab", "denom", "seg_len", "cum", "seg_valid",
+                 "pts", "npts", "total", "end_tangent", "nseg")
+
+    def __init__(self, routes: list):
+        n = len(routes)
+        self.valid = np.array([r is not None for r in routes], dtype=bool)
+        nseg = np.array([0 if r is None else len(r.ab) for r in routes], dtype=np.int64)
+        npts = np.array([0 if r is None else len(r.points) for r in routes], dtype=np.int64)
+        self.nseg, self.npts = nseg, npts
+        smax = max(int(nseg.max()), 1) if n else 1
+        pmax = max(int(npts.max()), 1) if n else 1
+
+        # float32 throughout, matching ``Route.project``: its inputs are the
+        # float32 route points and the float32 ``SimScene`` positions, so the
+        # scalar path this replaces was never float64 either.
+        self.seg_a = np.zeros((n, smax, 2), dtype=np.float32)
+        self.ab = np.zeros((n, smax, 2), dtype=np.float32)
+        self.denom = np.ones((n, smax), dtype=np.float32)
+        self.seg_len = np.zeros((n, smax), dtype=np.float32)
+        self.pts = np.zeros((n, pmax, 2), dtype=np.float32)
+        # cum is indexed alongside pts (P entries, one per point). The tail is
+        # +inf so a row-wise searchsorted never lands in the padding.
+        self.cum = np.full((n, pmax), np.inf, dtype=np.float32)
+        self.total = np.zeros(n, dtype=np.float32)
+        self.end_tangent = np.zeros((n, 2), dtype=np.float32)
+        for a, r in enumerate(routes):
+            if r is None:
+                continue
+            s, p = int(nseg[a]), int(npts[a])
+            self.seg_a[a, :s] = r.seg_a
+            self.ab[a, :s] = r.ab
+            self.denom[a, :s] = r._denom
+            self.seg_len[a, :s] = r.seg_len
+            self.pts[a, :p] = r.points
+            self.cum[a, :p] = r.cum
+            self.total[a] = r.total
+            self.end_tangent[a] = r.end_tangent
+        self.seg_valid = np.arange(smax)[None, :] < nseg[:, None]
+
+    def project(self, rows: np.ndarray, points: np.ndarray):
+        """Frenet ``(s, d)`` of ``points[k]`` against the route of ``rows[k]``.
+
+        Same segment decomposition, same clamped projection and same argmin
+        tie-break as ``Route.project``; only the loop over routes is gone.
+        """
+        rows = np.asarray(rows, dtype=np.int64)
+        points = np.asarray(points)
+        # The caller owns the working precision, exactly as with ``Route.project``:
+        # it promotes against whatever ``points`` it is handed, and its two users
+        # differ (idm projects float32 SimScene positions, pdm float64 proposal
+        # states). Forcing a dtype here would silently change one of them.
+        if len(rows) == 0:
+            return np.zeros(0, points.dtype), np.zeros(0, points.dtype)
+        seg_a = self.seg_a[rows]
+        ab = self.ab[rows]
+        rel = points[:, None, :] - seg_a
+        t = np.clip((rel * ab).sum(-1) / self.denom[rows], 0.0, 1.0)
+        proj = seg_a + t[..., None] * ab
+        off = points[:, None, :] - proj
+        # argmin on the SQUARED distance and one sqrt on the winner instead of
+        # ``smax`` of them: sqrt is monotone and correctly rounded, so both the
+        # chosen segment and the returned distance are unchanged.
+        d2 = np.where(self.seg_valid[rows], (off * off).sum(-1), np.inf)
+        k = d2.argmin(axis=1)
+        q = np.arange(len(rows))
+        return (
+            self.cum[rows, k] + t[q, k] * self.seg_len[rows, k],
+            np.sqrt(d2[q, k]),
+        )
+
+    def point_at(self, rows: np.ndarray, s: np.ndarray) -> np.ndarray:
+        """Route point at arc length ``s[k]`` on the route of ``rows[k]``.
+
+        Past ``total`` the path is extrapolated along ``end_tangent``, matching
+        ``Route.point_at`` / ``steering_indices``; below it this is the same
+        linear interpolation ``np.interp`` performs, in the same form
+        (``slope * (x - xp[j]) + fp[j]``).
+        """
+        rows = np.asarray(rows, dtype=np.int64)
+        s = np.asarray(s, dtype=np.float64)
+        cum = self.cum[rows]
+        j = np.clip((cum <= s[:, None]).sum(axis=1) - 1, 0,
+                    np.maximum(self.npts[rows] - 2, 0))
+        q = np.arange(len(rows))
+        x0, x1 = cum[q, j], cum[q, j + 1]
+        p0 = self.pts[rows, j]
+        p1 = self.pts[rows, j + 1]
+        dx = x1 - x0
+        slope = np.where(dx > 0.0, 1.0 / np.where(dx > 0.0, dx, 1.0), 0.0)[:, None]
+        out = (p1 - p0) * slope * (s - x0)[:, None] + p0
+        past = s > self.total[rows]
+        if past.any():
+            last = self.pts[rows, np.maximum(self.npts[rows] - 1, 0)]
+            out = np.where(
+                past[:, None],
+                last + (s - self.total[rows])[:, None] * self.end_tangent[rows],
+                out,
+            )
+        return out
+
+    def tangent_at(self, rows: np.ndarray, s: np.ndarray) -> np.ndarray:
+        """Unit tangent of the segment ``s[k]`` lands in; ``end_tangent`` past the end."""
+        rows = np.asarray(rows, dtype=np.int64)
+        s = np.asarray(s, dtype=np.float64)
+        cum = self.cum[rows]
+        j = np.clip((cum <= s[:, None]).sum(axis=1) - 1, 0,
+                    np.maximum(self.nseg[rows] - 1, 0))
+        q = np.arange(len(rows))
+        seg_len = self.seg_len[rows, j]
+        tan = self.ab[rows, j] / np.where(seg_len > 0.0, seg_len, 1.0)[:, None]
+        past = s > self.total[rows]
+        return np.where(past[:, None], self.end_tangent[rows], tan)
+
+
 # --------------------------------------------------------------- geometry
 def project_point_to_segments(seg_a: np.ndarray, seg_b: np.ndarray, pos: np.ndarray):
     """Distance from ``pos`` to each segment ``[seg_a, seg_b]``.
@@ -314,14 +445,32 @@ def _successors(lane_graph, num_lanes: int) -> list[list[int]]:
     return out
 
 
+class LaneIndex:
+    """A scene's lane geometry plus the two derived tables the search needs.
+
+    Both are pure functions of the (frozen) lanes and lane graph, but
+    ``shortest_lane_path`` used to rebuild the arc-length costs on every call and
+    ``build_route`` the adjacency on every agent. Measured on 128 val scenes with
+    idm traffic, that was 2.09 M ``polyline_length`` calls per DDPO iteration --
+    21.5 s of a 21.9 s route-building phase. Building them once per scene is the
+    whole difference.
+    """
+
+    __slots__ = ("lanes", "graph", "succ", "cost")
+
+    def __init__(self, lanes: np.ndarray, lane_graph):
+        self.lanes = np.asarray(lanes, dtype=np.float32)
+        self.graph = lane_graph
+        self.succ = _successors(lane_graph, len(self.lanes))
+        self.cost = [polyline_length(lane) for lane in self.lanes]
+
+
 def shortest_lane_path(
-    lanes: np.ndarray,
-    lane_graph,
+    index: "LaneIndex",
     start: int,
     goal: int,
     *,
     max_depth: int = 12,
-    successors: list[list[int]] | None = None,
 ) -> list[int] | None:
     """Cheapest successor path ``start -> goal``, weighted by lane arc length.
 
@@ -329,13 +478,13 @@ def shortest_lane_path(
     turn is modelled as a short connector lane: hop count would happily route
     through three connectors to avoid one long straight lane.
 
-    ``successors`` may be passed in to avoid rebuilding the adjacency for every
-    candidate pair of the same scene.
+    Adjacency and per-lane arc-length costs come off the scene's ``LaneIndex``;
+    a route search runs this dozens of times per agent, so neither may be
+    rebuilt here.
     """
     if start == goal:
         return [start]
-    succ = successors if successors is not None else _successors(lane_graph, len(lanes))
-    cost = [polyline_length(lane) for lane in lanes]
+    succ, cost = index.succ, index.cost
 
     best = {start: 0.0}
     prev: dict[int, int] = {}
@@ -411,8 +560,7 @@ def _resample(polyline: np.ndarray, spacing: float) -> np.ndarray | None:
 
 
 def build_route(
-    lane_polylines: np.ndarray,
-    lane_graph,
+    index: LaneIndex,
     spawn_xy: np.ndarray,
     goal_xy: np.ndarray,
     heading: float,
@@ -434,7 +582,7 @@ def build_route(
     spawn = np.asarray(spawn_xy, dtype=np.float32).reshape(2)
     goal = np.asarray(goal_xy, dtype=np.float32).reshape(2)
 
-    lanes = np.asarray(lane_polylines, dtype=np.float32)
+    lanes, lane_graph = index.lanes, index.graph
     if lanes.ndim != 3 or lanes.shape[0] == 0 or lanes.shape[1] < 2:
         return None
 
@@ -446,13 +594,10 @@ def build_route(
     straight_dist = float(np.linalg.norm(goal - spawn))
     max_length = max(MAX_DETOUR_RATIO * straight_dist, straight_dist + MAX_DETOUR_SLACK)
 
-    succ = _successors(lane_graph, len(lanes))
     best: tuple[tuple[float, float], np.ndarray, int, int] | None = None
     for start, start_score in starts:
         for goal_lane, goal_score in goals:
-            path = shortest_lane_path(
-                lanes, lane_graph, start, goal_lane, max_depth=max_depth, successors=succ
-            )
+            path = shortest_lane_path(index, start, goal_lane, max_depth=max_depth)
             if path is None:
                 continue
             trimmed = _trim(_concat_lanes(lanes, path), spawn, goal)

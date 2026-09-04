@@ -23,7 +23,10 @@ accel_exponent: 4.0     # delta, the usual IDM value
 # Half-width slack added to (w_ego + w_other)/2 when deciding whether a vehicle
 # is in our corridor. Larger => more conservative (yields to adjacent traffic).
 lateral_margin: 0.3
-lead_search_radius: 40.0  # [m] broad-phase gate before the Frenet projection
+lead_search_radius: 40.0  # [m] FREE-FLOW broad-phase gate before the Frenet
+                          # projection. Raised at speed to v^2/2a + min_gap +
+                          # length so the gate never hides a lead the action
+                          # table could still brake for (IDMPlanner._search_radius).
 
 # --- pure pursuit ---
 lookahead_time: 0.9       # lookahead = clip(t * speed, min, max)
