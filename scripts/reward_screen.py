@@ -117,6 +117,8 @@ def _variant_overlays(base_it: int) -> dict[str, dict]:
         # Whole-yaml variant, scored as-is.
         "tiered":              "yaml:tiered",
         "hierarchical":        "yaml:hierarchical",
+        "hierarchical_v3":     "yaml:hierarchical_v3",
+        "hierarchical_v4":     "yaml:hierarchical_v4",
     }
 
 
