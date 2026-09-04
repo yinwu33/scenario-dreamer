@@ -1,0 +1,67 @@
+# @package _global_
+#
+# Four-level ego-fault reward (ddpo/reward/hierarchical_v3.py):
+#
+#   invalid  ->  ego-fault collision  ->  min TTC_ego  ->  d_min
+#
+# Every level above `invalid` measures the SAME phenomenon -- the ego running
+# into the adversary -- at a different severity, because `ego_min_ttc` and
+# `ego_fault_collision` share the `_ego_aggressor_mask` gate (front-face contact
+# + a moving ego). `hierarchical` mixed a fault-agnostic collision level with an
+# ego-gated TTC level, which is why its ego-fault bonus never produced gradient:
+# under the old closing-velocity fault test 81% of collisions were ego-fault, so
+# the bonus was nearly a constant offset on the collision band and GRPO's
+# per-group whitening removed it. Measured under the current fault test on
+# ppo-ppo_norm base_gen: fault|collision = 44.4%, i.e. the flag now discriminates.
+#
+#   python train.py --config-name config_ldm_adv_ddpo ddpo/reward=hierarchical_v3
+
+ddpo:
+  reward_run_tag: "_hier_v3"
+
+  simulator:
+    path_conflict:
+      conflict_dist: 14.0
+      speed_floor: 1.0
+      follow_cos: 1.1
+      follow_lane_tol: 2.0
+      skip_rollout: true
+
+  reward:
+    name: hierarchical_v3
+
+    ttc_tau: 3.0
+
+    # A contact this early is a placement artifact, not a scenario: invalid.
+    # Note the cliff -- 1.05 s scores +1 and 0.95 s scores -1 -- accepted
+    # because contact time is mostly set by the spawn, which the policy controls.
+    hard_collision_t: 1.0
+
+    # Proximity level: linear ramp on ABSOLUTE d_min (post-warmup), zero unless
+    # the adversary closed in by more than close_delta. Without that gate,
+    # spawning alongside the ego and driving parallel tops the level for free.
+    d_near: 2.0
+    d_far: 20.0
+    close_delta: 1.0
+
+    # Levels. prox_hi <= ttc_lo < ttc_hi < r_collision is asserted in
+    # __post_init__, so the ordering cannot silently break. The TTC ceiling sits
+    # BELOW the collision base on purpose: fault|collision is only 44%, so if a
+    # near miss could outscore a collision the policy would learn to stop short.
+    r_invalid: -1.0
+    r_collision: 0.9
+    r_fault_bonus: 0.1
+    ttc_lo: 0.4
+    ttc_hi: 0.85
+    prox_hi: 0.3
+
+    # Unused by v3 (no lane cost, no soft collision ramp) but required by
+    # BaseRewardConfig; kept at the hierarchical_v2 values so a diff of the two
+    # yamls shows only what actually differs.
+    lane_soft: 1.75
+    lane_hard: 2.75
+    lane_penalty: 0.0
+    collision_warmup: 0.75
+    collision_window: 0.5
+    trivial_collision_t: 0.75
+    invalid_grade_scale: 10.0

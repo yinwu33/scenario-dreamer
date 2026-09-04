@@ -7,10 +7,11 @@ from omegaconf import DictConfig, OmegaConf
 from ddpo.reward.base import BaseRewardConfig, RewardAssembler
 from ddpo.reward.flat import FlatReward
 from ddpo.reward.hierarchical import HierarchicalReward
+from ddpo.reward.hierarchical_v3 import HierarchicalV3Reward
 from ddpo.reward.tiered import TieredReward
 
 REWARDS: dict[str, type[RewardAssembler]] = {
-    cls.name: cls for cls in (FlatReward, TieredReward, HierarchicalReward)
+    cls.name: cls for cls in (FlatReward, TieredReward, HierarchicalReward, HierarchicalV3Reward)
 }
 
 
