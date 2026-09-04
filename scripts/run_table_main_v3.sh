@@ -91,9 +91,31 @@ for spec in $CELLS; do
       --ddpo-ckpt "$CKPT"
     echo "[cell] $CELL generate done"
   fi
-  # proximity_adv is a geometric rule on log scenes, not a model output: reuse.
-  ln -sf $PROJECT_ROOT/$OLD/$CELL/artifacts/proximity_adv.pt $CDIR/artifacts/proximity_adv.pt \
-    || echo "[cell] $CELL: no proximity_adv artifact to reuse"
+  # proximity_adv is a geometric rule, but over THIS cell's own `original`
+  # scenes, so it cannot simply be shared between cells.
+  #
+  # The previous form -- an unconditional `ln -sf` with an `|| echo` guard --
+  # could not work: ln succeeds on a missing target, it just leaves a dangling
+  # symlink, so the guard never fired and score_adv_sources.py died in
+  # torch.load instead. That is what it did for every cell the 20260830 table
+  # has no artifact for, i.e. all four pdm ones.
+  PROX=$CDIR/artifacts/proximity_adv.pt
+  OLD_PROX=$PROJECT_ROOT/$OLD/$CELL/artifacts/proximity_adv.pt
+  if [ -e "$PROX" ]; then
+    echo "[cell] $CELL proximity_adv: already present"
+  elif [ -f "$OLD_PROX" ]; then
+    ln -sf "$OLD_PROX" "$PROX"
+    echo "[cell] $CELL proximity_adv: reused from $OLD"
+  else
+    # -e above is false for a dangling link, but writing through one would land
+    # the file in the OLD table's directory, so drop it first.
+    rm -f "$PROX"
+    .venv/bin/python scripts/make_proximity_adv.py \
+      --original $CDIR/artifacts/original.pt \
+      --reference $CDIR/artifacts/ddpo_gen.pt \
+      --out "$PROX"
+    echo "[cell] $CELL proximity_adv: generated at the default 8 m clearance"
+  fi
 
   # -- 3. score in the adversarial scope ------------------------------------
   # skip_rollout=false: the path-conflict screen retires non-conflicting scenes
