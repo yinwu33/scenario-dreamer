@@ -92,7 +92,7 @@ def main() -> int:
     runner = build_runner(cfg, num_workers=int(args.workers), batch_size=int(args.batch_size))
     min_ego_drive = float(cfg.benchmark.min_ego_drive)
 
-    summaries = {}
+    summaries, per_scene = {}, {}
     art = Path(args.artifacts)
     for source in args.sources:
         blob = torch.load(art / f"{source}.pt", map_location="cpu", weights_only=False)
@@ -105,7 +105,12 @@ def main() -> int:
             metrics, _ = evaluate_scenes(runner, cfg, scenes)
             chunks.append(metrics)
             print(f"[score] {source} {end}/{n}", flush=True)
-        summaries[source] = summarize(concat_metrics(chunks), min_ego_drive=min_ego_drive)
+        metrics = concat_metrics(chunks)
+        summaries[source] = summarize(metrics, min_ego_drive=min_ego_drive)
+        # The sources are the SAME scenes, so the comparison between two rows is
+        # paired; keeping the per-scene flags lets McNemar run without a rollout.
+        for key, arr in metrics.items():
+            per_scene[f"{source}/{key}"] = arr
     if args.workers:
         # Rollout workers outlive the script as orphans otherwise.
         runner.close()
@@ -131,7 +136,8 @@ def main() -> int:
         Path(args.out).with_suffix(".json").write_text(
             json.dumps(summaries, indent=2), encoding="utf-8"
         )
-        print(f"\n[score] wrote {args.out}")
+        np.savez_compressed(Path(args.out).with_suffix(".npz"), **per_scene)
+        print(f"\n[score] wrote {args.out} (+ .json, .npz)")
     return 0
 
 

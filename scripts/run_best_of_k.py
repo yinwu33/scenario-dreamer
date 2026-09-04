@@ -79,6 +79,11 @@ def _parse():
     p.add_argument("--benchmark-batch-size", type=int, default=256)
     p.add_argument("--workers", type=int, default=0)
     p.add_argument("--base-ckpt", default=None)
+    p.add_argument("--uncond-adv", action="store_true",
+                   help="draw the adversary with every adv conditioning field at its "
+                        "trained null token instead of the run's adv_cond_target. Isolates "
+                        "what the conditional adversary branch contributes, and writes to a "
+                        "base_gen_uncond_bok* namespace so both variants can coexist.")
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     return p.parse_args()
 
@@ -134,7 +139,8 @@ def main() -> int:
     base_ckpt = args.base_ckpt or str(cfg_root.ddpo.ldm_adv_ckpt)
 
     out_dir = Path(args.out_dir)
-    chunk_dir = out_dir / "artifacts" / f"base_gen_bok{k}"
+    prefix = "base_gen_uncond_bok" if args.uncond_adv else "base_gen_bok"
+    chunk_dir = out_dir / "artifacts" / f"{prefix}{k}"
     chunk_dir.mkdir(parents=True, exist_ok=True)
     n = int(args.num_scenes)
     size = int(args.chunk_size)
@@ -157,6 +163,12 @@ def main() -> int:
         _seed_all(args.seed * 1_000_003 + 1000 + chunk_id, args.device)
         x_agent, x_lane = sample_base_scene_latents(policy, cond)
         gen_cond = make_generated_cond(policy, cond, x_agent, x_lane)
+        if args.uncond_adv:
+            # 1-D mask: dit_ex._cond_drop_mask broadcasts it across the four adv
+            # fields, so every one falls back to the null token the base model was
+            # trained with (cond_dropout_prob = 0.2).
+            gen_cond["adv"].cond_drop = torch.ones(
+                gen_cond["adv"].cond.shape[0], dtype=torch.long)
 
         payloads = []
         for i in range(k):
@@ -215,7 +227,7 @@ def main() -> int:
     for budget in _ladder(k):
         merged = cat_payloads([b["payloads"][budget] for b in blobs])
         metadata = build_metadata(
-            source=f"base_gen_bok{budget}",
+            source=f"{prefix}{budget}",
             config_name=args.config_name,
             overrides=list(args.overrides),
             split=args.split,
@@ -227,7 +239,7 @@ def main() -> int:
             cfg_root=cfg_root,
         )
         metadata["num_draws"] = budget
-        merged_path = out_dir / "artifacts" / f"base_gen_bok{budget}.pt"
+        merged_path = out_dir / "artifacts" / f"{prefix}{budget}.pt"
         torch.save({"payload": merged, "metadata": metadata}, merged_path)
         print(f"[bok] wrote {merged_path}", flush=True)
 
@@ -235,7 +247,8 @@ def main() -> int:
     C = np.concatenate([b["ego_collision"] for b in blobs], axis=0)
     keep = ego_goal_dist(merged) >= float(cfg_root.ddpo.min_ego_drive)
     curve = _curve(R, C, keep)
-    write_json(out_dir / f"bok{k}_curve.json", {
+    curve_name = f"{'uncond_' if args.uncond_adv else ''}bok{k}_curve.json"
+    write_json(out_dir / curve_name, {
         "num_draws": k,
         "num_scenes": int(R.shape[0]),
         "num_driving_ego": int(keep.sum()),
