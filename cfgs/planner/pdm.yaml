@@ -17,7 +17,7 @@ comfort_decel: 6.0
 accel_exponent: 4.0
 
 lateral_margin: 0.3
-lead_search_radius: 40.0
+lead_search_radius: 40.0  # free-flow gate; grows with v^2/2a (see idm.yaml)
 
 lookahead_time: 0.9
 lookahead_min: 3.0
@@ -31,8 +31,18 @@ route:
 proposal:
   horizon_steps: 30       # 3 s at rollout dt=0.1
   ttc_steps: 10           # continue proposals 1 s for the TTC score
-  target_speeds: [8.0, 12.0, 15.0]
+  # PDM-Closed's proposal set: {20,40,60,80,100}% of the target speed crossed
+  # with lateral centerline offsets {-1,0,+1} m = 15 proposals. The lateral axis
+  # is what makes a proposal set stronger than one IDM policy -- without it every
+  # proposal follows the identical path and the selection can only pick a speed.
+  # Standstill gap and headway are NOT proposal axes in PDM; they stay scalar.
+  target_speeds: [3.0, 6.0, 9.0, 12.0, 15.0]
   min_gaps: [1.0]
-  headway_times: [0.8, 1.5, 2.2]
+  headway_times: [1.5]
+  lateral_offsets: [-1.0, 0.0, 1.0]
   progress_weight: 5.0
   ttc_weight: 5.0
+  # Score cost per metre of lateral deviation. Small against the collision gate
+  # (a genuine evasion is worth up to progress_weight + ttc_weight), but large
+  # enough that an offset is never taken on a tie -- see PDMPlanner scoring.
+  offset_weight: 0.2

@@ -28,11 +28,13 @@ def _planner_cfg():
         "proposal": {
             "horizon_steps": 20,
             "ttc_steps": 10,
-            "target_speeds": [8.0, 12.0, 15.0],
+            "target_speeds": [3.0, 6.0, 9.0, 12.0, 15.0],
             "min_gaps": [1.0],
-            "headway_times": [0.8, 1.5, 2.2],
+            "headway_times": [1.5],
+            "lateral_offsets": [-1.0, 0.0, 1.0],
             "progress_weight": 5.0,
             "ttc_weight": 5.0,
+            "offset_weight": 0.2,
         },
     }
 
