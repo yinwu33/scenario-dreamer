@@ -77,6 +77,7 @@ SOURCES = ("original", "base_gen", "ddpo_gen", "original_ddpo_adv")
 METRIC_KEYS = (
     "reached_goal",
     "ego_collision",
+    "ego_fault_collision",
     "ego_offroad_proxy",
     "ego_offroad_frac",
     "ego_lane_dist_max",
@@ -560,6 +561,7 @@ def summarize(metrics: dict[str, np.ndarray], *, min_ego_drive: float) -> dict[s
         "ego_collision_rate_driving": _rate(metrics["ego_collision"][driving]),
         "ego_offroad_rate_driving": _rate(metrics["ego_offroad_proxy"][driving]),
         "ego_min_ttc_mean_driving": _mean_finite(metrics["ego_min_ttc"][driving]),
+        "ego_fault_collision_rate_driving": _rate(metrics["ego_fault_collision"][driving]),
     }
     if "gen_agent_is_invalid" in metrics:
         summary["gen_agent_invalid_rate"] = _rate(metrics["gen_agent_is_invalid"])
