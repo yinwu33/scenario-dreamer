@@ -1,11 +1,26 @@
 """Sharded rollout: the same step loop, split across worker processes.
 
-The rollout is the DDPO iteration's long pole (~66% of wall clock, measured with
-``scripts/profile_ddpo.py``), and almost all of it is pure-numpy per-scene work
-in ``sim.world`` -- observation building, metric bookkeeping, rule-based
-planning, dynamics -- on a machine with far more cores than the single-process
-loop can use. This module hands each worker a contiguous slice of the batch and
-lets it run the ordinary ``RolloutRunner`` loop over its own scenes.
+The rollout is pure-numpy per-scene work -- observation building, metric
+bookkeeping, rule-based planning, dynamics -- on a machine with far more cores
+than the single-process loop can use. This module hands each worker a contiguous
+slice of the batch and lets it run the ordinary ``RolloutRunner`` loop over its
+own scenes.
+
+How much of an iteration that is depends entirely on the planner pair, and an
+earlier "~66% of wall clock" claim here was measured before the rule-based
+planners were batched and before ``path_conflict.skip_rollout`` retired most
+scenes at step 0. Measured with ``scripts/profile_ddpo.py`` at batch 128,
+``ddpo/reward=hierarchical_v3``, single process (JSONs in
+``data/critical_scene/profile_ddpo/``):
+
+    pair             s/iter    reward    denoise_net
+    ppo-ppo            9.0      34%          61%
+    ppo-idm           11.8      34%          62%
+    pdm-ppo_norm      24.6      78%          21%
+
+So for a neural traffic pair the diffusion denoiser, not the rollout, is the
+long pole; sharding still pays for itself, but the headroom is in ``update`` /
+``sample``. For ``pdm`` it is the other way round.
 
 WHY THIS IS BIT-EXACT
 ---------------------

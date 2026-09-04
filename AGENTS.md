@@ -175,6 +175,29 @@ All DDPO reward implementations subclass `RewardAssembler` and are registered th
 
 Hydra configuration should be preferred over introducing hard-coded planner, reward, or algorithm branches.
 
+`plan(items)` is a BATCH entry point, not a per-agent one. Every planner decides
+actions for all of its agents across all active scenes in one call, and the
+rule-based ones are written that way:
+
+- `sim.routes.LaneIndex` -- a scene's lane adjacency plus per-lane arc lengths,
+  built once per `SimScene` and reused by every route search in it.
+- `sim.routes.RoutePack` -- the driven agents' routes padded into `[A, Smax]`
+  arrays, so one `project` call covers the whole batch. Built once per rollout
+  and cached on each `SimScene` under a token; routes never change mid-rollout.
+- `IDMPlanner._scene_state` -- every active scene's agent arrays padded to
+  `[items, Nmax]`, so each agent reads its own scene's neighbours by index.
+
+Padding must never change an answer: pad segments get `inf` distance before an
+`argmin`, pad agent slots get a `False` candidate mask. That invariance is what
+keeps `batched_across_scenes = False` correct for `idm`/`pdm` -- they still shard
+with zero synchronisation, and a sharded rollout stays bit-exact even though each
+worker pads to its own shard's dimensions.
+
+`RoutePack.project` does NOT force a dtype; it promotes against whatever
+`points` it is handed, because its two callers differ (idm projects float32
+`SimScene` positions, pdm float64 proposal states). Forcing one would silently
+change the other.
+
 ## Validation
 
 Run the smallest relevant validation after modifying code.
@@ -204,6 +227,73 @@ must hold so each worker owns a complete GRPO context group. The same constraint
 applies to any sharded rollout, so `score_paired_sources.py --workers 16` needs
 `--batch-size 128`; below that `ParallelRolloutRunner` raises at construction.
 
+After any change to `sim/`, check that the sharded rollout still agrees with the
+single-process one:
+
+```bash
+python scripts/rollout_fingerprint.py --config-name <entry> \
+  --override ddpo/reward=hierarchical_v3 --selfcheck 3 --workers 8 --batch-size 64
+```
+
+It runs several fresh batches through both runners in one process and diffs all
+44 metric arrays; anything but `BIT-EXACT over all batches` is a regression.
+Worker reuse and buffer reuse only misbehave on the SECOND rollout, which is why
+it takes a batch count rather than a single batch.
+
+When rewriting a planner, compare ACTIONS against the previous implementation on
+the same states, not trajectories: one flipped `argmin` diverges everything
+downstream, so a trajectory diff cannot tell a real regression from chaos. Drive
+both implementations from the same states each step and count identical actions.
+
+## Performance
+
+Which phase dominates a DDPO iteration depends entirely on the planner pair.
+Measured with `scripts/profile_ddpo.py` at batch 128, `ddpo/reward=hierarchical_v3`,
+single process; JSONs in `data/critical_scene/profile_ddpo/`:
+
+| pair | s/iter | `reward` (rollout) | `denoise_net` |
+| --- | --- | --- | --- |
+| `ppo-ppo_norm` | 9.0 | 34% | 61% |
+| `ppo-idm` | 11.7 | 34% | 62% |
+| `pdm-ppo_norm` | 24.8 | 78% | 21% |
+
+`denoise_net` is `logprob_fwd` (58 forwards: `k_steps=32` x policy + reference)
+plus `sample` (30 DDIM steps). For a neural traffic pair it is the long pole and
+the rollout is not; for `pdm` it is the other way round. At 16 workers the same
+runs measure 8.1 / 9.4 / 13.8 s per iteration.
+
+Do NOT estimate rollout cost as `batch x sim_steps x max_agents`. With
+`path_conflict.skip_rollout` on (every production reward config), a 128-scene
+batch steps ~3200 scene-steps rather than 11648, and carries 8-13 agents per
+scene rather than the configured 64. That arithmetic is 4-10x too high, and it
+is what produced the stale "the rollout is ~66% of wall clock" claim that used
+to head `sim/parallel.py`.
+
+Things already fixed, so do not re-derive them:
+
+- `shortest_lane_path` used to rebuild `[polyline_length(l) for l in lanes]` on
+  every call (2.09 M calls per iteration). `LaneIndex` hoists it: route building
+  went 12.87 s -> 1.17 s. This, not the step loop, was most of `idm`'s cost.
+- `IDMPlanner.plan` / `PDMPlanner._proposal_actions` were per-agent Python
+  loops. Batched: `plan_env` 16.12 -> 1.49 s, `plan_sut` 73.18 -> 16.04 s.
+- `SimScene.update_metrics` tested one agent per `_sat_overlap` call; it now
+  flattens every pair into one `sat_pairs` call (8-21x, identical output).
+- `_role_items` used `np.intersect1d` on two already-sorted arrays 3 x scenes x
+  steps times per rollout; role membership is a bool mask now (28 us -> 0.45 us).
+- `scripts/profile_ddpo.py` omitted `train_batch_size`, so `--workers N > 0`
+  always raised at construction. That is why no profile output existed in the
+  repo before 2026-09-04.
+
+Open leads, measured only as far as noted:
+
+- `PDMPlanner` is still 65% of its pair's iteration: a 40-step horizon loop over
+  an `[agents, 15]` grid, with `RoutePack.project` about two thirds of it.
+- The denoiser's attention (`utils/dit_ex_layers.py:AttentionLayerDiT`) is a PyG
+  `MessagePassing` layer that materialises `q_i * k_j` per EDGE over
+  fully-connected within-scene edge sets, rather than a dense
+  `scaled_dot_product_attention`. Unmeasured, but it is the plausible cause of
+  both the `denoise_net` share above and the peak memory below.
+
 ## Git
 
 - NEVER run `git add` or `git commit`.
@@ -232,7 +322,15 @@ model and selected checkpoints on the same 1000 validation scenes before drawing
 conclusions about collision-rate improvements.
 
 Low GPU utilization during CPU rollout does not imply that another DDPO run fits.
-Measure peak memory first; a batch-128 run has used about 47 GB on the 96 GB H100.
+Measure peak memory first; a batch-128 run peaks at 53-85 GB on the 96 GB H100
+(`scripts/run_pdm_ddpo_pipeline.sh` sizes its sequential schedule on that), so
+two never fit. An earlier "about 47 GB" figure here was an underestimate.
+
+`scripts/profile_ddpo.py` is the phase profiler and now works at any worker
+count; pass `--out` so the phase table is persisted rather than only printed.
+Use `--workers 0` when you need the per-hook / per-method breakdown -- the
+wrappers it installs only exist in the single-process path, and with workers the
+parent's timers can only see the central forwards.
 
 ## Paper Evaluation
 
@@ -348,6 +446,69 @@ Three properties that constrain how it may be used:
 - No behavior-realism metric exists in this repo. The realism proxy covers the
   INITIALIZATION (spawn overlap) only, so the objection "that baseline is strong
   because its behavior is implausible" currently cannot be answered with a number.
+
+## Reward: `hierarchical_v3`
+
+Four levels, strictly ordered, selected with `ddpo/reward=hierarchical_v3`:
+
+```text
+invalid  ->  collision  ->  min TTC_ego  ->  d_min
+```
+
+```text
+R = -1                              invalid, or contact before hard_collision_t
+  = 0.9 + 0.1 * 1[ego at fault]     valid collision
+  = 0.4 + 0.45 * g_ttc              ego TTC risk
+  = 0.3 * g_d                       otherwise
+```
+
+with `g_ttc = clip(1 - minTTC_ego/tau, 0, 1)` and
+`g_d = clip((d_far - dmin)/(d_far - d_near), 0, 1)`, the latter zeroed unless
+`closed_in > close_delta`.
+
+Every level above `invalid` measures ONE phenomenon at a different severity: the
+ego running into the adversary. `ego_min_ttc` and `ego_fault_collision` share the
+`SimScene._ego_aggressor_mask` gate, so the near miss and the crash are the same
+event seen earlier or later. `hierarchical` (v2) did not have this property: its
+collision level was fault-agnostic while its TTC level was ego-gated.
+
+Four things that are load-bearing, each with the measurement behind it:
+
+- **Fault is a bonus, not a level.** Making it its own top level inverts the
+  expected ordering. `fault | collision` is 44.4% (ppo-ppo_norm `base_gen`, 984
+  driving scenes), and whether the ego ends up the aggressor is mostly decided by
+  the frozen ego, so a fault-only top level makes a reliable near miss worth more
+  in expectation than causing a crash. At 0.9/1.0 a collision is worth
+  `0.444*1.0 + 0.556*0.9 = 0.944` against 0.85 for the best possible near miss.
+- **The TTC ceiling must stay below the collision base**, for the same reason.
+  Raising the fault gap is possible but must be bought by LOWERING the TTC
+  ceiling, not by lowering the non-fault collision value: at `R_nonfault = 0.75`
+  the margin is 0.011, inside the drift of the 44.4% estimate.
+- **`hard_collision_t = 1.0` makes an early contact INVALID, not merely
+  uncredited.** Its post-contact `dmin` is large (the cars separated), which is
+  what let spawn artifacts outrank quiet samples in v2. The cost is a cliff:
+  1.05 s scores +1, 0.95 s scores -1.
+- **`d_min` is absolute, gated on `closed_in`.** The relative form `1 - dmin/d0`
+  hides nothing but scores a 40->20 m approach the same as 5->2.5 m; absolute
+  distance alone is farmable by spawning alongside the ego and driving parallel
+  (the hack `EgoAdvMinDistHook` warns about). Both are needed.
+
+`lane_penalty` is 0 in v3: there is no band for it, so realism guarding falls
+entirely to the `invalid` level.
+
+### Why v2 failed, and what changed under it
+
+v2's ego-fault bonus never produced gradient because `_ego_aggressor_mask` used
+to test the ego's velocity PROJECTED onto the ego->other direction, under which
+81% of collisions counted as ego-fault. A bonus present on 81% of the collision
+band is nearly a constant offset, and GRPO's per-group whitening removes constant
+offsets. The predicate is now geometric -- contact inside the cone the ego's own
+front face subtends (`|y|/x <= W/L`) plus an absolute speed gate -- and the share
+drops to 44.4%, so the flag discriminates.
+
+That change moves `ego_fault_collision`, `ego_fault_collision_any` (the tables'
+`Coll_f`) AND `ego_min_ttc`, since the TTC hook gates on the same predicate. Every
+`Coll_f` and TTC number measured before it is stale.
 
 ## Current PPO Setup
 

@@ -163,8 +163,9 @@ ddim_steps: 30
 ddim_eta: 1.0
 batch_size: 128
 # Shard the rollout across this many worker processes (sim.parallel). The
-# rollout is ~66% of an iteration and is pure-numpy per-scene work, so this is
-# the main throughput knob; 0 keeps the single-process runner. The result is
+# rollout is pure-numpy per-scene work; how much of an iteration it is depends
+# on the planner pair (measured single-process: 34% for ppo-ppo and ppo-idm,
+# 78% for pdm -- see sim/parallel.py). 0 keeps the single-process runner. The result is
 # BIT-EXACT either way -- the workers never run a network, they only run their
 # own scenes' numpy, and each centrally batched planner's single forward stays
 # in the parent (see sim/parallel.py). Requires
