@@ -244,8 +244,9 @@ def _finish(ax, fig, V, title, status_txt, status_color, *, annotate=True):
 def render_rollout(traj, lanes, *, agent_states=None, agent_types=None, agent_colors=None,
                    reward=None, ego_collision=False, ego_offroad=False, init_invalid=False,
                    ego_min_ttc=None, goal_offlane_frac=None, parking_mismatch_frac=None,
-                   components=None, title="") -> "plt.Figure":
-    """Static summary of the first episode: each agent a fading sequence of boxes."""
+                   components=None, title="", final_boxes_only=False,
+                   annotate=True) -> "plt.Figure":
+    """Static summary of the first episode with full, per-agent-coloured trajectories."""
     fig, ax = plt.subplots(figsize=(5, 5), dpi=120)
     x, y, hd = traj["x"], traj["y"], traj["heading"]
     n_agents = x.shape[1] if (x.ndim == 2 and x.size) else 0
@@ -268,11 +269,19 @@ def render_rollout(traj, lanes, *, agent_states=None, agent_types=None, agent_co
             ya = np.where(mask, np.nan, ya)
         length, width = float(traj["length"][a]), float(traj["width"][a])
         xb, yb = _break_on_jumps(xa, ya)
-        ax.plot(xb, yb, color=color, linewidth=V["base_lw"] * (1.6 if is_ego else 1.1),
-                alpha=0.95 if is_ego else 0.7, zorder=5 if is_ego else 4, solid_capstyle="round")
-        ax.scatter(xa, ya, color=color, s=V["scatter"] * 0.35, alpha=0.9 if is_ego else 0.6,
-                   zorder=5 if is_ego else 4, edgecolors="none")
-        idxs = np.unique(np.linspace(0, len(xa) - 1, min(n_boxes, len(xa))).round().astype(int))
+        trajectory_scale = (
+            (3.2 if is_ego else 2.6) if final_boxes_only else (1.6 if is_ego else 1.1)
+        )
+        trajectory_alpha = 1.0 if final_boxes_only else (0.95 if is_ego else 0.7)
+        ax.plot(xb, yb, color=color, linewidth=V["base_lw"] * trajectory_scale,
+                alpha=trajectory_alpha, zorder=5 if is_ego else 4, solid_capstyle="round")
+        if not final_boxes_only:
+            ax.scatter(xa, ya, color=color, s=V["scatter"] * 0.35,
+                       alpha=0.9 if is_ego else 0.6,
+                       zorder=5 if is_ego else 4, edgecolors="none")
+        idxs = np.array([len(xa) - 1]) if final_boxes_only else np.unique(
+            np.linspace(0, len(xa) - 1, min(n_boxes, len(xa))).round().astype(int)
+        )
         for j, t in enumerate(idxs):
             frac = (j + 1) / len(idxs)
             _draw_agent_box(ax, xa[t], ya[t], ha[t], length, width, color,
@@ -288,7 +297,7 @@ def render_rollout(traj, lanes, *, agent_states=None, agent_types=None, agent_co
         parking_mismatch_frac=parking_mismatch_frac,
         components=components,
     )
-    _finish(ax, fig, V, title, txt, scol)
+    _finish(ax, fig, V, title, txt, scol, annotate=annotate)
     return fig
 
 

@@ -27,6 +27,7 @@ if str(ROOT) not in sys.path:
 import matplotlib
 
 matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 
 import imageio.v2 as imageio
 import numpy as np
@@ -38,7 +39,7 @@ from critical_scene.ldm_adv_eval import (
     prepare_ldm_cfg,
     slice_payload,
 )
-from ddpo.viz import render_rollout_frames
+from ddpo.viz import render_rollout, render_rollout_frames
 
 # Reading order matches the table rows.
 GRID = (
@@ -92,6 +93,7 @@ def render(
     *,
     annotate: bool,
     source_only: str | None = None,
+    png_path: Path | None = None,
 ) -> np.ndarray:
     frames = {}
     cells = [c for row in GRID for c in row]
@@ -101,9 +103,8 @@ def render(
         scenes = slice_payload(payloads[source], slot, slot + 1)
         m = reward.evaluate(scenes, record_trajectories=True)
         lanes = scenes.lane_polylines
-        frames[source] = render_rollout_frames(
-            m["trajectories"][0],
-            lanes.numpy() if isinstance(lanes, torch.Tensor) else np.asarray(lanes),
+        trajectory = m["trajectories"][0]
+        render_kwargs = dict(
             agent_states=scenes.agent_states.numpy(),
             agent_types=scenes.agent_types.numpy(),
             agent_colors=agent_colors(scenes),
@@ -112,9 +113,24 @@ def render(
             init_invalid=bool(m["init_invalid"][0] > 0),
             ego_min_ttc=float(m["ego_min_ttc"][0]),
             title=label,
+        )
+        frames[source] = render_rollout_frames(
+            trajectory,
+            lanes.numpy() if isinstance(lanes, torch.Tensor) else np.asarray(lanes),
             max_frames=max_frames,
             annotate=annotate,
+            **render_kwargs,
         )
+        if png_path is not None:
+            fig = render_rollout(
+                trajectory,
+                lanes.numpy() if isinstance(lanes, torch.Tensor) else np.asarray(lanes),
+                final_boxes_only=True,
+                annotate=False,
+                **render_kwargs,
+            )
+            fig.savefig(png_path, dpi=300, bbox_inches="tight", pad_inches=0)
+            plt.close(fig)
     if source_only is not None:
         return frames[source_only]
     length = max(f.shape[0] for f in frames.values())
@@ -141,6 +157,11 @@ def main() -> int:
         "--no-title",
         action="store_true",
         help="omit titles, timestamps, and rollout metrics; render only the plots",
+    )
+    ap.add_argument(
+        "--png",
+        action="store_true",
+        help="also save a static PNG with final-frame boxes and full trajectories",
     )
     ap.add_argument(
         "--source",
@@ -172,6 +193,8 @@ def main() -> int:
         return 1
 
     for slot in slots:
+        suffix = f"{args.source}_rollout" if args.source else "scene_init_2x4"
+        stem = f"{args.cell}_slot{slot:04d}_{suffix}"
         tiled = render(
             reward,
             payloads,
@@ -179,9 +202,9 @@ def main() -> int:
             args.max_frames,
             annotate=not args.no_title,
             source_only=args.source,
+            png_path=out_dir / f"{stem}.png" if args.png else None,
         )
-        suffix = f"{args.source}_rollout" if args.source else "scene_init_2x4"
-        path = out_dir / f"{args.cell}_slot{slot:04d}_{suffix}.gif"
+        path = out_dir / f"{stem}.gif"
         imageio.mimsave(path, list(tiled), fps=args.fps, loop=0)
         print(f"[gif] wrote {path}  ({tiled.shape[0]} frames)")
     reward.close()
