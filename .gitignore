@@ -39,3 +39,7 @@ outputs/**/checkpoints/
 outputs/**/generated/
 
 temp_scripts/*
+
+# Paper sources and references. research/overleaf/ is its own git repo with
+# its own remote, and research/references/ holds large PDFs.
+research/
