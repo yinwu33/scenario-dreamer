@@ -1,0 +1,23 @@
+# Critical-scene Stage 2, PDM-ppo_aggressive planner pair.
+# See cfgs/config_ldm_adv_ddpo_idm_idm.yaml for the pair convention.
+#
+# PDM is a SUT-only planner here: it drives the ego, never the traffic or the
+# adversary, so this file has no pdm counterpart on the env/adv axes.
+#
+# Usage:
+#   python train.py --config-name config_ldm_adv_ddpo_pdm_ppo_aggressive
+
+defaults:
+  - config_ldm_adv_ddpo
+  - override planner@ddpo.planner.sut: pdm
+  - override planner@ddpo.planner.env: ppo_aggressive
+  - override planner@ddpo.planner.adv: ppo_aggressive
+  - _self_
+
+ddpo:
+  context_prior:
+    path: ${project_root}/data/headroom_probe/context_prior_pdm-ppo_aggressive.json
+    focus_frac: 0.7
+
+experiment:
+  planner_name: pdm-ppo_aggressive

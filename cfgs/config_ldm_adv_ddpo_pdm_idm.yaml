@@ -1,0 +1,24 @@
+# Critical-scene Stage 2, PDM-IDM planner pair.
+# See cfgs/config_ldm_adv_ddpo_idm_idm.yaml for the pair convention.
+#
+# PDM is a SUT-only planner here: it drives the ego, never the traffic or the
+# adversary (those stay IDM), so this file has no pdm counterpart on the env/adv
+# axes.
+#
+# Usage:
+#   python train.py --config-name config_ldm_adv_ddpo_pdm_idm
+
+defaults:
+  - config_ldm_adv_ddpo
+  - override planner@ddpo.planner.sut: pdm
+  - override planner@ddpo.planner.env: idm
+  - override planner@ddpo.planner.adv: idm
+  - _self_
+
+ddpo:
+  context_prior:
+    path: ${project_root}/data/headroom_probe/context_prior_pdm-idm.json
+    focus_frac: 0.7
+
+experiment:
+  planner_name: pdm-idm
