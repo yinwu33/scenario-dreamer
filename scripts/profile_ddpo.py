@@ -221,6 +221,10 @@ def main():
         ),
         reward_cfg=build_reward_config(cfg.reward),
         num_workers=int(cfg.rollout_workers if args.workers is None else args.workers),
+        # ParallelRolloutRunner sizes its shared buffers from the training batch
+        # and refuses a batch it cannot shard, so this is required whenever
+        # num_workers > 0 -- without it every sharded profile raised at setup.
+        train_batch_size=int(cfg.batch_size),
     )
     ddpo_cfg = DDPOConfig(**OmegaConf.to_container(cfg.algo, resolve=True))
     kl_ctrl = AdaptiveKLController(ddpo_cfg)
