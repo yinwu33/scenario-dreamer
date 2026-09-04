@@ -383,10 +383,12 @@ class SimScene:
         goal_dist0 = np.hypot(self.goal[:, 0] - self.x, self.goal[:, 1] - self.y)
         controlled, static = [], []
         for i in range(n):
-            if len(controlled) < cfg.max_controlled_agents and goal_dist0[i] >= MIN_DISTANCE_TO_GOAL:
+            if len(controlled) < cfg.max_controlled_agents:
                 controlled.append(i)
-            else:
-                static.append(i)
+            # if len(controlled) < cfg.max_controlled_agents and goal_dist0[i] >= MIN_DISTANCE_TO_GOAL:
+            #     controlled.append(i)
+            # else:
+            #     static.append(i)
         self.controlled = np.asarray(controlled, dtype=np.int64)
         self.static = np.asarray(static, dtype=np.int64)
         self.initial_controlled = self.controlled.copy()
