@@ -54,6 +54,31 @@ def _sat_overlap(box_a, boxes_b):
     return overlap
 
 
+def sat_pairs(boxes, idx_a, idx_b):
+    """SAT test of ``boxes[idx_a[k]]`` against ``boxes[idx_b[k]]`` -> bool [K].
+
+    Same four axes, same ``+1e-9`` normalisation and same inclusive-touch
+    convention as ``_sat_overlap``, so a caller that loops one box against many
+    can instead flatten every pair into one call and get identical results. That
+    is what ``SimScene.update_metrics`` does: its per-agent Python loop spends
+    almost all of its time in numpy call overhead on ~30-element arrays.
+    """
+    a = boxes[idx_a]
+    b = boxes[idx_b]
+    overlap = np.ones(a.shape[0], dtype=bool)
+    for box in (a, b):
+        edge_x = box[:, 1, 0] - box[:, 0, 0]
+        edge_y = box[:, 1, 1] - box[:, 0, 1]
+        for ax, ay in ((edge_x, edge_y), (-edge_y, edge_x)):
+            norm = np.sqrt(ax * ax + ay * ay) + 1e-9
+            ax_n, ay_n = ax / norm, ay / norm
+            pa = a[..., 0] * ax_n[:, None] + a[..., 1] * ay_n[:, None]   # [K,4]
+            pb = b[..., 0] * ax_n[:, None] + b[..., 1] * ay_n[:, None]   # [K,4]
+            sep = (pa.max(1) < pb.min(1)) | (pb.max(1) < pa.min(1))
+            overlap &= ~sep
+    return overlap
+
+
 def sat_first_contact_time(box_a, boxes_b, rel_vel, dt, horizon):
     """Closed-form first-contact time of a static box vs boxes translating at
     constant relative velocity -- analytic replacement for the per-step SAT sweep.
