@@ -183,7 +183,7 @@ class RolloutRunner:
             for role, cond in self.conditioning.items():
                 if cond is None:
                     continue
-                ids = role_ids[s][role]
+                ids = np.flatnonzero(role_ids[s][role])
                 if not len(ids):
                     continue
                 for field, value in cond.items():
@@ -197,21 +197,24 @@ class RolloutRunner:
     def _assign_roles(
         self, scenes: GeneratedScenes, sims: list[SimScene]
     ) -> list[dict[str, np.ndarray]]:
-        """Static per-scene agent-id sets for each role.
+        """Static per-scene role membership masks, one ``[n]`` bool per role.
 
-        The sets partition ALL agent ids; per step they are intersected with the
-        scene's current ``controlled`` (agents can retire mid-rollout).
+        The masks partition ALL agent ids; per step they are intersected with the
+        scene's current ``controlled`` (agents can retire mid-rollout). A mask
+        rather than an id array is what lets ``_role_items`` do that intersection
+        with a single gather instead of ``np.intersect1d``, which re-sorts two
+        already-sorted arrays 3 x scenes x steps times per rollout.
         """
         adv = adv_local_indices(scenes, scenes.num_scenes)
         out = []
         for s, sim in enumerate(sims):
             a = int(adv[s])
-            sut = np.array([0], dtype=np.int64)
-            adv_ids = (
-                np.array([a], dtype=np.int64) if a > 0 else np.empty(0, dtype=np.int64)
-            )
-            env = np.setdiff1d(np.arange(sim.n, dtype=np.int64), np.concatenate([sut, adv_ids]))
-            out.append({"sut": sut, "env": env, "adv": adv_ids})
+            sut = np.zeros(sim.n, dtype=bool)
+            sut[:1] = True
+            adv_mask = np.zeros(sim.n, dtype=bool)
+            if a > 0:
+                adv_mask[a] = True
+            out.append({"sut": sut, "env": ~(sut | adv_mask), "adv": adv_mask})
         return out
 
     # ------------------------------------------------- parallel hook points
@@ -237,7 +240,8 @@ class RolloutRunner:
         """The (scene, agent ids) work units this role drives right now."""
         items: list[PlanItem] = []
         for s in active:
-            ids = np.intersect1d(role_ids[s][role], sims[s].controlled)
+            controlled = sims[s].controlled
+            ids = controlled[role_ids[s][role][controlled]]
             if len(ids):
                 items.append((sims[s], ids))
         return items

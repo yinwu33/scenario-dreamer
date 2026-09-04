@@ -34,7 +34,7 @@ from dataclasses import dataclass
 import numpy as np
 from omegaconf import OmegaConf
 
-from .geometry import _corners, _sat_overlap
+from .geometry import _corners, _sat_overlap, sat_pairs
 from .schema import MIN_DISTANCE_TO_GOAL
 from nets.selfplay_drive.net import (
     EGO_FEATURES,
@@ -203,6 +203,8 @@ def _compute_grid(lanes: np.ndarray) -> dict:
         seg_dir=np.zeros((0, 2), np.float32),
         seg_start=np.zeros((0, 2), np.float32),
         seg_end=np.zeros((0, 2), np.float32),
+        seg_ab=np.zeros((0, 2), np.float32),
+        seg_denom=np.zeros(0, np.float32),
         min_x=0.0, max_x=0.0, min_y=0.0, max_y=0.0,
         grid_ok=False, grid_cols=0, grid_rows=0, cell_cache={},
     )
@@ -237,9 +239,15 @@ def _compute_grid(lanes: np.ndarray) -> dict:
     pts = np.concatenate(pts_all)
     min_x, max_x = float(pts[:, 0].min()), float(pts[:, 0].max())
     min_y, max_y = float(pts[:, 1].min()), float(pts[:, 1].max())
+    # start->end vector and its squared length: pure functions of the frozen
+    # lanes, but ``hooks.dist_to_lane_centerline`` used to re-derive them on every
+    # scene on every step (once per ego position, against ~1900 segments).
+    seg_ab = seg_end - seg_start
+    seg_denom = np.maximum((seg_ab * seg_ab).sum(-1), 1e-9)
     grid = dict(
         seg_mid=seg_mid, seg_half_len=seg_half_len, seg_dir=seg_dir,
         seg_start=seg_start, seg_end=seg_end,
+        seg_ab=seg_ab, seg_denom=seg_denom,
         min_x=min_x, max_x=max_x, min_y=min_y, max_y=max_y,
         grid_ok=(min_x < max_x and min_y < max_y),
         grid_cols=0, grid_rows=0, cell_cache={},
@@ -408,6 +416,8 @@ class SimScene:
         # GeneratedScenes.meta['lane_graph']). Filled in by RolloutRunner.
         self.lane_graph: dict[str, np.ndarray] | None = None
         self._build_grid(lanes)
+        # Per-step oriented-box cache (see ``boxes``); dropped by step_dynamics.
+        self._boxes: np.ndarray | None = None
         self.update_metrics()  # c_reset computes metrics before the first observation
 
     # ------------------------------------------------------------------ grid
@@ -431,6 +441,8 @@ class SimScene:
         self.seg_dir = g["seg_dir"]
         self.seg_start = g["seg_start"]
         self.seg_end = g["seg_end"]
+        self.seg_ab = g["seg_ab"]
+        self.seg_denom = g["seg_denom"]
         self.min_x, self.max_x = g["min_x"], g["max_x"]
         self.min_y, self.max_y = g["min_y"], g["max_y"]
         self._grid_ok = g["grid_ok"]
@@ -535,6 +547,7 @@ class SimScene:
         response, see latch_ego_crash) are frozen the same way.
         """
         agents = self.controlled if indices is None else np.asarray(indices, dtype=np.int64)
+        self._boxes = None
         moving = ~(self.stopped | self.crashed)[agents]
         self.vx[agents[~moving]] = 0.0
         self.vy[agents[~moving]] = 0.0
@@ -564,28 +577,47 @@ class SimScene:
         self.vy[idx] = new_vy
 
     # --------------------------------------------------------------- metrics
+    def boxes(self) -> np.ndarray:
+        """[n, 4, 2] oriented-box corners of every agent, memoised per step.
+
+        Positions only ever change in ``step_dynamics``, which drops the cache;
+        ``update_metrics`` and ``latch_ego_crash`` then run back to back on the
+        same poses and used to build this float64 array twice per scene per step.
+        """
+        if self._boxes is None:
+            self._boxes = _corners(self.x, self.y, self.heading, self.length, self.width)
+        return self._boxes
+
     def update_metrics(self) -> None:
         """Vehicle-collision state per controlled agent (collision_check port).
 
         No ROAD_EDGE entities exist in generated maps, so the off-road branch of
         compute_agent_metrics can never fire and is omitted.
+
+        Every (agent, candidate) pair is tested in ONE ``sat_pairs`` call rather
+        than one ``_sat_overlap`` call per agent: the per-agent loop was ~half of
+        the whole rollout's per-scene cost, and almost all of that was numpy call
+        overhead on ~30-element arrays. The pair set, the 15 m broad-phase gate
+        and the resulting ``collision_state`` are unchanged.
         """
         self.collision_state[:] = 0
         idx = self.controlled
         if len(idx) == 0:
             return
-        boxes = _corners(self.x, self.y, self.heading, self.length, self.width)
-        for i in idx:
-            if self.ptype[i] == TYPE_PEDESTRIAN:
-                continue
-            cand = self.slot_order[self.slot_order != i]
-            if not len(cand):
-                continue
-            dx = self.x[cand] - self.x[i]
-            dy = self.y[cand] - self.y[i]
-            cand = cand[(dx * dx + dy * dy) <= COLLISION_DIST2_GATE]
-            if len(cand) and _sat_overlap(boxes[i], boxes[cand]).any():
-                self.collision_state[i] = 2  # VEHICLE_COLLISION
+        idx = idx[self.ptype[idx] != TYPE_PEDESTRIAN]
+        so = self.slot_order
+        if not len(idx) or not len(so):
+            return
+        dx = self.x[so][None, :] - self.x[idx][:, None]
+        dy = self.y[so][None, :] - self.y[idx][:, None]
+        near = (dx * dx + dy * dy) <= COLLISION_DIST2_GATE
+        near &= so[None, :] != idx[:, None]
+        rows, cols = np.nonzero(near)
+        if not len(rows):
+            return
+        hit = sat_pairs(self.boxes(), idx[rows], so[cols])
+        if hit.any():
+            self.collision_state[idx[rows[hit]]] = 2  # VEHICLE_COLLISION
 
     def latch_ego_crash(self) -> None:
         """General collision response: freeze the ego and any car it contacts.
@@ -627,7 +659,7 @@ class SimScene:
         others = others[(dx * dx + dy * dy) <= COLLISION_DIST2_GATE]
         if not len(others):
             return
-        boxes = _corners(self.x, self.y, self.heading, self.length, self.width)
+        boxes = self.boxes()
         overlap = _sat_overlap(boxes[0], boxes[others])
         hit = others[overlap]
         if not len(hit):

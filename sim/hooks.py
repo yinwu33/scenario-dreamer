@@ -725,14 +725,16 @@ def dist_to_lane_centerline(sim: SimScene, points: np.ndarray) -> np.ndarray:
     points = np.atleast_2d(np.asarray(points, dtype=np.float32))
     if sim.seg_start.shape[0] == 0:
         return np.full(points.shape[0], np.inf, dtype=np.float32)
-    a, b = sim.seg_start, sim.seg_end
-    ab = b - a
-    denom = np.maximum((ab * ab).sum(-1), 1e-9)
+    # ``ab`` / ``denom`` come off the (lane-keyed, LRU-cached) grid instead of
+    # being rebuilt here; and the sqrt is taken once on the minimum rather than
+    # once per segment. sqrt is monotone and correctly rounded, so
+    # sqrt(min(d2)) == min(sqrt(d2)) bit-for-bit.
+    a, ab, denom = sim.seg_start, sim.seg_ab, sim.seg_denom
     ap = points[:, None, :] - a[None]
     t = np.clip((ap * ab[None]).sum(-1) / denom[None], 0.0, 1.0)
     proj = a[None] + t[..., None] * ab[None]
     d = points[:, None, :] - proj
-    return np.sqrt((d * d).sum(-1)).min(axis=1)
+    return np.sqrt((d * d).sum(-1).min(axis=1))
 
 
 class GoalOfflaneHook(MetricHook):
