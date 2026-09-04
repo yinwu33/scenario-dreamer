@@ -6,7 +6,7 @@ the road surface), agents are rounded boxes (ego red, vehicles blue, ...; caller
 may pass ``agent_colors`` to override per agent, e.g. DDPO-generated non-ego
 agents in green), and a moving agent's goal is a dotted line + same-colour ``x``
 marker. Parked/static
-agents (goal within 2 m of spawn) instead get a bold black ``x`` at their centre.
+agents (goal within 2 m of spawn) instead get a black target at their centre.
 
 Two output modes:
   * static (``render_rollout``): the whole first episode on one frame — each agent is
@@ -34,7 +34,8 @@ from sim.schema import MIN_DISTANCE_TO_GOAL
 _EGO_COLOR = "#de5959"      # light red  (ego = local index 0)
 _VEH_COLOR = "#87b3e6"      # light blue (other vehicles)
 _PED_COLOR = "#bea9f5"      # light purple (pedestrians)
-_CYC_COLOR = "#5fa55f"      # green (cyclists)
+_CYC_COLOR = "#e8b800"      # amber (cyclists); deliberately NOT green, so the
+                            # only green in a frame is CONTROL_COLOR below
 CONTROL_COLOR = "#2ca02c"   # vivid green: DDPO-generated non-ego agents,
                             # passed in via ``agent_colors`` to flag who is being trained
 _JUMP_THRESH = 10.0         # metres/step above which motion is a teleport, not driving
@@ -212,20 +213,32 @@ def _draw_goals(ax, agent_states, x0, y0, color, V):
         return
     if np.hypot(gx - x0, gy - y0) < _PARKING_DIST:
         # parked/static agent (goal sits on its spawn): no travel goal to draw -
-        # mark the agent centre with a bold black x instead of the same-colour one.
-        ax.scatter(x0, y0, marker="x", color="black", s=V["goal_ms"],
-                   linewidths=max(V["goal_lw"] * 2.0, 1.2), zorder=8)
+        # mark the agent centre with a black target instead of a travel path.
+        _draw_goal_target(ax, x0, y0, "black", V)
         return
     ax.plot([x0, gx], [y0, gy], color=color, linestyle=":", alpha=0.7, linewidth=V["goal_lw"], zorder=3)
-    ax.scatter(gx, gy, marker="x", color=color, s=V["goal_ms"], linewidths=max(V["goal_lw"], 0.5), zorder=7)
+    _draw_goal_target(ax, gx, gy, color, V)
 
 
-def _finish(ax, fig, V, title, status_txt, status_color):
+def _draw_goal_target(ax, x, y, color, V):
+    ax.add_patch(mpatches.Circle(
+        (x, y), radius=2.0, fill=False, edgecolor=color,
+        linewidth=max(V["goal_lw"], 0.7), zorder=7,
+    ))
+    ax.add_patch(mpatches.Circle(
+        (x, y), radius=0.30, facecolor=color, edgecolor="none", zorder=8,
+    ))
+
+
+def _finish(ax, fig, V, title, status_txt, status_color, *, annotate=True):
     ax.set_xlim(*V["xlim"]); ax.set_ylim(*V["ylim"])
     ax.set_aspect("equal", adjustable="box")
     ax.axis("off")
-    ax.set_title(f"{title}\n{status_txt}", fontsize=8.5, color=status_color)
-    fig.tight_layout()
+    if annotate:
+        ax.set_title(f"{title}\n{status_txt}", fontsize=8.5, color=status_color)
+        fig.tight_layout()
+    else:
+        fig.subplots_adjust(left=0, right=1, bottom=0, top=1)
 
 
 def render_rollout(traj, lanes, *, agent_states=None, agent_types=None, agent_colors=None,
@@ -289,7 +302,7 @@ def _fig_to_rgb(fig) -> np.ndarray:
 def render_rollout_frames(traj, lanes, *, agent_states=None, agent_types=None, agent_colors=None,
                           reward=None, ego_collision=False, ego_offroad=False, init_invalid=False,
                           ego_min_ttc=None, goal_offlane_frac=None, parking_mismatch_frac=None,
-                          components=None, title="", max_frames=50) -> np.ndarray:
+                          components=None, title="", max_frames=50, annotate=True) -> np.ndarray:
     """One frame per rollout step (agents move, trail grows). Returns [T, H, W, 3] uint8.
 
     The view window and reward text are fixed across frames so the GIF is stable.
@@ -334,7 +347,7 @@ def render_rollout_frames(traj, lanes, *, agent_states=None, agent_types=None, a
             _draw_agent_box(ax, x[t, a], y[t, a], hd[t, a], lengths[a], widths[a], color,
                             V["bbox_lw"] * (1.4 if is_ego else 1.0), alpha=0.8)  # current pose
             _draw_goals(ax, agent_states[a] if agent_states is not None else None, x[0, a], y[0, a], color, V)
-        _finish(ax, fig, V, f"{title}   t={int(t)}", txt, scol)
+        _finish(ax, fig, V, f"{title}   t={int(t)}", txt, scol, annotate=annotate)
         frames.append(_fig_to_rgb(fig))
         plt.close(fig)
     return np.stack(frames, axis=0)
