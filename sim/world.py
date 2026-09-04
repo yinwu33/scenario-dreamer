@@ -67,9 +67,11 @@ MAX_CONTROLLED_AGENTS = 32         # config/pacific/selfplay_drive.ini max_contr
 # and re-exported here for the planner/metric modules that import it from this file.
 PARTNER_DIST2_GATE = 4096.0        # 64 m
 COLLISION_DIST2_GATE = 225.0       # 15 m
-EGO_AGGRESSOR_MIN_SPEED = 0.5      # m/s; ego counts as the aggressor only when its
-                                   # velocity projected onto the ego->other direction
-                                   # exceeds this (a passive/slow ego is never at fault)
+EGO_MOVING_MIN_SPEED = 0.5         # m/s; a stationary/creeping ego is never at fault,
+                                   # whatever it is hit by. This is the ego's ABSOLUTE
+                                   # speed, not a closing rate: what makes the ego the
+                                   # aggressor is where the contact lands (see
+                                   # _ego_aggressor_mask), not which way it was closing.
 TYPE_VEHICLE, TYPE_PEDESTRIAN, TYPE_CYCLIST = 1, 2, 3
 ROAD_LANE_TYPE_FEATURE = 0.0       # entity type 4 (ROAD_LANE) - 4
 
@@ -722,19 +724,32 @@ class SimScene:
 
     # ------------------------------------------------------ collision attribution
     def _ego_aggressor_mask(self, others: np.ndarray) -> np.ndarray:
-        """Per-``others`` mask: True where the ego is driving *toward* that agent.
+        """Per-``others`` mask: True where the ego ran INTO that agent front-first.
 
-        Credits only ego-caused contact / closing. The ego is the aggressor w.r.t.
-        an agent when its own velocity has a positive component along the
-        ego->other direction above ``EGO_AGGRESSOR_MIN_SPEED``; a stopped/slow ego,
-        or one moving across or away from the other, is never at fault. Used by
-        the crash-latch check so a car ramming a passive ego still stops the
-        rollout but is not recorded as ego-fault.
+        Two conditions, both required:
+
+          * the contact lands on the ego's FRONT face. Taking the other's centre
+            in the ego's own frame, the front face spans the cone
+            ``|y| / x <= (W/2)/(L/2)`` for ``x > 0``, so the test is derived from
+            the ego's own box rather than a fixed angle. A car struck on the
+            flank or the rear is therefore not the ego's fault even when the ego
+            was closing on it.
+          * the ego is actually moving (``EGO_MOVING_MIN_SPEED``), so a stationary
+            ego that gets driven into is never at fault.
+
+        This replaces an earlier closing-velocity test, which also credited the
+        ego for side impacts it was merely driving past and for reversing into
+        something behind it. Used by the crash-latch check so a car ramming a
+        passive ego still stops the rollout but is not recorded as ego-fault.
         """
         dx = self.x[others] - self.x[0]
         dy = self.y[others] - self.y[0]
-        dist = np.sqrt(dx * dx + dy * dy)
-        ego_closing = np.zeros(len(others), dtype=np.float64)
-        safe = dist > 1e-6
-        ego_closing[safe] = (self.vx[0] * dx[safe] + self.vy[0] * dy[safe]) / dist[safe]
-        return ego_closing > EGO_AGGRESSOR_MIN_SPEED
+        cos_h, sin_h = np.cos(self.heading[0]), np.sin(self.heading[0])
+        x_local = cos_h * dx + sin_h * dy
+        y_local = -sin_h * dx + cos_h * dy
+        # |y|/x <= W/L, kept multiplicative so x == 0 needs no special case.
+        front = (x_local > 0.0) & (
+            np.abs(y_local) * self.length[0] <= x_local * self.width[0]
+        )
+        moving = float(np.hypot(self.vx[0], self.vy[0])) > EGO_MOVING_MIN_SPEED
+        return front & moving
