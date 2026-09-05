@@ -127,6 +127,7 @@ for spec in $CELLS; do
     .venv/bin/python scripts/score_adv_sources.py \
       --artifacts $CDIR/artifacts \
       --sut $SUT --env $ENV --adv $ENV \
+      --reward hierarchical_v3 \
       --workers 16 --batch-size 128 \
       --override ddpo.simulator.path_conflict.skip_rollout=false \
       --sources original proximity_adv base_gen ddpo_gen original_ddpo_adv \

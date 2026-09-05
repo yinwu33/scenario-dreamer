@@ -59,6 +59,12 @@ def _parse():
     p.add_argument("--env", required=True)
     p.add_argument("--adv", default=None, help="default: --env")
     p.add_argument("--config-name", default="config_ldm_adv_ddpo")
+    p.add_argument("--reward", required=True,
+                   help="cfgs/ddpo/reward/<name>.yaml to score with. Required: the "
+                        "entrypoint config carries a reward of its own, so omitting "
+                        "this silently scored every artifact under that default "
+                        "(hierarchical_v2) whatever the run was trained with, and "
+                        "wrote its reward/tier into scored_adv.npz under the wrong name.")
     p.add_argument("--sources", nargs="+", required=True)
     p.add_argument("--batch-size", type=int, default=128)
     p.add_argument("--workers", type=int, default=0)
@@ -71,6 +77,7 @@ def main() -> int:
     args = _parse()
     adv = args.adv or args.env
     cfg_root = compose_eval_cfg(args.config_name, [
+        f"ddpo/reward={args.reward}",
         f"planner@ddpo.planner.sut={args.sut}",
         f"planner@ddpo.planner.env={args.env}",
         f"planner@ddpo.planner.adv={adv}",
@@ -100,6 +107,7 @@ def main() -> int:
 
     lines = [
         f"cell: SUT={args.sut}  traffic={args.env}  adv={adv}",
+        f"reward: {args.reward}",
         "metrics: adversarial (ego vs the GENERATED ADVERSARY), driving-ego subset",
         "fault uses the front-face/moving-ego predicate (sim/world.py)",
         "",

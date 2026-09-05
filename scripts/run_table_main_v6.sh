@@ -1,14 +1,24 @@
 #!/bin/bash
-# table_main_v4: hierarchical_v4 DDPO at 500 iterations, scored in the
+# table_main_v6: hierarchical_v6 DDPO at 500 iterations, scored in the
 # ADVERSARIAL scope (ego vs the generated adversary) to match the reward.
 #
-# v4 admits only EGO-FAULT collisions to the top level. Cells are ordered by how
-# much signal the reward screen found for it rather than by SUT: ppo-idm and
-# idm-idm are the two cells whose base rollouts actually reach fault geometry
-# (67.4% / 44.4% of collisions ever put the ego in the aggressor cone), so they
-# are the ones that can answer whether v4 converges. The *-ppo_aggressive cells
-# have literally zero ego-fault collisions in the v3 artifacts, so v4 is
-# expected to flatline there -- informative, but predictable, so they run last.
+# v6 keeps v5's off-lane rejection but scores a ram 0 instead of -1: whether a
+# placement ends in the adversary hitting the ego is largely the frozen ego's
+# decision, and 21-29% of v5's -1 band was that. Removing the incentive without
+# charging for the ego's choice is the whole change.
+#
+# The question this table asks is narrow: under v5 the invalid band never came
+# down -- 22.4% flat over 500 iterations, 22.6% after a rebound, 18.3% rising,
+# 14.9% rising, across four cells. Offline on v5's own artifacts v6 puts it at
+# 8.3 / 9.3 / 9.2%, which is exactly overlap + off-lane + early. If it still
+# does not fall during training, and tier3 still does not move, the reward is
+# not what is holding this back.
+#
+# Cell order is v5's, for the same reason: the *-ppo_aggressive cells had the
+# highest ram rates so they are where scoring it 0 can change most.
+#
+# idm-ppo_aggressive was run first, standalone, before this driver existed; the
+# per-stage guards below skip it.
 #
 # eval_every is 500 (one eval, at the end) rather than the default 100. The
 # periodic eval is diagnostic only (AGENTS.md), and it costs ~15 min a time
@@ -28,36 +38,36 @@ source scripts/define_env_variables.sh
 
 ITERS=500
 NSCENES=1000
-# v3 has a proximity_adv for all 12 cells now, and it is derived from the
-# planner-independent `original` scenes, so reusing it keeps the baseline
-# row IDENTICAL between the v3 and v4 tables.
-OLD=data/critical_scene/table_main_v3
-OUT=data/critical_scene/table_main_v4
+# v5 has a proximity_adv for its scored cells and v4 for all 12, derived from the planner- and
+# reward-independent `original` scenes, so reusing it keeps the baseline row
+# IDENTICAL between the v5 and v6 tables.
+OLD=data/critical_scene/table_main_v4
+OUT=data/critical_scene/table_main_v6
 mkdir -p $OUT
 
 # ppo-ppo_norm first: its 500-iteration checkpoint already exists (the 1000-it
 # run is deterministic up to it 500 -- nothing schedules off num_iterations), so
 # it exercises the generate + score stages in minutes before any training runs.
 CELLS="
+idm-ppo_aggressive|idm|ppo_aggressive
+pdm-ppo_aggressive|pdm|ppo_aggressive
+ppo-ppo_aggressive|ppo_normal|ppo_aggressive
 ppo-idm|ppo_normal|idm
 idm-idm|idm|idm
 pdm-idm|pdm|idm
-ppo-ppo_norm|ppo_normal|ppo_normal
-idm-ppo_norm|idm|ppo_normal
 pdm-ppo_norm|pdm|ppo_normal
+idm-ppo_norm|idm|ppo_normal
+ppo-ppo_norm|ppo_normal|ppo_normal
 ppo-ppo_caution|ppo_normal|ppo_caution
 idm-ppo_caution|idm|ppo_caution
 pdm-ppo_caution|pdm|ppo_caution
-ppo-ppo_aggressive|ppo_normal|ppo_aggressive
-idm-ppo_aggressive|idm|ppo_aggressive
-pdm-ppo_aggressive|pdm|ppo_aggressive
 "
 
 for spec in $CELLS; do
   CELL=${spec%%|*}; rest=${spec#*|}; SUT=${rest%%|*}; ENV=${rest#*|}
-  RUN=${CELL}_v4
-  CKDIR=data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_${RUN}_hier_v4
-  CKPT=$CKDIR/critical_scene_ddpo_ldm_adv_ddim_${RUN}_hier_v4_00$(printf %03d $ITERS).ckpt
+  RUN=${CELL}_v6
+  CKDIR=data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_${RUN}_hier_v6
+  CKPT=$CKDIR/critical_scene_ddpo_ldm_adv_ddim_${RUN}_hier_v6_00$(printf %03d $ITERS).ckpt
   CDIR=$OUT/$CELL
   echo "[cell] ===== $CELL  sut=$SUT  env=adv=$ENV ====="
   # Each cell runs in its own subshell so one failure does not abort the
@@ -82,7 +92,7 @@ for spec in $CELLS; do
     echo "[cell] $CELL train: skip, $CKPT exists"
   else
     .venv/bin/python train.py --config-name config_ldm_adv_ddpo \
-      ddpo/reward=hierarchical_v4 \
+      ddpo/reward=hierarchical_v6 \
       planner@ddpo.planner.sut=$SUT \
       planner@ddpo.planner.env=$ENV \
       planner@ddpo.planner.adv=$ENV \
@@ -92,7 +102,7 @@ for spec in $CELLS; do
       ddpo.context_prior.path=$PROJECT_ROOT/data/headroom_probe/context_prior_${CELL}.json \
       ddpo.context_prior.focus_frac=0.7 ddpo.rollout_workers=16 \
       ddpo.num_iterations=$ITERS \
-      hydra.run.dir=$PROJECT_ROOT/slurm_logs/tmv4_$CELL
+      hydra.run.dir=$PROJECT_ROOT/slurm_logs/tmv6_$CELL
     echo "[cell] $CELL train done"
   fi
 
@@ -145,7 +155,7 @@ for spec in $CELLS; do
     .venv/bin/python scripts/score_adv_sources.py \
       --artifacts $CDIR/artifacts \
       --sut $SUT --env $ENV --adv $ENV \
-      --reward hierarchical_v4 \
+      --reward hierarchical_v6 \
       --workers 16 --batch-size 128 \
       --override ddpo.simulator.path_conflict.skip_rollout=false \
       --sources original proximity_adv base_gen ddpo_gen original_ddpo_adv \
@@ -161,4 +171,4 @@ for spec in $CELLS; do
   fi
   echo "[cell] $CELL COMPLETE"
 done
-echo "table_main_v4 all done"
+echo "table_main_v6 all done"
