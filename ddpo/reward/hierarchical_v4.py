@@ -23,7 +23,8 @@ subset, per-scene arrays in ``scored_adv.npz``):
     bonus in v3 does not outweigh how much easier a ram is.
 
 WHY THIS DOES NOT STARVE THE GRADIENT. ``ego_min_ttc`` carries the same
-``SimScene._ego_aggressor_mask`` gate as ``ego_fault_collision``, so a ram has
+``_ego_approaching_mask`` cone that ``ego_fault_collision``'s front-face test
+is the contact-time form of, so a ram has
 ``ego_min_ttc = inf``, ``g_ttc = 0``, and therefore cannot enter the TTC level
 either: it lands on ``d_min``, worth at most ``prox_hi``. The levels a ram can
 reach are strictly below the near-miss band, so the incentive to ram is removed

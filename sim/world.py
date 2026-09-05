@@ -71,7 +71,7 @@ EGO_MOVING_MIN_SPEED = 0.5         # m/s; a stationary/creeping ego is never at 
                                    # whatever it is hit by. This is the ego's ABSOLUTE
                                    # speed, not a closing rate: what makes the ego the
                                    # aggressor is where the contact lands (see
-                                   # _ego_aggressor_mask), not which way it was closing.
+                                   # _ego_front_contact_mask), not which way it was closing.
 TYPE_VEHICLE, TYPE_PEDESTRIAN, TYPE_CYCLIST = 1, 2, 3
 ROAD_LANE_TYPE_FEATURE = 0.0       # entity type 4 (ROAD_LANE) - 4
 
@@ -633,7 +633,7 @@ class SimScene:
         through to the ego's forward path, so it cannot spoof min-TTC.
 
         Fault is recorded separately: ``ego_caused_collision`` is set only when the
-        ego was driving *into* the contacted car (``_ego_aggressor_mask``), so the
+        ego hit the contacted car with its front face (``_ego_front_contact_mask``), so the
         general freeze/stop and the rewarded ego-collision event are decoupled - a
         car ramming a passive ego stops the scene but is not the ego's collision.
 
@@ -667,7 +667,7 @@ class SimScene:
         # Record the event + fault attribution while the ego velocity is still the
         # genuine pre-collision one (it is zeroed below). The hook consumes these
         # the same step instead of re-deriving contact from the frozen ego.
-        fault_mask = self._ego_aggressor_mask(hit)
+        fault_mask = self._ego_front_contact_mask(hit)
         self.last_ego_collision_partners = hit.copy()
         self.last_ego_fault_partners = hit[fault_mask].copy()
         if fault_mask.any():
@@ -757,31 +757,60 @@ class SimScene:
         return oob
 
     # ------------------------------------------------------ collision attribution
-    def _ego_aggressor_mask(self, others: np.ndarray) -> np.ndarray:
-        """Per-``others`` mask: True where the ego ran INTO that agent front-first.
+    def _ego_front_contact_mask(self, others: np.ndarray) -> np.ndarray:
+        """Per-``others`` mask: True where the ego's FRONT FACE made the contact.
 
         Two conditions, both required:
 
-          * the contact lands on the ego's FRONT face. Taking the other's centre
-            in the ego's own frame, the front face spans the cone
-            ``|y| / x <= (W/2)/(L/2)`` for ``x > 0``, so the test is derived from
-            the ego's own box rather than a fixed angle. A car struck on the
-            flank or the rear is therefore not the ego's fault even when the ego
-            was closing on it.
-          * the ego is actually moving (``EGO_MOVING_MIN_SPEED``), so a stationary
-            ego that gets driven into is never at fault.
+          * the ego's front edge -- the segment between the two corners at
+            ``+length/2``, the face it leads with -- overlaps the other agent's
+            box. This is the contact geometry itself, not a proxy for it.
+          * the ego is actually moving (``EGO_MOVING_MIN_SPEED``), so a
+            stationary ego that gets driven into is never at fault.
 
-        This replaces an earlier closing-velocity test, which also credited the
-        ego for side impacts it was merely driving past and for reversing into
-        something behind it. Used by the crash-latch check so a car ramming a
-        passive ego still stops the rollout but is not recorded as ego-fault.
+        This replaced a cone test on the other agent's CENTRE
+        (``|y|/x <= W/L``), which asks about the wrong point. Measured on two
+        idm-idm scenes the eye reads as head-on: one had the other's centre
+        4.22 m ahead and 2.08 m to the side, 26.2 degrees against a 24.1 degree
+        cone -- a two-degree miss, with the ego closing at 6.6 m/s. Under the
+        face test it is ego-fault, and the cell's fault share rises from 33.3%
+        to 47.1% of its collisions.
+
+        The segment is handed to ``_sat_overlap`` as a degenerate box
+        ``[c0, c1, c1, c0]``: that routine takes its axes from the first corner
+        pair, so it yields the segment's own direction and normal plus the other
+        box's two edge normals -- exactly the axis set a segment-vs-convex
+        separating-axis test needs, with no new geometry code.
+        """
+        boxes = self.boxes()
+        ego = boxes[0]
+        front_face = np.array([ego[0], ego[1], ego[1], ego[0]])
+        hit_front = _sat_overlap(front_face, boxes[others])
+        moving = float(np.hypot(self.vx[0], self.vy[0])) > EGO_MOVING_MIN_SPEED
+        return hit_front & moving
+
+    def _ego_approaching_mask(self, others: np.ndarray) -> np.ndarray:
+        """Per-``others`` mask: True where the ego is driving INTO that agent.
+
+        The forward cone the ego's own front face subtends -- taking the other's
+        centre in the ego frame, ``|y|/x <= (W/2)/(L/2)`` for ``x > 0`` -- plus
+        the same absolute speed gate.
+
+        This is deliberately NOT ``_ego_front_contact_mask``. That one tests an
+        overlap, which is only ever true at the instant of contact; gating an
+        APPROACH metric on it would leave ``ego_min_ttc`` at +inf for every
+        scene and collapse the reward's TTC level. The cone is the ego's front
+        face swept forward, which is the right question while the two are still
+        apart. The two predicates are the same idea at different distances, and
+        a scene can satisfy the cone during the approach yet have the contact
+        land on the ego's flank -- that agent is a near miss the ego caused, but
+        not a collision the ego caused.
         """
         dx = self.x[others] - self.x[0]
         dy = self.y[others] - self.y[0]
         cos_h, sin_h = np.cos(self.heading[0]), np.sin(self.heading[0])
         x_local = cos_h * dx + sin_h * dy
         y_local = -sin_h * dx + cos_h * dy
-        # |y|/x <= W/L, kept multiplicative so x == 0 needs no special case.
         front = (x_local > 0.0) & (
             np.abs(y_local) * self.length[0] <= x_local * self.width[0]
         )

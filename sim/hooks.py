@@ -564,7 +564,7 @@ class EgoMinTTCHook(MetricHook):
 
         # Only score agents the ego is actively driving toward; a car bearing down
         # on a passive ego is not an ego-caused near miss.
-        others = others[sim._ego_aggressor_mask(others)]
+        others = others[sim._ego_approaching_mask(others)]
         if not len(others):
             return float(np.inf)
 

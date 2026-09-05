@@ -4,8 +4,8 @@
 
 Every level above ``invalid`` measures ONE phenomenon at a different severity:
 the ego running into the adversary. ``ego_min_ttc`` is already gated by
-``SimScene._ego_aggressor_mask`` (sim/hooks.py), the same predicate that decides
-``ego_fault_collision``, so "almost ran into it" and "ran into it" are the same
+``SimScene._ego_approaching_mask``, the cone counterpart of the front-face
+contact test that decides ``ego_fault_collision``, so "almost ran into it" and "ran into it" are the same
 event observed earlier or later -- unlike ``hierarchical``, whose collision level
 was fault-agnostic while its TTC level was ego-gated.
 
