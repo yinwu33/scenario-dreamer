@@ -9,11 +9,15 @@ from ddpo.reward.flat import FlatReward
 from ddpo.reward.hierarchical import HierarchicalReward
 from ddpo.reward.hierarchical_v3 import HierarchicalV3Reward
 from ddpo.reward.hierarchical_v4 import HierarchicalV4Reward
+from ddpo.reward.hierarchical_v5 import HierarchicalV5Reward
+from ddpo.reward.hierarchical_v6 import HierarchicalV6Reward
 from ddpo.reward.tiered import TieredReward
 
 REWARDS: dict[str, type[RewardAssembler]] = {
     cls.name: cls for cls in (FlatReward, TieredReward, HierarchicalReward, HierarchicalV3Reward,
-                HierarchicalV4Reward)
+                HierarchicalV4Reward,
+                HierarchicalV5Reward,
+                HierarchicalV6Reward)
 }
 
 
