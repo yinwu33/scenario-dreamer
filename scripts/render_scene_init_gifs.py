@@ -112,6 +112,14 @@ def render(
             ego_collision=bool(m["ego_collision"][0] > 0),
             init_invalid=bool(m["init_invalid"][0] > 0),
             ego_min_ttc=float(m["ego_min_ttc"][0]),
+            # Every per-scene scalar the reward emitted, so the title shows the
+            # band it assigned and the terms behind it rather than a fixed
+            # guess at which fields matter.
+            components={
+                k: float(v[0])
+                for k, v in m.items()
+                if isinstance(v, np.ndarray) and v.ndim == 1 and v.dtype.kind in "fiub"
+            },
             title=label,
         )
         frames[source] = render_rollout_frames(

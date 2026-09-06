@@ -103,12 +103,19 @@ def _fmt_float(value, *, signed: bool = False, digits: int = 2, inf: str = "inf"
 # assembly: constraint + its penalty terms, then criticality + its terms, then the
 # raw ego<->adversary / lane geometry behind those terms.
 _COMPONENT_LINES = [
-    [("cons", "constraint"), ("spawn_off", "c_spawn_lane"),
-     ("goal_off", "c_goal_lane"), ("init_over", "c_overlap")],
-    [("crit", "criticality"), ("r_ttc", "r_ttc"), ("r_appr", "r_approach")],
-    [("d0", "ego_adv_init_dist"), ("dmin", "ego_adv_min_dist_warmup"),
-     ("sd", "spawn_lane_dist"), ("gd", "goal_lane_dist"),
-     ("oFrac", "init_overlap_frac")],
+    # Which band the scene landed in and what put it there. `tier` is the band
+    # index the reward assigned (hierarchical_v6: 0 invalid, 1 d_min, 2 near
+    # miss, 3 ego-fault collision, 4 uncredited ram); the flags beside it are
+    # the mutually exclusive reasons a scene can be rejected or uncredited, so
+    # the number is always traceable to a cause.
+    [("tier", "tier"), ("coll", "r_collision"), ("ram", "c_rammed"),
+     ("offlane", "c_offlane"), ("early", "c_trivial"), ("cond", "c_invalid")],
+    # The two graded quantities the credited bands are built from.
+    [("minTTCego", "ego_min_ttc"), ("dmin", "ego_adv_min_dist_warmup"),
+     ("g_ttc", "r_ttc"), ("g_d", "r_approach"), ("d0", "ego_adv_init_dist")],
+    # Raw geometry behind the rejections.
+    [("spawn_lane", "spawn_lane_dist"), ("goal_lane", "goal_lane_dist"),
+     ("overlap", "init_overlap_frac")],
 ]
 
 
@@ -149,10 +156,14 @@ def _status_text(
             if parts:
                 lines.append("  ".join(parts))
     else:
+        # No components supplied: the reward's own breakdown is unavailable, so
+        # report the rollout facts the hierarchical rewards are built on.
+        # parking_mismatch is deliberately absent -- it enters neither `total`
+        # nor `invalid` in v3 and later, so it only crowded the line.
         lines = [
-            f"R={r:+.2f}  TTC={_fmt_float(ego_min_ttc)}  "
-            f"col={int(bool(collided))}  init={int(bool(init_invalid))}  "
-            f"gOff={_fmt_float(goal_offlane_frac)}  pMis={_fmt_float(parking_mismatch_frac)}"
+            f"R={r:+.2f}  minTTCego={_fmt_float(ego_min_ttc)}  "
+            f"coll={int(bool(collided))}  inval={int(bool(init_invalid))}  "
+            f"goal_off={_fmt_float(goal_offlane_frac)}"
         ]
     if collided:
         color = _EGO_COLOR
