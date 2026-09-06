@@ -340,7 +340,17 @@ number with its checkpoint, planner trio and denominator. Read that file rather
 than re-deriving numbers.
 
 Protocol for every cell: `--split val --num-scenes 1000`, the pair's `_03000.ckpt`,
-`--workers 16`. Scene sources map to table rows as:
+`--workers 16`.
+
+`scripts/score_adv_sources.py --reward <name>` is REQUIRED. It used to inherit
+the entrypoint config's reward, which is `hierarchical_v2`, so every
+`scored_adv.npz` written before that fix holds a reward/tier column from v2
+rather than from the reward the run was trained with -- visible as `tier=5.0` in
+files for a four-level reward. The `Coll.` / `Coll._f` / `minTTC` columns come
+from rollout metrics and were never affected. The reward name is now written into
+the emitted markdown so a stale file identifies itself.
+
+Scene sources map to table rows as:
 
 | Table row | Source | Produced by |
 | --- | --- | --- |
@@ -447,6 +457,100 @@ Three properties that constrain how it may be used:
   INITIALIZATION (spawn overlap) only, so the objection "that baseline is strong
   because its behavior is implausible" currently cannot be answered with a number.
 
+## What DDPO actually moves, and on which metric
+
+Two results, both pooled over the 12 `table_main_v6` cells (1000 val scenes per
+cell, driving subset, n = 11 805 paired scenes). They point in opposite
+directions and both are real.
+
+**DDPO raises near misses.** `P(minTTC_ego-adv < tau)`, paired McNemar against
+`base_gen` on the same scenes:
+
+| source | TTC < 3 s | gained | lost | p | TTC < 1.5 s | p |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `base_gen` | 283 | | | | 178 | |
+| v4 `ddpo_gen` | 463 | 259 | 79 | 2e-23 | 288 | 6e-13 |
+| v6 `ddpo_gen` | 379 | 171 | 75 | 9e-10 | 221 | 2e-03 |
+| `proximity_adv` | 331 | 310 | 262 | 0.049 | 273 | 5e-06 |
+
+**DDPO lowers ego-fault collisions.** Same scenes, `ego_fault_collision`:
+
+| source | Coll. | Coll._f | non-fault | fault share | vs base |
+| --- | ---: | ---: | ---: | ---: | --- |
+| `base_gen` | 280 | 64 | 216 | 22.9% | |
+| v6 `ddpo_gen` | 306 | 44 | 262 | 14.4% | McNemar p = 0.029, share p = 0.010 |
+| `proximity_adv` | 441 | 95 | 346 | 21.5% | McNemar p = 0.017, share p = 0.71 |
+
+So v6 DDPO adds 26 collisions and 96 near misses while REMOVING 20 ego-fault
+collisions: every collision it gains is non-fault (216 -> 262). It buys approach
+pressure and adversary-initiated contact, not crashes the ego causes. Do not
+write "DDPO increases criticality" without saying which of the two.
+
+This is the answer to the open risk `hierarchical_v4`'s docstring names: the TTC
+ceiling is 0.85 and a fault collision is 1.0, but crossing between them means
+turning a ~9% event into a <1% one, so the policy sits at the ceiling. It is not
+a reward bug -- v4 and v6 both maximise what they were told to -- it is that the
+near-miss band is where the achievable gradient is. Raising the fault level's
+value cannot fix it; only making fault collisions less rare would.
+
+`proximity_adv` is the baseline to beat here, not a weak control: 95 fault
+collisions against DDPO's 44, at the same fault SHARE as the base model
+(p = 0.71) -- it simply produces more collisions of every kind, by putting a car
+where the ego is going. It is the comparison a reviewer will construct.
+
+**Per cell, none of this is measurable.** `Coll._f` is 1 to 12 events out of
+~984 driving scenes; a +-0.10 percentage-point delta is one scene. Twelve cells
+of `Coll._f` deltas is not twelve measurements of an effect. Report event counts
+(`44/11805`), pool before testing, and never average the per-cell percentages.
+The earlier "0 of 12 cells positive" reading of the v4 sweep was noise; the
+pooled test is what carries the sign.
+
+Two more traps in the same family:
+
+- **Do not compare a training-log metric to an eval metric.** Training runs on
+  `context_prior` with `focus_frac=0.7`, measured 4.5x more collision-prone than
+  uniform val (train `coll` 0.132 against eval 0.0259); the denominators differ
+  (whole batch of 128 against the driving subset); and `base_gen` is generated
+  with EMA weights while `ddpo_gen` is not. A +35% move in the training `fault`
+  is consistent with no move at all in eval.
+- **The v4 and v6 roots are not comparable on the fault columns.** `table_main_v4`
+  was scored with the cone predicate, `table_main_v6` with the front-face one:
+  the SAME `base_gen` scenes give 38 fault collisions under one and 64 under the
+  other. Their TTC columns ARE comparable, because only the contact half of the
+  predicate changed. See `### The ego-fault predicate`.
+
+The `driving` subset (`ego_goal_dist >= 10`) is a scene property, not a rollout
+outcome -- it is spawn-to-goal distance, identical to 4 mm across SUTs -- so it
+is exactly 984 scenes in all 12 cells and the pairing across cells is exact.
+
+## The reward series
+
+`hierarchical_v3` is described below; v4 through v7 each change exactly one
+thing, and each was run over the same 12 cells so they can be compared. Every
+number in this section is a TRAINING-log metric measured on prior-focused
+contexts, not an eval metric -- see the trap above before comparing any of it to
+a table column.
+
+| version | change from the previous | measured outcome |
+| --- | --- | --- |
+| v4 | collision level admits only ego-fault collisions | ram falls to `d_min`, where a contact scores that band's maximum: ramming paid ~4x a quiet scene in the three highest-ram cells |
+| v5 | ram and off-lane join `invalid` (-1) | ramming stops (collisions 97 -> 29 scenes in idm-ppo_aggressive) but the invalid band never comes down: 22.4% flat over 500 iterations, 22.6%, 18.3%, 14.9% across four cells |
+| v6 | ram scored 0 instead of -1; off-lane stays -1 | invalid halves to 11%, collisions return to base level, `tier3` rises in all 12 cells (+13% to +82%) |
+| v7 | a ram that followed a real ego approach keeps the TTC band | rescores 0.15% of scenes, 9 of 12 of them in ppo-idm |
+
+Three things every one of them shares, measured across all 12 cells:
+
+- **`tier0 invalid` rises during training, in 12 cells out of 12**, from 11-13%
+  to 13-15.4%, whatever the offline replay predicts. The policy trades placement
+  legality for tier2/tier3 mass; budget for it rather than treating it as a bug.
+- **`grp_std` never collapsed.** It runs 0.23-0.40 and is HIGHER under the
+  versions with a bigger invalid band, not lower -- a bimodal -1/positive reward
+  has more spread, not less. The starvation worry that shaped v5's design was
+  wrong.
+- **`tier4 ram` moves in whichever direction its starting value implies**: cells
+  starting above 10% fall (-9%, -20%), cells starting below 6% rise. A reward
+  that removes the ram incentive can only act where there are rams to remove.
+
 ## Reward: `hierarchical_v3`
 
 Four levels, strictly ordered, selected with `ddpo/reward=hierarchical_v3`:
@@ -467,12 +571,18 @@ with `g_ttc = clip(1 - minTTC_ego/tau, 0, 1)` and
 `closed_in > close_delta`.
 
 Every level above `invalid` measures ONE phenomenon at a different severity: the
-ego running into the adversary. `ego_min_ttc` and `ego_fault_collision` share the
-`SimScene._ego_aggressor_mask` gate, so the near miss and the crash are the same
+ego running into the adversary. `ego_min_ttc` and `ego_fault_collision` gate on
+the same idea at two distances -- `SimScene._ego_approaching_mask` (the forward
+cone, for the approach) and `_ego_front_contact_mask` (the front face against the
+other's box, for the contact) -- so the near miss and the crash are the same
 event seen earlier or later. `hierarchical` (v2) did not have this property: its
 collision level was fault-agnostic while its TTC level was ego-gated.
 
-Four things that are load-bearing, each with the measurement behind it:
+Four things that are load-bearing, each with the measurement behind it. The
+first of them is what v4 overturned, and the reason it could be overturned is
+that the fault predicate changed under it: the measurement below assumes
+`fault | collision` = 44.4%, which the cone predicate produced. See
+`### The ego-fault predicate`.
 
 - **Fault is a bonus, not a level.** Making it its own top level inverts the
   expected ordering. `fault | collision` is 44.4% (ppo-ppo_norm `base_gen`, 984
@@ -495,6 +605,27 @@ Four things that are load-bearing, each with the measurement behind it:
 
 `lane_penalty` is 0 in v3: there is no band for it, so realism guarding falls
 entirely to the `invalid` level.
+
+### The ego-fault predicate
+
+`ego_fault_collision` tests whether the ego's FRONT FACE -- the segment between
+the two corners at `+length/2` -- overlaps the other's box
+(`SimScene._ego_front_contact_mask`), plus an absolute speed gate. It used to ask
+where the other agent's CENTRE fell inside a cone (`|y|/x <= W/L`), which asks
+about the wrong point: two idm-idm scenes that read as head-on were scored
+not-at-fault, one of them a two-degree miss with the ego closing at 6.6 m/s. The
+face test raised the fault share of that cell's collisions from 33.3% to 47.1%.
+
+The predicate is deliberately SPLIT. A face-vs-box overlap is only true at the
+instant of contact, so gating `EgoMinTTCHook` on it puts `ego_min_ttc` at +inf
+everywhere and collapses the TTC level. `_ego_approaching_mask` keeps the cone
+for the approach -- it is the same front face swept forward. A scene can satisfy
+the cone during the approach and have the contact land on the ego's flank: a
+near miss the ego caused, but not a collision it caused.
+
+`Coll._f` measured before this change is stale; `minTTC` is NOT, because the
+cone half is untouched -- so v3-era and v4-era TTC columns compare directly.
+Re-scoring needs no regeneration; the scene artifacts are unchanged.
 
 ### Why v2 failed, and what changed under it
 
