@@ -1,0 +1,59 @@
+# @package _global_
+#
+# Four-level reward whose top level is the EGO-FAULT collision alone
+# (ddpo/reward/hierarchical_v7.py):
+#
+#   invalid  ->  ego-fault collision  ->  min TTC_ego  ->  d_min
+#
+# Same levels and the same grading inside each as `hierarchical_v3`; the one
+# change is that the collision level tests `ego_fault_collision` rather than
+# `ego_collision`. A collision the ego did not cause is not penalised, it just
+# is not admitted to the top level and falls to whichever level its own
+# `ego_min_ttc` / `d_min` put it in.
+#
+# The reason is measured, on the 12 table_main_v3 cells: v3 pays for any valid
+# collision, and the cheapest way to get one is to drive the adversary into the
+# ego. Pooled over those 12 ddpo_gen sources, 88.1% of collisions never put the
+# ego in aggressor geometry at any step and only 3.9% were ego-fault at contact;
+# in pdm-ppo_aggressive (158 collisions) it was 100% / 0%. DDPO lowered the
+# fault share in every cell it trained on.
+#
+# This does not starve the gradient, because `ego_min_ttc` carries the same
+# `_ego_aggressor_mask` gate: a ram has `ego_min_ttc = inf` and `g_ttc = 0`, so
+# it cannot enter the TTC level either and lands on `d_min`, worth <= prox_hi.
+# Every level a ram can reach is below the near-miss band, so the incentive is
+# removed rather than reduced. The TTC level is the fault collision's own
+# precursor and holds ~9% of samples, which is what GRPO needs for within-group
+# contrast while the top level is still nearly empty.
+#
+# r_collision is 1.0, not v3's 0.9 + 0.1 bonus: fault is the admission test now,
+# so there is nothing left to pay a bonus for, and the level should keep the
+# value a fault collision had before.
+ddpo:
+  reward_run_tag: "_hier_v7"
+  simulator:
+    path_conflict:
+      conflict_dist: 14.0
+      speed_floor: 1.0
+      follow_cos: 1.1
+      follow_lane_tol: 2.0
+      skip_rollout: true
+  reward:
+    name: hierarchical_v7
+    ttc_tau: 3.0
+    hard_collision_t: 1.0
+    d_near: 2.0
+    d_far: 20.0
+    close_delta: 1.0
+    r_invalid: -1.0
+    r_collision: 1.0
+    ttc_lo: 0.4
+    ttc_hi: 0.85
+    prox_hi: 0.3
+    lane_soft: 1.75
+    lane_hard: 2.75
+    lane_penalty: 0.0
+    collision_warmup: 0.75
+    collision_window: 0.5
+    trivial_collision_t: 0.75
+    invalid_grade_scale: 10.0
