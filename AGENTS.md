@@ -534,6 +534,30 @@ hard selects scenes that are critical BY THAT PROXY and recoverable in fact.
 This is the sharper form of "the policy sits at the TTC ceiling": the scenes on
 that ceiling do not structurally lead to contact.
 
+**500 iterations is not under-training; the trust region is what binds.** Three
+independent measurements, all pointing the same way:
+
+- `hierarchical_v2` has checkpoints across a 6x range. Its `_00500` and `_03000`
+  artifacts, generated and scored side by side over 6 cells (n = 5903,
+  `data/critical_scene/v2_iter500_20260907/`), are statistically identical:
+  `TTC<3s` 349 -> 367 (p = 0.50), `TTC<1.5s` 231 -> 240 (p = 0.70), `Coll.`
+  151 -> 175 (p = 0.19), `fault&appr` 36 -> 40 (p = 0.73). The gained/lost counts
+  are both ~320, i.e. different scenes, same distribution.
+- In the v7 batch `tier2` peaks in the last 100 iterations in 1 cell out of 12,
+  and `tier3` in 1 of 12. Almost every cell peaks at it 100-300 and drifts down.
+- KL reaches the `kl_target=0.2` setpoint in 12 cells out of 12 by it 400
+  (0.20-0.27, from 0.08 over the first 100), with `kl_coef` off its floor.
+
+**Removing the trust region does not unlock the plateau, it destroys the
+generator.** `kl_target=0 kl_coef=0` on `ppo-ppo_norm` with `hierarchical_v4`
+collapses by iteration 77: `cond_invalid` 0.805, `parked` 0.234, `adv_dist`
+18-27 m against a normal 9.5, `tier0` 0.83, `pos_reward_rate` 0.008, reward
+-0.80. Against a KL-constrained run at the same point (`cond_invalid` ~0.01,
+`parked` ~0.00, `tier0` ~0.12, reward ~+0.01). The KL budget is not suppressing
+reachable gains; it is holding the policy where it still emits legal scenes.
+The open question it leaves is the MIDDLE of that range -- `kl_target` 0.5 or
+1.0 -- which is what would separate "budget-limited" from "reward-limited".
+
 **Near misses are the metric with power, and DDPO raises them.** `Coll._f` is 1 to
 12 events per cell out of ~984 driving scenes, so per cell it measures nothing;
 pooled it resolves, and only for v6/v7. Report event counts (`50/11808`), pool
