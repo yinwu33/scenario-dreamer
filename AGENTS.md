@@ -390,9 +390,19 @@ pure re-scoring with a different `--sut` -- the transfer table costs no generati
 - Generated rows report ~983 driving egos against 1000 for `original`. That is
   autoencoder reconstruction jitter around the 10 m threshold; the ego moves a
   median of 3 cm. Not a bug, but say so if a caption claims identical scenes.
-- DDPO checkpoints store raw `state_dict` with no EMA shadow, so the base model
-  is evaluated with EMA weights and AdvScene without. This understates the
-  AdvScene-vs-base delta rather than inflating it.
+- **There is no EMA mismatch between `base_gen` and `ddpo_gen`, and an earlier
+  note here claiming one was wrong.** DDPO initialises its policy with
+  `use_ema_weights=true` and maintains no EMA of its own, so `ddpo_gen` is
+  sampled from (base EMA weights + DDPO updates) and `base_gen` from the base
+  EMA weights: the pair is exactly before/after, with nothing discarded. The
+  raw `state_dict` in a DDPO checkpoint is not a lost shadow.
+- **The EMA axis is nonetheless worth 2x on `Coll._f`**, so never evaluate a base
+  model with raw weights by accident. Measured over the 12 cells by
+  regenerating `base_gen` with `ddpo.use_ema_weights=false`
+  (`data/critical_scene/base_noema_20260907/`): `flt&appr` 42 -> 21 and
+  `Coll._f` 64 -> 57, while `TTC<3s` is unchanged (283 -> 285) and `Coll.` barely
+  moves (280 -> 258). Weight smoothing decides whether the ego ends up the
+  aggressor; it does not decide how many near misses there are.
 - The proximity baseline's clearance is load-bearing. 8 m is the smallest value
   that leaves the spawn-overlap rate at the log distribution's own 6.8%; 5 m
   inflates it to 14.8% and turns the baseline into an overlap generator (16.50%
@@ -492,6 +502,37 @@ verified bit-identical to today. Do NOT mix in a number from any root's own
 `ego_fault_collision AND finite ego_min_ttc` -- the ego both approached and made
 the contact. `ram/Coll` is the share of collisions with `ego_min_ttc = inf`, i.e.
 the ego never approached at all.
+
+**DDPO buys approach events and does not convert them.** Of the scenes where the
+ego did approach (`TTC<3s`), the fraction that end in a collision the ego caused:
+
+| source | TTC<3s | fault&appr | conversion | p vs base |
+| --- | ---: | ---: | ---: | ---: |
+| `base_gen` | 283 | 42 | 14.8% | |
+| v3 | 443 | 40 | 9.0% | 0.022 |
+| v4 | 463 | 37 | 8.0% | 0.0045 |
+| v6 | 379 | 25 | 6.6% | 0.00064 |
+| v7 | 373 | 31 | 8.3% | 0.012 |
+| `proximity_adv` | 333 | 56 | 16.8% | 0.58 |
+
+The two effects cancel: 463 x 8.0% is the same 37 as 283 x 14.8% is 42. That is
+why the absolute fault count looks flat -- not because nothing happened.
+`proximity_adv` is the control that matters: it does NOT lose conversion.
+
+The mechanism is measured, not inferred. DDPO leaves the spawn distance alone
+(median 16.7 m, same as base) and instead drives `ego_adv_min_dist` down
+(12.54 -> 10.99 m) while cutting contacts before 1 s (80 -> 45 scenes) and spawn
+overlap (6.1% -> 5.2%). That is exactly what the reward asks for: the TTC band is
+reachable, the fault band is rare, and `hard_collision_t = 1.0` makes an early
+contact -1. But a configuration tuned to minimise TTC gives the ego the whole
+approach to react, and `ppo_normal` / `idm` / `pdm` all brake -- ego `Succ.` only
+falls 86.1% -> 85.1%. `proximity_adv` optimises nothing and simply parks a car
+8.2 m ahead (`path_conflict` 98.0%), which the ego cannot recover from.
+
+So the TTC band is a proxy for the fault collision, and optimising the proxy
+hard selects scenes that are critical BY THAT PROXY and recoverable in fact.
+This is the sharper form of "the policy sits at the TTC ceiling": the scenes on
+that ceiling do not structurally lead to contact.
 
 **Near misses are the metric with power, and DDPO raises them.** `Coll._f` is 1 to
 12 events per cell out of ~984 driving scenes, so per cell it measures nothing;
