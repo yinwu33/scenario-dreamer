@@ -334,12 +334,20 @@ parent's timers can only see the central forwards.
 
 ## Paper Evaluation
 
-Results for the paper's tables live in `data/critical_scene/table_main_20260830/`,
-one directory per planner pair plus `PROVENANCE.json`, which records every printed
-number with its checkpoint, planner trio and denominator. Read that file rather
-than re-deriving numbers.
+**`data/critical_scene/table_main_20260830/` is VOID for every rollout column.**
+It was scored 2026-09-02, before the 09-04 sim boundary, and with
+`score_paired_sources.py` (ego-vs-ANY) rather than the adversarial scorer. Its
+`PROVENANCE.json` is still the right record of WHICH checkpoint and planner trio
+produced each artifact, and its artifacts are still usable -- re-score them, do
+not quote them. See `### The sim boundary of 2026-09-04`.
 
-Protocol for every cell: `--split val --num-scenes 1000`, the pair's `_03000.ckpt`,
+The current adversarial numbers are the table in
+`## What DDPO actually moves, and on which metric`, backed by
+`data/critical_scene/table_main_v6/`, `_v7/` and
+`data/critical_scene/rescore_face_20260907/`.
+
+Protocol for every cell: `--split val --num-scenes 1000`, the pair's checkpoint
+(`_03000.ckpt` for the 20260830 run, `_00500.ckpt` for the v3-v7 sweeps),
 `--workers 16`.
 
 `scripts/score_adv_sources.py --reward <name>` is REQUIRED. It used to inherit
@@ -396,19 +404,23 @@ pure re-scoring with a different `--sut` -- the transfer table costs no generati
 
 ### Findings that should shape further work
 
+The first three of these were measured on the VOID 20260830 root. Their shape is
+probably right and their numbers are not; re-score before quoting any of them.
+
 - Most of the criticality gain comes from the generator, not from DDPO. Against
   logged scenes the base model gains +3.4 to +6.5 points; DDPO adds -0.19 to
   +7.67 on top, and that increment tracks how aggressive the traffic is
-  (largest for `ppo_aggressive`, negative for `idm-idm`).
+  (largest for `ppo_aggressive`, negative for `idm-idm`). [pre-boundary]
 - Best-of-K from the frozen base overtakes AdvScene: one AdvScene sample is worth
   K=3 (IDM SUT) to K=6 (PPO SUT) base samples, and best-of-32 beats it outright.
-  Report the strongest K, not a favourable one.
+  Report the strongest K, not a favourable one. [pre-boundary]
 - Selecting best-of-K by reward recovers only ~45% of the oracle headroom
   (6.92% vs 15.97% at K=32), so the headroom probe's curve is a ceiling, not the
-  baseline a practitioner achieves.
+  baseline a practitioner achieves. [pre-boundary]
 - Spawn overlap: log scenes 6.8%, `original_ddpo_adv` 12.8%, fully generated
   ~28%. Part of the fully-generated rows' collision rate is artifact, which is
-  why `original_ddpo_adv` is the clean control.
+  why `original_ddpo_adv` is the clean control. This one SURVIVES the boundary:
+  it is a property of the initialisation, not of the rollout.
 - Results in `data/critical_scene/table_main/` (2026-08-26) are void: they were
   measured with the broken `1.0 / 1.0` PPO config, which reported 9.80% ego
   success where the healthy planner reports 95.21%.
@@ -459,51 +471,57 @@ Three properties that constrain how it may be used:
 
 ## What DDPO actually moves, and on which metric
 
-Two results, both pooled over the 12 `table_main_v6` cells (1000 val scenes per
-cell, driving subset, n = 11 805 paired scenes). They point in opposite
-directions and both are real.
+Every number below is from ONE scoring pass with the current `sim/`, over the 12
+`table_main` cells (1000 val scenes each, driving subset, n = 11 808). The v2/v3/v4
+rows come from `data/critical_scene/rescore_face_20260907/`, which re-rolls those
+versions' stored `ddpo_gen` artifacts under today's code; v6 and v7 are read from
+their own roots, and `base_gen` / `proximity_adv` from `table_main_v6`, which was
+verified bit-identical to today. Do NOT mix in a number from any root's own
+`scored_adv.md` -- see `### The sim boundary of 2026-09-04`.
 
-**DDPO raises near misses.** `P(minTTC_ego-adv < tau)`, paired McNemar against
-`base_gen` on the same scenes:
+| source | TTC<3s | p | TTC<1.5s | Coll. | Coll._f | p | fault&appr | p | ram/Coll |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `base_gen` | 283 | | 178 | 280 | 64 | | 42 | | 81.8% |
+| v3 | 443 | 5e-10 | 285 | 564 | 66 | 0.93 | 40 | 0.90 | 89.2% |
+| v4 | **463** | 5e-12 | 288 | 398 | 65 | 1.00 | 37 | 0.64 | 85.7% |
+| v6 | 379 | 8e-05 | 221 | 306 | 44 | 0.06 | 25 | 0.04 | 86.6% |
+| v7 | 373 | 6e-05 | 216 | 293 | 50 | 0.17 | 31 | 0.20 | 86.0% |
+| `proximity_adv` | 333 | 0.12 | 275 | 441 | 95 | 0.02 | 56 | 0.18 | 85.9% |
 
-| source | TTC < 3 s | gained | lost | p | TTC < 1.5 s | p |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| `base_gen` | 283 | | | | 178 | |
-| v4 `ddpo_gen` | 463 | 259 | 79 | 2e-23 | 288 | 6e-13 |
-| v6 `ddpo_gen` | 379 | 171 | 75 | 9e-10 | 221 | 2e-03 |
-| `proximity_adv` | 331 | 310 | 262 | 0.049 | 273 | 5e-06 |
+`p` is a paired McNemar against `base_gen` on the same scenes. `fault&appr` is
+`ego_fault_collision AND finite ego_min_ttc` -- the ego both approached and made
+the contact. `ram/Coll` is the share of collisions with `ego_min_ttc = inf`, i.e.
+the ego never approached at all.
 
-**DDPO lowers ego-fault collisions.** Same scenes, `ego_fault_collision`:
+**Near misses are the metric with power, and DDPO raises them.** `Coll._f` is 1 to
+12 events per cell out of ~984 driving scenes, so per cell it measures nothing;
+pooled it resolves, and only for v6/v7. Report event counts (`50/11808`), pool
+before testing, never average per-cell percentages. The earlier "0 of 12 cells
+positive" reading of the v4 sweep was noise.
 
-| source | Coll. | Coll._f | non-fault | fault share | vs base |
-| --- | ---: | ---: | ---: | ---: | --- |
-| `base_gen` | 280 | 64 | 216 | 22.9% | |
-| v6 `ddpo_gen` | 306 | 44 | 262 | 14.4% | McNemar p = 0.029, share p = 0.010 |
-| `proximity_adv` | 441 | 95 | 346 | 21.5% | McNemar p = 0.017, share p = 0.71 |
-
-So v6 DDPO adds 26 collisions and 96 near misses while REMOVING 20 ego-fault
-collisions: every collision it gains is non-fault (216 -> 262). It buys approach
-pressure and adversary-initiated contact, not crashes the ego causes. Do not
-write "DDPO increases criticality" without saying which of the two.
+**Restricting the reward costs near misses without buying fault collisions.** v3
+and v4 hold `Coll._f` at the base model's level (66 and 65 against 64) while
+raising near misses most; v6 and v7 significantly LOWER `fault&appr` (25 and 31
+against 42) and land lower on TTC too. So "DDPO lowers ego-fault collisions" is a
+property of v6/v7, not of DDPO.
 
 This is the answer to the open risk `hierarchical_v4`'s docstring names: the TTC
 ceiling is 0.85 and a fault collision is 1.0, but crossing between them means
-turning a ~9% event into a <1% one, so the policy sits at the ceiling. It is not
-a reward bug -- v4 and v6 both maximise what they were told to -- it is that the
-near-miss band is where the achievable gradient is. Raising the fault level's
-value cannot fix it; only making fault collisions less rare would.
+turning a ~9% event into a <1% one, so the policy sits at the ceiling. Raising
+the fault level's value cannot fix it; only making fault collisions less rare
+would.
 
-`proximity_adv` is the baseline to beat here, not a weak control: 95 fault
-collisions against DDPO's 44, at the same fault SHARE as the base model
-(p = 0.71) -- it simply produces more collisions of every kind, by putting a car
-where the ego is going. It is the comparison a reviewer will construct.
+**The ram share is not a DDPO pathology.** `ram/Coll` is 82% for the FROZEN base
+model and 86% for `proximity_adv`; every DDPO version sits in the same 86-89%
+band. It is a property of the traffic planners, concentrated by cell: 93-96% in
+the three `ppo_aggressive` cells against 40-46% in `ppo-idm` / `idm-idm`. A
+reward that penalises it is deleting signal, not fixing a hack -- which is what
+v5/v6/v7 measured.
 
-**Per cell, none of this is measurable.** `Coll._f` is 1 to 12 events out of
-~984 driving scenes; a +-0.10 percentage-point delta is one scene. Twelve cells
-of `Coll._f` deltas is not twelve measurements of an effect. Report event counts
-(`44/11805`), pool before testing, and never average the per-cell percentages.
-The earlier "0 of 12 cells positive" reading of the v4 sweep was noise; the
-pooled test is what carries the sign.
+`proximity_adv` is the baseline to beat, not a weak control: 95 fault collisions
+against v4's 65 and v6's 44, at the base model's own fault share -- it simply
+produces more collisions of every kind, by putting a car where the ego is going.
+It is the comparison a reviewer will construct.
 
 Two more traps in the same family:
 
@@ -513,36 +531,82 @@ Two more traps in the same family:
   (whole batch of 128 against the driving subset); and `base_gen` is generated
   with EMA weights while `ddpo_gen` is not. A +35% move in the training `fault`
   is consistent with no move at all in eval.
-- **The v4 and v6 roots are not comparable on the fault columns.** `table_main_v4`
-  was scored with the cone predicate, `table_main_v6` with the front-face one:
-  the SAME `base_gen` scenes give 38 fault collisions under one and 64 under the
-  other. Their TTC columns ARE comparable, because only the contact half of the
-  predicate changed. See `### The ego-fault predicate`.
+- **TTC alone overstates `proximity_adv`.** In `ppo-ppo_norm` it reaches 92
+  scenes under 3 s -- the highest of any source -- with 2 collisions and 0 fault
+  collisions, because a car parked 8 m ahead guarantees a small TTC and
+  `ppo_normal` simply brakes. Always print the collision count beside TTC.
 
 The `driving` subset (`ego_goal_dist >= 10`) is a scene property, not a rollout
 outcome -- it is spawn-to-goal distance, identical to 4 mm across SUTs -- so it
 is exactly 984 scenes in all 12 cells and the pairing across cells is exact.
 
-## The reward series
+### The sim boundary of 2026-09-04
+
+`sim/` changed materially at 09-04 12:07-12:08, and nothing measured or trained
+before it is comparable with anything after:
+
+- `d880e2f` controls EVERY agent, not only those spawned away from their goal.
+  This changes which cars drive, so it changes every collision and every TTC.
+- `fd327bc` gave PDM lateral-offset proposals, changing every `pdm-*` rollout.
+- `5fda69d` made the ego-fault predicate geometric; `1062449` (09-05 22:44) then
+  moved it to the front-face contact test.
+
+What that invalidates, checked by re-scoring rather than assumed:
+
+| root | scored | status |
+| --- | --- | --- |
+| `table_main_20260830` (v2) | 09-02 | void; also reports ego-vs-ANY from `score_paired_sources.py` |
+| `table_main_v3` | 09-04 02:06 | void in EVERY rollout column -- re-scoring moves one scene's `ego_min_ttc` by 5.7 s |
+| `table_main_v4` | 09-05 02:17 | TTC and Coll. bit-exact against today; fault column stale |
+| `table_main_v5/v6/v7` | 09-05 -> 09-06 | current |
+
+It also splits the CHECKPOINTS. v2 (trained 08-28) and v3 (trained 09-04 07:46,
+four hours before the commit) optimised a different simulator; v4 onward did not.
+Their artifacts can still be scored fairly -- that is what the re-score does --
+but a v2-or-v3-versus-v4 gap is reward x sim-version, not a reward result. Only
+v4/v5/v6/v7 form a clean reward comparison. Settling whether a fault-agnostic
+collision band beats v4 needs v3 RETRAINED under the current sim, not re-scored.
+
+## The reward series: use v4
+
+**`hierarchical_v4` is the version to use.** v5, v6 and v7 are a closed negative
+result: each removed a further way to score, and each cost near misses without
+buying ego-fault collisions (the eval table above). Do not extend the series in
+that direction, and do not revive v5's or v6's premise without new evidence.
 
 `hierarchical_v3` is described below; v4 through v7 each change exactly one
-thing, and each was run over the same 12 cells so they can be compared. Every
-number in this section is a TRAINING-log metric measured on prior-focused
-contexts, not an eval metric -- see the trap above before comparing any of it to
-a table column.
+thing, and all four trained under the same `sim/`, so they form a clean
+comparison (v2 and v3 do not -- see `### The sim boundary of 2026-09-04`). The
+per-version outcomes below are TRAINING-log metrics on prior-focused contexts,
+not eval metrics -- see the trap above before comparing any of them to a table
+column. What each change did to the EVAL numbers is the table above, not this
+one: a version can look good here and lose there, which is exactly what v6 did.
 
 | version | change from the previous | measured outcome |
 | --- | --- | --- |
 | v4 | collision level admits only ego-fault collisions | ram falls to `d_min`, where a contact scores that band's maximum: ramming paid ~4x a quiet scene in the three highest-ram cells |
 | v5 | ram and off-lane join `invalid` (-1) | ramming stops (collisions 97 -> 29 scenes in idm-ppo_aggressive) but the invalid band never comes down: 22.4% flat over 500 iterations, 22.6%, 18.3%, 14.9% across four cells |
 | v6 | ram scored 0 instead of -1; off-lane stays -1 | invalid halves to 11%, collisions return to base level, `tier3` rises in all 12 cells (+13% to +82%) |
-| v7 | a ram that followed a real ego approach keeps the TTC band | rescores 0.15% of scenes, 9 of 12 of them in ppo-idm |
+| v7 | a ram that followed a real ego approach keeps the TTC band | rescores 0.15% of scenes, 9 of 12 of them in ppo-idm; recovers about half of v6's `fault&appr` loss (25 -> 31 against base 42) and nothing on TTC |
 
-Three things every one of them shares, measured across all 12 cells:
+The carve-out v7 exists for did NOT pay off where it was designed to. Its
+target is the `ppo_aggressive` family, the only cells with `tier4 ram` above
+10%; pooled over those three cells it is not significant on any column
+(p = 0.34 to 1.00). Two of the three looked positive on their own -- that is
+what single cells of a 5-to-15-event metric do.
 
-- **`tier0 invalid` rises during training, in 12 cells out of 12**, from 11-13%
-  to 13-15.4%, whatever the offline replay predicts. The policy trades placement
-  legality for tier2/tier3 mass; budget for it rather than treating it as a bug.
+Five things measured across all 12 cells of each batch:
+
+- **`tier0 invalid` and `init_invalid` are different quantities and move in
+  OPPOSITE directions.** `init_invalid` (the placement flag) falls in 36 cells
+  out of 36 across the v4, v6 and v7 batches, 7-9% down to 6-8%. `tier0` (the
+  reward's invalid BAND, which also absorbs rejects and pre-`hard_collision_t`
+  contact) rises. Do not read one as the other; both are called "invalid".
+- **How much `tier0` rises separates v4 from v6/v7.** v4 is flat: mean 8.2% ->
+  8.3%, up in only 8 of 12 cells. v6 and v7 climb 11.6% -> 14.1% and 11.8% ->
+  14.0%, up in 12 of 12. So the versions that lose on eval are exactly the ones
+  paying placement legality for tier2/tier3 mass; the winning one does not. An
+  earlier note here recorded the 12-of-12 rise as universal -- it is v6/v7 only.
 - **`grp_std` never collapsed.** It runs 0.23-0.40 and is HIGHER under the
   versions with a bigger invalid band, not lower -- a bimodal -1/positive reward
   has more spread, not less. The starvation worry that shaped v5's design was
@@ -550,6 +614,12 @@ Three things every one of them shares, measured across all 12 cells:
 - **`tier4 ram` moves in whichever direction its starting value implies**: cells
   starting above 10% fall (-9%, -20%), cells starting below 6% rise. A reward
   that removes the ram incentive can only act where there are rams to remove.
+- **A negative mean training reward is not a failure.** Four cells ran negative
+  for all 500 iterations (`pdm-idm`, `pdm-ppo_norm`, `pdm-ppo_caution`,
+  `idm-ppo_norm`) and every one of them scored at or above `base_gen` on eval.
+  GRPO whitens within the group, so the mean carries no information about
+  whether the policy is improving; read `grp_std`, `tier2`/`tier3` and the eval
+  pass instead.
 
 ## Reward: `hierarchical_v3`
 
