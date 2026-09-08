@@ -1,0 +1,45 @@
+# SceneControl-style guided sampling -- the BASELINE objective.
+#
+# The model is unconditional; everything here acts at sampling time only, so changing
+# it needs no retraining.
+#
+# Deliberately assumption-free: the cost constrains only quantities the model emits
+# directly (spawn positions and goals) and never extrapolates a trajectory. A conflict
+# becomes STRUCTURAL rather than simulated -- two agents that start close together and
+# are headed for the same place must interact, under any dynamics you later roll out.
+# The trajectory-based alternative lives in guidance_criticality.yaml; it needs a
+# motion model, a closure gate and a TTC window, all of which are our modelling
+# choices rather than SceneControl's.
+
+# ---- where in the reverse chain guidance acts -------------------------------
+# Diffusion runs t = n_diffusion_timesteps-1 -> 0. Guidance is applied only for
+# t <= t_start: above it x̂₀ is still mostly noise and its gradient is meaningless.
+t_start: 60
+# Inner gradient steps per denoising step.
+num_grad_steps: 8
+# Displacement per inner step in the model's [-1, 1] state space, AFTER per-scene
+# gradient normalisation. 0.05 ~ 2.5% of the full range (the [-1,1] box spans the
+# 64 m FOV, so this is ~1.6 m per inner step). At 0.02 the chain ended with the
+# constraints still violated -- spawn_gap 11.7 m against a 10 m target -- because the
+# DDPM posterior pulls x̂₀ back toward the model's own prediction at every step.
+step_size: 0.05
+
+cost_type: proximity
+
+cost:
+  # 1. adversary spawns within this radius of the ego (metres)
+  adv_ego_spawn_radius: 10.0
+  # 2. adversary's goal lies within this radius of the EGO's goal (metres)
+  adv_ego_goal_radius: 10.0
+  # 3. the ego's own goal is at least this far from the ego (metres). Without it the
+  #    scenario is trivial: the generator emits a stationary ego most of the time
+  #    (goal distances of 0.4 / 5.0 / 31.1 / 0.1 m over a sample of four), and a
+  #    parked ego cannot be threatened. Real Waymo egos travel ~30 m over the same
+  #    window, so this pulls the generated distribution toward the data, not away.
+  ego_min_goal_dist: 25.0
+
+  # Every term is a squared hinge in metres^2, so they are already on one scale and
+  # a satisfied constraint contributes exactly zero gradient.
+  adv_spawn_coef: 1.0
+  adv_goal_coef: 1.0
+  ego_trip_coef: 1.0

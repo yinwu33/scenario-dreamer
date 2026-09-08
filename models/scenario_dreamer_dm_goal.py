@@ -1,6 +1,7 @@
 import torch
 from torch_ema import ExponentialMovingAverage
 
+from cfgs.config import NON_PARTITIONED
 from models.scenario_dreamer_dm import ScenarioDreamerDM
 from nn_modules.dm_goal import DMGoal
 from utils.data_helpers import unnormalize_scene
@@ -34,6 +35,54 @@ class ScenarioDreamerDMGoal(ScenarioDreamerDM):
         super().__init__(cfg)
         self.diff_model = DMGoal(self.cfg)
         self.ema = ExponentialMovingAverage(self.diff_model.parameters(), decay=self.cfg.train.ema_decay)
+
+    def _initialize_pyg_dset(self, mode, num_samples, conditioning_path=None, nocturne_compatible_only=False):
+        """Build the generation dataset by sampling ``(num_lanes, num_agents)``
+        layouts from ``eval.init_prob_matrix_path``.
+
+        Overrides the baseline DM path, which indexes a **3D**
+        ``(num_map_ids, num_lanes, num_agents)`` prior by ``map_id``. The v2 goal
+        records carry no nocturne metadata, so their prior
+        (``initial_prob_matrix_goal_waymo.pt``, built by
+        ``scripts/create_goal_init_prob_matrix.py``) is a **2D** joint
+        distribution with no map_id dimension -- the same shape ldm_adv uses, so
+        the two baselines sample layouts from an identical prior.
+        """
+        if mode != "initial_scene":
+            return super()._initialize_pyg_dset(mode, num_samples, conditioning_path, nocturne_compatible_only)
+        if self.cfg.dataset_name != "waymo":
+            raise ValueError("dm_goal generation currently supports Waymo only.")
+
+        prior = self.init_prob_matrix
+        expected = (self.cfg_dataset.max_num_lanes + 1, self.cfg_dataset.max_num_agents + 1)
+        assert tuple(prior.shape) == expected, (
+            f"Expected a 2D init_prob_matrix with shape {expected}, got "
+            f"{tuple(prior.shape)} from {self.cfg.eval.init_prob_matrix_path}"
+        )
+
+        flatten_probs = prior.reshape(-1)
+        if not torch.isfinite(flatten_probs).all():
+            raise ValueError("init_prob_matrix contains NaN or Inf")
+        if (flatten_probs < 0).any():
+            raise ValueError("init_prob_matrix contains negative probabilities")
+        if flatten_probs.sum() <= 0:
+            raise ValueError(f"Empty init_prob_matrix at {self.cfg.eval.init_prob_matrix_path}")
+
+        data_list = []
+        for _ in range(num_samples):
+            prob_idx = int(torch.multinomial(flatten_probs, 1).item())
+            num_lanes = prob_idx // (self.cfg_dataset.max_num_agents + 1)
+            num_agents = prob_idx % (self.cfg_dataset.max_num_agents + 1)
+            assert num_lanes > 0, "Generating scene with no lanes"
+            # The guidance baseline needs the ego plus at least one other agent to
+            # push; the prior is built with the same >= 2 constraint.
+            assert num_agents >= 2, (
+                "Guided adversarial generation needs the ego plus at least one "
+                "non-ego agent; rebuild the prior with --min-num-agents 2."
+            )
+            data_list.append(self._empty_scene(num_lanes, num_agents, 0, NON_PARTITIONED))
+
+        return data_list, None
 
     def forward(
         self,

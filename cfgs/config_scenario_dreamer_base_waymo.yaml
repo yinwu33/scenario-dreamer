@@ -1,0 +1,46 @@
+# Faithful Scenario Dreamer Base reproduction on the original 7-D Waymo data.
+#
+# The recommended route reuses the official Scenario Dreamer autoencoder and
+# trains only the missing Base LDM.  Base and Large use the same autoencoder;
+# their architectural difference is ldm.model.num_l2l_blocks (1 vs. 3).
+# scripts/run_scenario_dreamer_base_waymo.sh also exposes an optional full
+# from-scratch AE -> latent cache -> Base LDM route under independent names.
+
+model_name: ldm
+
+defaults:
+  - _base
+  - dataset_name: waymo
+  - dataset@ae.dataset: waymo_autoencoder
+  - train@ae.train: waymo_autoencoder
+  - eval@ae.eval: waymo_autoencoder
+  - model@ae.model: waymo_autoencoder
+  - datamodule@ae.datamodule: waymo_autoencoder
+  - dataset@ldm.dataset: waymo_ldm
+  - train@ldm.train: waymo_ldm
+  - eval@ldm.eval: waymo_ldm_original
+  - model@ldm.model: waymo_ldm
+  - datamodule@ldm.datamodule: waymo_ldm
+  - _self_
+
+ae:
+  # The released 7-D checkpoint shared by Scenario Dreamer Base and Large.
+  train:
+    run_name: scenario_dreamer_autoencoder_waymo
+  eval:
+    run_name: scenario_dreamer_autoencoder_waymo
+    cache_latents:
+      latent_dir: ${scratch_root}/scenario_dreamer_autoencoder_latents_waymo
+
+ldm:
+  train:
+    # A new name is mandatory: train.py automatically resumes any last.ckpt in
+    # the selected directory.
+    run_name: scenario_dreamer_ldm_base_waymo_seed0
+    # Train directly on the available single 48-GB GPU.
+    devices: 1
+  eval:
+    run_name: scenario_dreamer_ldm_base_waymo_seed0
+  model:
+    autoencoder_run_name: scenario_dreamer_autoencoder_waymo
+    num_l2l_blocks: 1

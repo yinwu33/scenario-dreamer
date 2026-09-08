@@ -1,21 +1,49 @@
 import glob
 import os
 import pickle
+import sys
 from typing import Any
 
 import hydra
 import numpy as np
+import torch
 from torch_geometric.data import Dataset
 
-from cfgs.config import CONFIG_PATH, NON_PARTITIONED, PARTITIONED
+np.set_printoptions(suppress=True, threshold=sys.maxsize)
+torch.set_printoptions(threshold=100000)
+
+from cfgs.config import CONFIG_PATH, NON_PARTITIONED
 from utils.data_container import ScenarioDreamerData
-from utils.data_helpers import modify_agent_states, randomize_indices, reorder_indices
+from utils.data_helpers import normalize_scene, randomize_indices, reorder_indices
+from utils.goal_runtime import prepare_scene
 from utils.pyg_helpers import get_edge_index_bipartite, get_edge_index_complete_graph
 from utils.torch_helpers import from_numpy
 
 
 class WaymoDatasetDMGoal(Dataset):
-    """Waymo direct diffusion dataset that generates current scene and per-agent goals."""
+    """Waymo **data-space** diffusion dataset: the current scene plus per-agent goals.
+
+    This is the dataset of the SceneControl-style baseline. It reads the **v2**
+    SDC-centered goal records and produces exactly the agent set the goal
+    autoencoder (``WaymoDatasetAEGoal``) produces -- same ``prepare_scene`` call,
+    same off-road / valid-goal filtering, same ``max_num_agents`` cap -- so the
+    data-space model and the latent chain (ae_goal -> ldm_adv) are trained on an
+    identical distribution and their metrics are comparable. The only difference
+    is what gets diffused: raw 9-D geometry here, autoencoder latents there.
+
+    Each agent state is ``[x, y, speed, cosθ, sinθ, length, width, goal_x, goal_y]``
+    (``state_dim == 9``), min-max normalized into ``[-1, 1]`` by ``normalize_scene``
+    (which handles the two goal columns in the same FOV frame as the position).
+
+    Unlike the adversary datasets there is **no** ``adv`` node type: every agent is
+    symmetric. The adversary of the guidance baseline is chosen at sampling time by
+    applying the guidance cost to one agent's rows of ``x̂₀`` -- the model itself
+    stays a plain unconditional scene generator, as in SceneControl.
+
+    Agents are reordered ego-first with the deterministic hierarchical sort
+    (``reorder_indices``) so the DiT positional encodings are meaningful; the ego
+    is index 0 and is never moved.
+    """
 
     def __init__(self, cfg: Any, split_name: str = "train", mode: str = "train") -> None:
         super(WaymoDatasetDMGoal, self).__init__()
@@ -26,59 +54,46 @@ class WaymoDatasetDMGoal(Dataset):
         self.files = sorted(glob.glob(os.path.join(self.dataset_dir, "*.pkl")))
         self.dset_len = len(self.files)
 
-    def _normalize_agent_states(self, agent_states):
-        agent_states = np.array(agent_states, copy=True)
-        # Current position.
-        agent_states[:, 0] = 2 * ((agent_states[:, 0] + self.cfg.fov / 2) / self.cfg.fov) - 1
-        agent_states[:, 1] = 2 * ((agent_states[:, 1] + self.cfg.fov / 2) / self.cfg.fov) - 1
-        # Speed.
-        agent_states[:, 2] = 2 * ((agent_states[:, 2] - self.cfg.min_speed) / (self.cfg.max_speed - self.cfg.min_speed)) - 1
-        # Length and width.
-        agent_states[:, 5] = 2 * ((agent_states[:, 5] - self.cfg.min_length) / (self.cfg.max_length - self.cfg.min_length)) - 1
-        agent_states[:, 6] = 2 * ((agent_states[:, 6] - self.cfg.min_width) / (self.cfg.max_width - self.cfg.min_width)) - 1
-        # Clipped goal position in the same SDC-local 64m frame.
-        agent_states[:, 7] = 2 * ((agent_states[:, 7] + self.cfg.fov / 2) / self.cfg.fov) - 1
-        agent_states[:, 8] = 2 * ((agent_states[:, 8] + self.cfg.fov / 2) / self.cfg.fov) - 1
-        return agent_states
-
-    def _normalize_road_points(self, road_points):
-        road_points = np.array(road_points, copy=True)
-        road_points[:, :, 0] = 2 * ((road_points[:, :, 0] - self.cfg.min_lane_x) / (self.cfg.max_lane_x - self.cfg.min_lane_x)) - 1
-        road_points[:, :, 1] = 2 * ((road_points[:, :, 1] - self.cfg.min_lane_y) / (self.cfg.max_lane_y - self.cfg.min_lane_y)) - 1
-        return road_points
-
     def get_data(self, data, idx, path=None):
-        valid_goal_mask = data["clipped_final_valid"].astype(bool)
-        if valid_goal_mask.sum() == 0:
-            return None
-
-        # Preprocessed states are raw [x, y, vx, vy, yaw, length, width]; convert
-        # to the [x, y, speed, cosθ, sinθ, length, width] convention the model and
-        # normalization assume (the selfplay preprocessing skips modify_agent_states).
-        agent_states = modify_agent_states(data["agent_states"][valid_goal_mask])
-        agent_goal_xy = data["clipped_final_states"][valid_goal_mask, :2]
-        agent_states = np.concatenate([agent_states, agent_goal_xy], axis=-1)
-        agent_types = data["agent_types"][valid_goal_mask]
-
-        if len(agent_states) > self.cfg.max_num_agents:
-            dist_to_origin = np.linalg.norm(agent_states[:, :2], axis=-1)
-            closest_agent_ids = np.argsort(dist_to_origin)[: self.cfg.max_num_agents]
-            agent_states = agent_states[closest_agent_ids]
-            agent_types = agent_types[closest_agent_ids]
+        # Everything the original preprocessing did (FOV crop, closest-N cap, off-road
+        # vehicle removal, modify_agent_states) is already baked into the v2 record;
+        # prepare_scene adds the goal columns and the goal-driven filtering at runtime.
+        # NOTE: do NOT call modify_agent_states here -- v2 stores agent_states already
+        # converted to [x, y, speed, cosθ, sinθ, l, w]. Applying it a second time reads
+        # (speed, cos, sin) as (vx, vy, yaw) and silently corrupts every heading.
+        scene = prepare_scene(data, self.cfg)
+        agent_states = scene["agent_states"]  # [N, 9], goal columns included
+        agent_types = scene["agent_types"]  # [N, num_agent_types]
 
         num_agents = int(len(agent_states))
+        assert num_agents != 0
 
-        road_points = data["road_points"]
+        # normalize_scene mutates in place, so work on copies of the stored tensors.
+        road_points = np.array(data["road_points"], copy=True)
         num_lanes = int(data["num_lanes"])
-        edge_index_lane_to_lane = data["edge_index_lane_to_lane"]
-        road_connection_types = data["road_connection_types"]
-        edge_index_lane_to_agent = get_edge_index_bipartite(num_lanes, num_agents).numpy()
-        edge_index_agent_to_agent = get_edge_index_complete_graph(num_agents).numpy()
+        edge_index_lane_to_lane = np.array(data["edge_index_lane_to_lane"], copy=True)
+        road_connection_types = np.array(data["road_connection_types"], copy=True)
         lg_type = int(data.get("lg_type", NON_PARTITIONED))
 
-        agent_states = self._normalize_agent_states(agent_states)
-        road_points = self._normalize_road_points(road_points)
+        # min-max normalize agent states (incl. the two goal columns) and lanes into [-1, 1]
+        agent_states, road_points = normalize_scene(
+            agent_states,
+            road_points,
+            fov=self.cfg.fov,
+            min_speed=self.cfg.min_speed,
+            max_speed=self.cfg.max_speed,
+            min_length=self.cfg.min_length,
+            max_length=self.cfg.max_length,
+            min_width=self.cfg.min_width,
+            max_width=self.cfg.max_width,
+            min_lane_x=self.cfg.min_lane_x,
+            min_lane_y=self.cfg.min_lane_y,
+            max_lane_x=self.cfg.max_lane_x,
+            max_lane_y=self.cfg.max_lane_y,
+        )
 
+        # training-only randomization of non-ego agent and lane ordering; it only
+        # affects how ties (within reorder_indices' tolerance) are broken below.
         if self.mode == "train":
             agent_states, agent_types, road_points, edge_index_lane_to_lane = randomize_indices(
                 agent_states,
@@ -87,7 +102,19 @@ class WaymoDatasetDMGoal(Dataset):
                 edge_index_lane_to_lane,
             )
 
-        agent_states, agent_types, road_points, _, edge_index_lane_to_lane, agent_partition_mask, lane_partition_mask = reorder_indices(
+        # Deterministic ego-first ordering so the positional encodings are meaningful.
+        # Reuses the generic permutation machinery by passing states/types in the
+        # agent slots and road_points in both lane slots (same idiom as the adv
+        # datasets); the duplicated lane output is dropped.
+        (
+            agent_states,
+            agent_types,
+            road_points,
+            _,
+            edge_index_lane_to_lane,
+            agent_partition_mask,
+            lane_partition_mask,
+        ) = reorder_indices(
             agent_states,
             agent_types,
             road_points,
@@ -99,32 +126,36 @@ class WaymoDatasetDMGoal(Dataset):
             dataset="waymo",
         )
 
-        if lg_type == NON_PARTITIONED:
-            agent_partition_mask = np.zeros(num_agents).astype(bool)
-            lane_partition_mask = np.zeros(num_lanes).astype(bool)
+        if self.cfg.remove_left_right_connections:
+            # keep only none/pred/succ/self
+            road_connection_types = road_connection_types[:, [0, 1, 2, 5]]
+
+        # v2 records are always non-partitioned (no inpainting machinery).
+        agent_partition_mask = np.zeros(num_agents).astype(bool)
+        lane_partition_mask = np.zeros(num_lanes).astype(bool)
+
+        edge_index_lane_to_agent = get_edge_index_bipartite(num_lanes, num_agents).numpy()
+        edge_index_agent_to_agent = get_edge_index_complete_graph(num_agents).numpy()
 
         d = ScenarioDreamerData()
-        d["idx"] = data.get("idx", idx)
+        d["idx"] = int(data.get("idx", idx))
         d["num_lanes"] = num_lanes
         d["num_agents"] = num_agents
         d["lg_type"] = lg_type
+        # v2 records carry no nocturne metadata; the DiT scene-type label is
+        # therefore constant across the dataset (see cfgs/dm_goal/train.yaml).
         d["map_id"] = int(data.get("map_id", 0))
         d["agent"].x = from_numpy(agent_states.astype(np.float32))
         d["agent"].type = from_numpy(agent_types.astype(np.float32))
         d["lane"].x = from_numpy(road_points.astype(np.float32))
-        d["agent"].partition_mask = from_numpy(agent_partition_mask.astype(bool))
-        d["lane"].partition_mask = from_numpy(lane_partition_mask.astype(bool))
+        d["agent"].partition_mask = from_numpy(agent_partition_mask)
+        d["lane"].partition_mask = from_numpy(lane_partition_mask)
         d["lane", "to", "lane"].edge_index = from_numpy(edge_index_lane_to_lane)
         d["lane", "to", "lane"].type = from_numpy(road_connection_types.astype(np.float32))
         d["agent", "to", "agent"].edge_index = from_numpy(edge_index_agent_to_agent)
         d["lane", "to", "agent"].edge_index = from_numpy(edge_index_lane_to_agent)
-
-        if lg_type == PARTITIONED:
-            d["num_agents_after_origin"] = int((~d["agent"].partition_mask).sum().item())
-            d["num_lanes_after_origin"] = int((~d["lane"].partition_mask).sum().item())
-        else:
-            d["num_agents_after_origin"] = 0
-            d["num_lanes_after_origin"] = 0
+        d["num_agents_after_origin"] = 0
+        d["num_lanes_after_origin"] = 0
 
         return d
 
@@ -138,13 +169,15 @@ class WaymoDatasetDMGoal(Dataset):
         return self.dset_len
 
 
-@hydra.main(version_base=None, config_path=CONFIG_PATH, config_name="config")
+@hydra.main(version_base=None, config_path=CONFIG_PATH, config_name="config_dm_goal")
 def main(cfg):
-    dset = WaymoDatasetDMGoal(cfg.dm_goal.dataset, split_name="train")
+    dset = WaymoDatasetDMGoal(cfg.dm_goal.dataset, split_name="val", mode="eval")
     print(cfg.dm_goal.dataset.preprocess_dir)
     print(len(dset))
     if len(dset) > 0:
-        print(dset.get(0))
+        d = dset.get(0)
+        print(d)
+        print("agent.x shape:", d["agent"].x.shape)
 
 
 if __name__ == "__main__":

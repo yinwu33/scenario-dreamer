@@ -1,0 +1,27 @@
+defaults:
+- /train/base@_here_
+- _self_
+
+run_name: SceneControl  # wandb run name AND checkpoint dir (${scratch_root}/checkpoints/<run_name>)
+lr_schedule: constant
+save_top_k: 0
+max_steps: 300000
+warmup_steps: 500
+weight_decay: 1e-5
+check_val_every_n_epoch: 2
+ema_decay: 0.9999
+devices: 1
+num_samples_to_visualize: 10
+viz_dir: ${project_root}/viz_val_${dm_goal.train.run_name}
+
+lane_weight: 10
+agent_type_weight: 1.0
+
+# Classifier-free guidance scale over the DiT's scene-type label
+# (num_map_ids * lg_type + map_id). On the v2 goal records every scene is
+# NON_PARTITIONED and carries no nocturne metadata, so that label is CONSTANT and
+# CFG over it is meaningless -- 1.0 makes this a plain unconditional generator,
+# which is what the SceneControl-style baseline wants (all control comes from
+# guidance at sampling time, not from conditioning). It also halves sampling cost:
+# DM.p_mean_variance skips the second forward pass when the scale is exactly 1.
+guidance_scale: 1.0

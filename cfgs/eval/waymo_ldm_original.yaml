@@ -1,0 +1,31 @@
+defaults:
+- base
+
+# Evaluation protocol from the original Scenario Dreamer Waymo pipeline.  Keep
+# this separate from waymo_ldm.yaml, whose reference set was adapted for the
+# goal-aware AdvScene comparison.
+run_name: scenario_dreamer_ldm_base_waymo_seed0
+
+mode: initial_scene
+num_samples: 100
+init_prob_matrix_path: ${project_root}/metadata/initial_prob_matrix_waymo.pt
+inpainting_prob_matrix_path: ${project_root}/metadata/inpainting_prob_matrix_waymo.pt
+batch_size: 32
+visualize: False
+viz_dir: ${project_root}/viz_gen_samples_${ldm.eval.run_name}
+cache_samples: False
+conditioning_path: null
+
+sim_envs:
+  num_inpainting_candidates: 8
+  overhead_factor: 5
+  route_length: 500
+  nocturne_compatible_only: True
+
+metrics:
+  samples_path: ${dataset_root}/checkpoints/${ldm.eval.run_name}/initial_scene_samples
+  metrics_save_path: ${dataset_root}/checkpoints/${ldm.eval.run_name}
+  metrics_filename: metrics.pkl
+  eval_set: ${project_root}/metadata/waymo_eval_set.pkl
+  gt_test_dir: ${dataset_root}/scenario_dreamer_ae_preprocess_waymo/test
+  gt_format: standard

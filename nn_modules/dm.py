@@ -70,19 +70,34 @@ class DM(nn.Module):
         posterior_log_variance_clipped = extract(self.posterior_log_variance_clipped, t, x_t.shape)
         return posterior_mean, posterior_log_variance_clipped
 
-    def p_mean_variance(self, x_agent, x_lane, data, t_agent, t_lane):
+    def epsilon(self, x_agent, x_lane, data, t_agent, t_lane):
+        """Classifier-free-guided noise prediction over the DiT's scene-type label.
+
+        A scale of exactly 1 reduces to the plain conditional prediction, so the
+        second (unconditional) forward pass is skipped -- that halves sampling
+        cost for models whose scene-type label is constant, such as dm_goal on
+        the v2 goal records (see cfgs/dm_goal/train.yaml).
+        """
+        guidance_scale = self.cfg.train.guidance_scale
         conditional_epsilon_agent, conditional_epsilon_lane = self.model(
             x_agent, x_lane, data, t_agent, t_lane, unconditional=False
         )
+        if guidance_scale == 1.0:
+            return conditional_epsilon_agent, conditional_epsilon_lane
+
         unconditional_epsilon_agent, unconditional_epsilon_lane = self.model(
             x_agent, x_lane, data, t_agent, t_lane, unconditional=True
         )
-        epsilon_agent = unconditional_epsilon_agent + self.cfg.train.guidance_scale * (
+        epsilon_agent = unconditional_epsilon_agent + guidance_scale * (
             conditional_epsilon_agent - unconditional_epsilon_agent
         )
-        epsilon_lane = unconditional_epsilon_lane + self.cfg.train.guidance_scale * (
+        epsilon_lane = unconditional_epsilon_lane + guidance_scale * (
             conditional_epsilon_lane - unconditional_epsilon_lane
         )
+        return epsilon_agent, epsilon_lane
+
+    def p_mean_variance(self, x_agent, x_lane, data, t_agent, t_lane):
+        epsilon_agent, epsilon_lane = self.epsilon(x_agent, x_lane, data, t_agent, t_lane)
 
         t_agent = t_agent.detach().to(torch.int64)
         t_lane = t_lane.detach().to(torch.int64)

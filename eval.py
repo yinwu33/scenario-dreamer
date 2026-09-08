@@ -90,7 +90,19 @@ def eval_ldm(cfg, cfg_ae, save_dir=None, model_cls=ScenarioDreamerLDM):
 
 
 def eval_dm(cfg, save_dir=None, model_cls=ScenarioDreamerDM):
-    """Evaluate the direct vectorized diffusion model."""
+    """Evaluate the direct vectorized diffusion model.
+
+    - mode: metrics
+    score previously generated scenes against the reference set
+
+    - mode: initial_scene / lane_conditioned / inpainting
+    generate scenes
+    """
+    if cfg.eval.mode == 'metrics':
+        metric_evaluator = Metrics(cfg)
+        metric_evaluator.compute_metrics()
+        return
+
     files_in_save_dir = os.listdir(save_dir)
     ckpt_path = None
     for file in files_in_save_dir:
@@ -109,7 +121,7 @@ def eval_dm(cfg, save_dir=None, model_cls=ScenarioDreamerDM):
         cache_samples=cfg.eval.cache_samples,
         visualize=cfg.eval.visualize,
         conditioning_path=cfg.eval.conditioning_path,
-        cache_dir=os.path.join(save_dir, f'{cfg.eval.mode}_samples'),
+        cache_dir=cfg.eval.get('cache_dir') or os.path.join(save_dir, f'{cfg.eval.mode}_samples'),
         viz_dir=cfg.eval.viz_dir,
         save_wandb=False,
         return_samples=False,

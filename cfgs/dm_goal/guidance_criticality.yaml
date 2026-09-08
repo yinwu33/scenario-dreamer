@@ -1,0 +1,63 @@
+# OPT-IN VARIANT -- not the baseline. Select with:
+#   python ... dm_goal/guidance@dm_goal.guidance=guidance_criticality
+#
+# Extrapolates a trajectory (constant speed toward the goal) so the objective can
+# talk about closest approach and time-to-conflict. That is a dynamics assumption of
+# ours, which is why it is NOT the baseline -- see cfgs/dm_goal/guidance.yaml.
+#
+# SceneControl-style guided sampling. The model is unconditional; everything here
+# acts at sampling time only, so changing it needs no retraining.
+
+# ---- where in the reverse chain guidance acts -------------------------------
+# Diffusion runs t = n_diffusion_timesteps-1 -> 0. Guidance is applied only for
+# t <= t_start: above it x̂₀ is still mostly noise and its gradient is meaningless,
+# so early guidance just perturbs the chain without steering it.
+t_start: 60
+# Inner gradient steps per denoising step (the "universal guidance" inner loop).
+# More steps buy constraint satisfaction at linear cost; the analytic cost is cheap
+# relative to a DiT forward, so 4 is nearly free.
+num_grad_steps: 4
+# Displacement per inner step in the model's [-1, 1] state space, AFTER per-scene
+# gradient normalisation. 0.02 ~ 1% of the full range; the guided columns move at
+# most num_grad_steps * step_size per denoising step.
+step_size: 0.02
+
+cost_type: criticality
+
+cost:
+  # ---- differentiable rollout ----------------------------------------------
+  horizon: 5.0   # seconds of constant-speed, goal-directed extrapolation
+  dt: 0.5        # s
+  soft_min_tau: 1.0  # metres; smoothing of the min-over-time and the soft arg-min
+
+  # ---- criticality ----------------------------------------------------------
+  # Target gap between the two footprint circles at closest approach. 1 m is a
+  # near miss, not a crash: pushing this to 0 yields interpenetrating boxes that
+  # score well on collision metrics and are useless as scenarios.
+  d_target: 1.0
+  # Knee of the Huber on the distance terms: quadratic within `huber_delta` metres
+  # of the target, linear beyond. Keeps a far-away adversary from producing a cost
+  # that dwarfs every constraint term.
+  huber_delta: 2.0
+  interpenetration_coef: 4.0   # pushes back when the gap goes negative
+  # The adversary must CLOSE on the ego by at least this much over the horizon,
+  # ruling out "spawn already next to the ego" (the DDPO reward's d0-dmin gate).
+  min_closure: 5.0
+  ttc_lo: 1.0    # s; conflict earlier than this is a spawn overlap
+  ttc_hi: 4.0    # s; conflict later than this is irrelevant to the ego
+
+  # ---- validity / realism ---------------------------------------------------
+  offroad_threshold: 1.5   # m; same threshold the dataset filter uses
+  overlap_margin: 0.5      # m; clearance required from every OTHER agent at t=0
+
+  # ---- weights --------------------------------------------------------------
+  # With the Huber knee the distance terms sit around 10-25 for a typical scene,
+  # so the constraint weights below are chosen to be able to veto them.
+  proximity_coef: 1.0
+  closure_coef: 1.0
+  ttc_coef: 10.0      # (seconds)^2, tops out near 1 -- needs the weight to matter
+  offroad_coef: 10.0
+  overlap_coef: 30.0  # a spawn overlap must always cost more than the proximity it buys
+  # Leash to the unguided x̂₀. Guidance is an off-manifold force; without this it
+  # trades realism for criticality, which the JSD / Frechet metrics will catch.
+  trust_region_coef: 5.0

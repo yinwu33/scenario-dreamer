@@ -1,0 +1,14 @@
+defaults:
+- /dataset/waymo_base@_here_
+- _self_
+
+# The SAME v2 goal records the goal autoencoder (and therefore ldm_adv, through
+# its latent cache) is trained on. dm_goal runs utils.goal_runtime.prepare_scene
+# on them at load time, so both chains see an identical agent set: valid-goal
+# filter + off-road vehicle removal + closest-max_num_agents cap.
+preprocess_dir: ${dataset_root}/advscene_preprocess_waymo
+generate_only_vehicles: False
+remove_left_right_connections: False
+
+# consumed by prepare_scene -> select_agents; must match cfgs/ae_goal/dataset.yaml
+offroad_threshold: 1.5

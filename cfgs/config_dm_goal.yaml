@@ -1,0 +1,32 @@
+# dm_goal: data-space diffusion over [scene + per-agent goals] on Waymo.
+#
+# This is the SceneControl-style baseline: a plain UNCONDITIONAL scene generator
+# (no discrete conditioning labels, no dedicated adversary stream). Control comes
+# entirely from guidance at sampling time -- pick one agent in x̂₀ and push it with
+# a differentiable cost. Trained on the same v2 goal records as the goal
+# autoencoder, so its distribution matches the ae_goal -> ldm_adv chain.
+#
+# Usage:
+#   python train.py --config-name config_dm_goal
+#   python eval.py  --config-name config_dm_goal
+
+model_name: dm_goal
+
+defaults:
+  - _base
+  - dataset_name: waymo
+  - dm_goal/dataset@dm_goal.dataset
+  - dm_goal/train@dm_goal.train
+  - dm_goal/eval@dm_goal.eval
+  - dm_goal/model@dm_goal.model
+  - dm_goal/datamodule@dm_goal.datamodule
+  - dm_goal/guidance@dm_goal.guidance
+  - _self_
+
+dm_goal:
+  train:
+    devices: 1
+    track: True
+    # wandb project. Shared with the baseline LDM / ldm_adv runs so the
+    # SceneControl baseline and the method land side by side.
+    wandb_project: scenario-dreamer

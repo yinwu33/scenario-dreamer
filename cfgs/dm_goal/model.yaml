@@ -1,0 +1,14 @@
+defaults:
+- /model/dm@_here_
+- _self_
+
+# Data-space diffusion: these are raw vector feature dims, not autoencoder latents.
+# state_dim 9 = [x, y, speed, cosθ, sinθ, length, width, goal_x, goal_y]
+# agent_latent_dim = state_dim + num_agent_types = 9 + 3 (types are diffused too)
+# lane_latent_dim  = num_points_per_lane * lane_attr = 20 * 2
+state_dim: 9
+lane_attr: 2
+num_points_per_lane: ${dm_goal.dataset.num_points_per_lane}
+agent_latent_dim: 12
+lane_latent_dim: 40
+lane_conn_hidden_dim: 64
