@@ -4,6 +4,19 @@ defaults:
 
 _target_: datamodules.waymo.waymo_datamodule_dm_goal.WaymoDataModuleDMGoal
 
-train_batch_size: 256
-val_batch_size: 256
+# Measured on one 94 GB H100 (bf16-mixed, 345 M params): 512 is the throughput
+# optimum, not just what fits. scenes/s over batch is 1156 / 1284 / 1201 / 1167 at
+# 256 / 512 / 640 / 768 -- it peaks here and falls off beyond, because the DiT's
+# per-edge PyG attention, not the dataloader, is the bottleneck (data wait is 0.4%
+# of a step). Peak memory over 40 batches is 43-49 GiB, spread only 1.09x, so the
+# headroom is real. num_workers stays at the shared default of 48, which measured
+# fastest here; 80 oversubscribes the 96 cores and costs 14%.
+#
+# Those figures time forward+backward+optimizer alone. The real Lightning loop adds
+# ~130 ms/step on top, independent of batch size -- the torch_ema update walks 345 M
+# parameters in a Python loop every optimizer step, plus per-step logging -- so it
+# runs at 528 ms/step (970 scenes/s). That overhead is per STEP, not per sample,
+# which is why doubling the batch wins more here than the isolated numbers suggest.
+train_batch_size: 512
+val_batch_size: 512
 dataset_cfg: null

@@ -46,6 +46,7 @@ MODEL_REGISTRY: dict[str, ModelSpec] = {
     "autoencoder_goal": ModelSpec("ae_goal", "autoencoder", ScenarioDreamerAutoEncoder),
     "ldm": ModelSpec("ldm", "ldm", ScenarioDreamerLDM, ae_attr="ae"),
     "ldm_adv": ModelSpec("ldm_adv", "ldm", ScenarioDreamerLDMAdv, ae_attr="ae_goal"),
+    "dm_goal": ModelSpec("dm_goal", "dm", ScenarioDreamerDMGoal),
     "ctrl_sim": ModelSpec("ctrl_sim", "ctrl_sim", CtRLSim),
 }
 
