@@ -84,7 +84,28 @@ def lane_graph_edges(edge_index, connection_types) -> dict[str, np.ndarray]:
     is ~40 m.) Lateral edges are symmetric, so their orientation does not matter.
     """
     edge_index = _as_numpy(edge_index, dtype=np.int64)
-    types = _as_numpy(connection_types).argmax(axis=-1)
+    conn = _as_numpy(connection_types)
+    # Every real producer is strictly one-hot: the preprocessed records are (checked,
+    # 535409 edge rows over 500 val scenes, every row sums to 1) and the autoencoder
+    # emits F.one_hot(argmax(logits)). A row that is NOT one-hot therefore means the
+    # producer never supplied connectivity and left a placeholder -- `_empty_scene`
+    # fills an all-zero block, which argmaxes to "none" for every pair and decodes to
+    # an EDGELESS graph.
+    #
+    # That has to be refused HERE because no consumer can detect it: an edgeless graph
+    # is also what a genuinely successor-less map produces (8.5% of val scenes, all
+    # small), so `sim.planners.idm` cannot raise on it -- it only refuses a lane_graph
+    # that is None, and the placeholder is not None. Left through, it silently degrades
+    # every agent to single-polyline routing (route coverage 95.4% -> 65.7%).
+    if conn.ndim != 2 or (conn.sum(axis=-1) != 1).any():
+        raise ValueError(
+            "lane_graph_edges: connection_types must be one-hot per edge, got shape "
+            f"{conn.shape} with row sums in [{conn.sum(axis=-1).min()}, "
+            f"{conn.sum(axis=-1).max()}]. An all-zero block is the `initial_scene` "
+            "placeholder (nn_modules.dm.DM.decode_outputs): that map is generated and "
+            "carries no lane graph, so its scenes cannot be driven by route planners."
+        )
+    types = conn.argmax(axis=-1)
     if edge_index.shape[1] != types.shape[0]:
         raise ValueError(
             "lane_graph_edges: edge index and connection types disagree "
