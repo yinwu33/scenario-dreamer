@@ -2,6 +2,7 @@ import torch
 from torch_ema import ExponentialMovingAverage
 
 from cfgs.config import NON_PARTITIONED
+from datasets.waymo.dataset_dm_goal_waymo import WaymoDatasetDMGoal
 from models.scenario_dreamer_dm import ScenarioDreamerDM
 from nn_modules.dm_goal import DMGoal
 from utils.data_helpers import unnormalize_scene
@@ -31,6 +32,12 @@ def unnormalize_scene_with_goal(agent_states, lane_states, cfg_dataset):
 
 
 class ScenarioDreamerDMGoal(ScenarioDreamerDM):
+    # The v2 goal records, not the baseline DM's: `state_dim` is 9 here because the
+    # per-agent goal is part of the diffused state. Loading `lane_conditioned`
+    # conditioning through the parent's dataset yields 7-column agents, which is a
+    # 10- against 12-wide `agent_latent_dim` mismatch inside the DiT.
+    conditioning_dataset_cls = WaymoDatasetDMGoal
+
     def __init__(self, cfg):
         super().__init__(cfg)
         self.diff_model = DMGoal(self.cfg)

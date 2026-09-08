@@ -24,6 +24,11 @@ from utils.viz import visualize_batch
 
 
 class ScenarioDreamerDM(pl.LightningModule):
+    # Dataset used to read the conditioning records of the `lane_conditioned` mode.
+    # Subclasses that train on a different record schema must override it, or the
+    # conditioning scenes carry the wrong agent columns for their own model.
+    conditioning_dataset_cls = WaymoDatasetDM
+
     def __init__(self, cfg):
         super(ScenarioDreamerDM, self).__init__()
         self.save_hyperparameters()
@@ -187,7 +192,7 @@ class ScenarioDreamerDM(pl.LightningModule):
         elif mode == "lane_conditioned":
             assert conditioning_path is not None
             conditioning_files = sorted(glob.glob(os.path.join(conditioning_path, "*.pkl")))[:num_samples]
-            dset = WaymoDatasetDM(self.cfg_dataset, split_name="val", mode="eval")
+            dset = self.conditioning_dataset_cls(self.cfg_dataset, split_name="val", mode="eval")
             for i, conditioning_file in enumerate(conditioning_files):
                 with open(conditioning_file, "rb") as f:
                     cond_d = pickle.load(f)

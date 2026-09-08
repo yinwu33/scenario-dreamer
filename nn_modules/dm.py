@@ -247,11 +247,21 @@ class DM(nn.Module):
         agent_types = torch.argmax(agent_type_logits, dim=1)
         lane_states = self._reshape_lane(x_lane)
 
-        lane_conn_pred = torch.zeros(
-            data["lane", "to", "lane"].edge_index.shape[1],
-            self.cfg_dataset.num_lane_connection_types,
-            device=x_agent.device,
-            dtype=torch.float32,
-        )
-        lane_conn_pred[:, 0] = 1.0
-        return agent_states, lane_states, agent_types, None, lane_conn_pred
+        # This model diffuses lane GEOMETRY only; connectivity is never denoised, so
+        # it is read off the scene the sample was built on rather than predicted. The
+        # layout is the `[E, num_lane_connection_types]` one-hot every consumer
+        # expects, aligned to `edge_index` column for column
+        # (`utils.data_helpers.get_features`, `sim.scenes.lane_graph_edges`).
+        #
+        # What that means per generation mode:
+        #   lane_conditioned / inpainting -- the conditioning scene's REAL lane graph.
+        #     Correct by construction: `p_sample_loop` pins those lanes to their
+        #     ground-truth geometry at every step, so geometry and connectivity come
+        #     from the same map.
+        #   initial_scene -- `_empty_scene`'s all-zero placeholder, which argmaxes to
+        #     "none" for every pair. The map is generated there and no connectivity
+        #     exists to report, so such scenes have an EDGELESS lane graph and cannot
+        #     be driven by the route-planning planners: `sim.routes.build_route` can
+        #     then only route within a single polyline (measured on 200 val scenes,
+        #     route coverage falls 95.4% -> 65.7% of driving agents).
+        return agent_states, lane_states, agent_types, None, data["lane", "to", "lane"].type.float()
