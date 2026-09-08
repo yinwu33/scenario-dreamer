@@ -4,19 +4,36 @@ defaults:
 
 _target_: datamodules.waymo.waymo_datamodule_dm_goal.WaymoDataModuleDMGoal
 
-# Measured on one 94 GB H100 (bf16-mixed, 345 M params): 512 is the throughput
-# optimum, not just what fits. scenes/s over batch is 1156 / 1284 / 1201 / 1167 at
-# 256 / 512 / 640 / 768 -- it peaks here and falls off beyond, because the DiT's
-# per-edge PyG attention, not the dataloader, is the bottleneck (data wait is 0.4%
-# of a step). Peak memory over 40 batches is 43-49 GiB, spread only 1.09x, so the
-# headroom is real. num_workers stays at the shared default of 48, which measured
-# fastest here; 80 oversubscribes the 96 cores and costs 14%.
+# Sized against MEASURED memory on this box, not against throughput alone.
 #
-# Those figures time forward+backward+optimizer alone. The real Lightning loop adds
-# ~130 ms/step on top, independent of batch size -- the torch_ema update walks 345 M
-# parameters in a Python loop every optimizer step, plus per-step logging -- so it
-# runs at 528 ms/step (970 scenes/s). That overhead is per STEP, not per sample,
-# which is why doubling the batch wins more here than the isolated numbers suggest.
-train_batch_size: 512
-val_batch_size: 512
+# Throughput would prefer 512: timing forward+backward+optimizer in isolation gives
+# 1156 / 1284 / 1201 / 1167 scenes/s at batch 256 / 512 / 640 / 768, peaking at 512
+# and falling off beyond, because the bottleneck is the DiT's per-edge PyG attention
+# rather than the dataloader (data wait is 0.4% of a step; num_workers stays at the
+# shared default of 48, and 80 oversubscribes the 96 cores and costs 14%).
+#
+# Memory decides it, and a forward/backward microbenchmark measures the wrong phase.
+# In the real Lightning loop, STEADY-STATE training settles far above what the
+# isolated benchmark reserves and scales sharply with batch: 89.3 GiB of 94 (95%) at
+# batch 512 against 53.7 GiB (56%) at 384. 384 is the one with room.
+#
+# STARTUP is higher than either and is a one-off: model load plus the sanity check
+# touches 93.0 GiB (96.6%) even at batch 384. Do not size the batch against it. A real
+# validation pass, which is the phase that actually recurs, was measured at 55.7 GiB
+# -- only ~2 GiB above steady-state training, because it runs under no_grad and only
+# samples `num_samples_to_visualize` scenes for the visualisation, not the whole batch.
+#
+# There is no allocator-side mitigation on this box: it is a vGPU (H100L-94C), and
+# PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True fails outright with "CUDA driver
+# error: operation not supported" -- it needs CUDA virtual memory APIs the vGPU does
+# not expose. Verified directly: with that flag set, even torch.zeros(1000,
+# device='cuda') raises. So the headroom has to come from the batch size.
+#
+# The real loop also carries ~130 ms/step of batch-INDEPENDENT overhead (the
+# torch_ema update walks 345 M parameters in a Python loop every optimizer step,
+# plus per-step logging), which is why a smaller batch costs more than the isolated
+# numbers imply: 512 runs at 528 ms/step and 384 at 430 ms/step, i.e. 8% less
+# throughput per sample. That is what the memory margin costs.
+train_batch_size: 384
+val_batch_size: 384
 dataset_cfg: null

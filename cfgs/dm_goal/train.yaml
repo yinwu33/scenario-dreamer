@@ -5,11 +5,9 @@ defaults:
 run_name: SceneControl  # wandb run name AND checkpoint dir (${scratch_root}/checkpoints/<run_name>)
 lr_schedule: constant
 save_top_k: 0
-# Halved with the batch doubling above, so the sample budget is unchanged at 76.8 M
-# (the 300000 here was written for train_batch_size 256). Measured in the real loop:
-# 528 ms/step, 970 scenes/s, 22.0 h. The same 76.8 M samples at batch 256 would take
-# ~30 h, because the per-step overhead below is paid twice as often.
-max_steps: 150000
+# Set with train_batch_size to hold the sample budget at 76.8 M, which is what the
+# original 300000 @ batch 256 amounted to. 200000 x 384 is the same budget.
+max_steps: 200000
 warmup_steps: 500
 weight_decay: 1e-5
 check_val_every_n_epoch: 2
