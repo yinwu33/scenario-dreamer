@@ -140,6 +140,34 @@ SUMMARY_METRICS = (
     ("offroad", "ego_offroad_proxy"),
     ("minTTC_ego_to_adv", "ego_min_ttc"),
 )
+# Derived from minTTC rather than measured again: a threshold count is what the
+# tables report, and deriving it here keeps the csv self-describing instead of
+# making every consumer re-apply the cut. inf (the ego never approached) is
+# below no threshold, which np.less gives for free.
+TTC_THRESHOLDS = ((3.0, "ttc_lt_3s"), (1.5, "ttc_lt_1p5s"))
+
+
+def rebuild_summary(args) -> int:
+    """Rewrite the summary from the per-cache outputs already on disk.
+
+    The rollouts are the expensive half and they are already persisted; a
+    failure while assembling the matrix should cost a rerun of the assembly,
+    not of the rollouts."""
+    out_root = Path(args.out)
+    per_cache = {}
+    for d in sorted(p for p in out_root.iterdir() if (p / "metrics.npz").exists()):
+        blob = np.load(d / "metrics.npz", allow_pickle=True)
+        summary = json.loads((d / "summary.json").read_text())
+        per_cache[d.name] = {
+            "stems": [str(x) for x in blob["scenario"]],
+            "metrics": {k: blob[k] for k in blob.files if k != "scenario"},
+            "summary": summary, "sut": summary["sut"], "env": summary["env"],
+        }
+    if not per_cache:
+        raise SystemExit(f"no per-cache metrics.npz under {out_root}")
+    print(f"[rollout] rebuilding summary from {len(per_cache)} cached columns")
+    write_summary(per_cache, out_root, args)
+    return 0
 
 
 def run_batch(args) -> int:
@@ -170,6 +198,11 @@ def run_batch(args) -> int:
             raise SystemExit(f"--extra-cache {name}: the root already has that name")
         cache_of[name] = extra
     names = list(cache_of)
+    if args.log:
+        # A pseudo-cache: log scenes with the ego's nearest neighbour designated
+        # as the adversary. It has no directory and no pair of its own, so it is
+        # always scored under every pair.
+        names.append("log")
     missing = set(args.all_pairs) - set(names)
     if missing:
         raise SystemExit(f"--all-pairs names no such cache: {sorted(missing)}")
@@ -179,12 +212,13 @@ def run_batch(args) -> int:
     # a baseline is only comparable with a checkpoint when both met the same
     # planners. Everything else keeps the single pair its name implies.
     own = {n: (args.sut or pair_from_name(n)[0], args.env or pair_from_name(n)[1])
-           for n in names if n not in args.all_pairs}
+           for n in names if n not in args.all_pairs and n != "log"}
     every = sorted(set(own.values()))
     if not every:
         raise SystemExit("every cache is in --all-pairs, so no planner pair is implied "
                          "by any name; nothing defines the pair set")
-    pairs_of = {n: (every if n in args.all_pairs else [own[n]]) for n in names}
+    pairs_of = {n: (every if (n in args.all_pairs or n == "log") else [own[n]])
+                for n in names}
     jobs = [(n, pair) for n in names for pair in pairs_of[n]]
     label = {(n, pair): (f"{n}@{pair[0]}-{pair[1]}" if len(pairs_of[n]) > 1 else n)
              for n, pair in jobs}
@@ -212,7 +246,13 @@ def run_batch(args) -> int:
             out_dir = out_root / tag
             out_dir.mkdir(parents=True, exist_ok=True)
             print(f"[rollout] {tag}  sut={sut} env={env}", flush=True)
-            payload, stems = cache_payload(cache_of[name])
+            if name == "log":
+                indices = json.loads(Path(args.val_index).read_text())["scene_idx"]
+                payload = log_payload(ROOT / "data" / "advscene_preprocess_waymo",
+                                      indices, ldm_cfg.dataset)
+                stems = [f"{i}_log" for i in indices]
+            else:
+                payload, stems = cache_payload(cache_of[name])
             metrics = benchmark_payload(reward, payload,
                                         batch_size=int(args.batch_size), label=tag)
             summary = summarize(metrics, min_ego_drive=min_ego_drive)
@@ -230,6 +270,15 @@ def run_batch(args) -> int:
     return 0
 
 
+def _stem_key(stem: str):
+    """Numeric where a segment is numeric, lexical where it is not.
+
+    Cache stems are ``<i>_<batch>``, but the log pseudo-cache's are
+    ``<val_idx>_log``; each segment is tagged so the two never compare an int
+    against a str."""
+    return tuple((0, int(p)) if p.isdigit() else (1, p) for p in stem.split("_"))
+
+
 def write_summary(per_cache: dict, out_root: Path, args) -> None:
     """scenario x checkpoint matrices, plus a long table and a readable digest.
 
@@ -237,8 +286,7 @@ def write_summary(per_cache: dict, out_root: Path, args) -> None:
     that decodes with no lanes is dropped at load time, and that can happen in
     one cache and not another. A checkpoint missing a stem gets NaN there."""
     policies = sorted(per_cache)
-    stems = sorted({s for p in policies for s in per_cache[p]["stems"]},
-                   key=lambda s: tuple(int(v) for v in s.split("_")))
+    stems = sorted({s for p in policies for s in per_cache[p]["stems"]}, key=_stem_key)
     row_of = {s: i for i, s in enumerate(stems)}
 
     grids = {}
@@ -250,6 +298,10 @@ def write_summary(per_cache: dict, out_root: Path, args) -> None:
                 grid[row_of[stem], col] = entry["metrics"][key][slot]
         grids[name] = grid
 
+    for thr, name in TTC_THRESHOLDS:
+        grids[name] = (grids["minTTC_ego_to_adv"] < thr).astype(np.float64)
+        grids[name][np.isnan(grids["minTTC_ego_to_adv"])] = np.nan
+
     np.savez_compressed(
         out_root / "summary.npz",
         scenario=np.array(stems), checkpoint=np.array(policies),
@@ -258,7 +310,7 @@ def write_summary(per_cache: dict, out_root: Path, args) -> None:
         **grids,
     )
 
-    names = [n for n, _ in SUMMARY_METRICS]
+    names = [n for n, _ in SUMMARY_METRICS] + [n for _, n in TTC_THRESHOLDS]
     lines = ["scenario,checkpoint,sut,env," + ",".join(names)]
     for i, stem in enumerate(stems):
         for col, policy in enumerate(policies):
@@ -317,6 +369,9 @@ def main() -> int:
                          "planner pair its name implies, and write the "
                          "scenario x checkpoint summary")
     ap.add_argument("--mode", default="init_scene")
+    ap.add_argument("--rebuild-summary", action="store_true",
+                    help="skip the rollouts and rewrite the summary from the "
+                         "per-cache metrics.npz already in --out")
     ap.add_argument("--extra-cache", nargs="*", default=[], metavar="NAME=PATH",
                     help="add a cache from outside --caches-root (another mode, "
                          "another generator). It has no pair in its name, so it "
@@ -342,9 +397,11 @@ def main() -> int:
     ap.add_argument("--out", required=True, help="markdown table; .json and .npz go beside it")
     args = ap.parse_args()
 
+    if args.rebuild_summary:
+        return rebuild_summary(args)
     if args.caches_root:
-        if args.log or args.caches:
-            ap.error("--caches-root scores a whole root; it takes neither --caches nor --log")
+        if args.caches:
+            ap.error("--caches-root scores a whole root; it does not take --caches")
         return run_batch(args)
     if not args.caches and not args.log:
         ap.error("nothing to score: pass --caches, --log, or both")
