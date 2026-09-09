@@ -1,6 +1,7 @@
 logs/
 map.tar
 *.pdf
+temp/
 
 slurm_logs/
 *.out
