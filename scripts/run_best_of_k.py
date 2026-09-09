@@ -60,6 +60,7 @@ from critical_scene.ldm_adv_eval import (
     prepare_ldm_cfg,
     sample_base_scene_latents,
     scenes_to_payload,
+    set_generation_conditioning,
     slice_payload,
     write_json,
 )
@@ -79,11 +80,15 @@ def _parse():
     p.add_argument("--benchmark-batch-size", type=int, default=256)
     p.add_argument("--workers", type=int, default=0)
     p.add_argument("--base-ckpt", default=None)
-    p.add_argument("--uncond-adv", action="store_true",
-                   help="draw the adversary with every adv conditioning field at its "
-                        "trained null token instead of the run's adv_cond_target. Isolates "
-                        "what the conditional adversary branch contributes, and writes to a "
-                        "base_gen_uncond_bok* namespace so both variants can coexist.")
+    condition = p.add_mutually_exclusive_group()
+    condition.add_argument("--uncond-adv", action="store_true",
+                           help="draw only the stage-2 adversary unconditionally")
+    condition.add_argument(
+        "--all-null",
+        action="store_true",
+        help="use null condition tokens for every normal agent and adversary field "
+             "from stage 1 onward",
+    )
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     return p.parse_args()
 
@@ -139,7 +144,12 @@ def main() -> int:
     base_ckpt = args.base_ckpt or str(cfg_root.ddpo.ldm_adv_ckpt)
 
     out_dir = Path(args.out_dir)
-    prefix = "base_gen_uncond_bok" if args.uncond_adv else "base_gen_bok"
+    if args.all_null:
+        prefix = "base_gen_allnull_bok"
+    elif args.uncond_adv:
+        prefix = "base_gen_uncond_bok"
+    else:
+        prefix = "base_gen_bok"
     chunk_dir = out_dir / "artifacts" / f"{prefix}{k}"
     chunk_dir.mkdir(parents=True, exist_ok=True)
     n = int(args.num_scenes)
@@ -159,7 +169,9 @@ def main() -> int:
         if policy is None:
             policy = build_policy(cfg_root, ldm_cfg, ckpt=base_ckpt, device=args.device)
 
-        cond = pool.batch_from_indices(slots)
+        cond = set_generation_conditioning(
+            pool.batch_from_indices(slots), "all_null" if args.all_null else "dataset"
+        )
         _seed_all(args.seed * 1_000_003 + 1000 + chunk_id, args.device)
         x_agent, x_lane = sample_base_scene_latents(policy, cond)
         gen_cond = make_generated_cond(policy, cond, x_agent, x_lane)
@@ -239,6 +251,9 @@ def main() -> int:
             cfg_root=cfg_root,
         )
         metadata["num_draws"] = budget
+        metadata["generation_conditioning"] = (
+            "all_null" if args.all_null else "uncond_adv" if args.uncond_adv else "dataset"
+        )
         merged_path = out_dir / "artifacts" / f"{prefix}{budget}.pt"
         torch.save({"payload": merged, "metadata": metadata}, merged_path)
         print(f"[bok] wrote {merged_path}", flush=True)
@@ -247,7 +262,8 @@ def main() -> int:
     C = np.concatenate([b["ego_collision"] for b in blobs], axis=0)
     keep = ego_goal_dist(merged) >= float(cfg_root.ddpo.min_ego_drive)
     curve = _curve(R, C, keep)
-    curve_name = f"{'uncond_' if args.uncond_adv else ''}bok{k}_curve.json"
+    curve_tag = "allnull_" if args.all_null else "uncond_" if args.uncond_adv else ""
+    curve_name = f"{curve_tag}bok{k}_curve.json"
     write_json(out_dir / curve_name, {
         "num_draws": k,
         "num_scenes": int(R.shape[0]),

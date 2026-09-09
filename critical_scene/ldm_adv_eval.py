@@ -72,6 +72,9 @@ from utils.data_helpers import unnormalize_latents, unnormalize_scene
 from utils.train_helpers import cache_latent_stats, set_latent_stats
 
 SOURCES = ("original", "base_gen", "ddpo_gen", "original_ddpo_adv")
+GENERATION_CONDITIONING_MODES = ("dataset", "ego_far", "all_null")
+
+_ADV_NULL_COND = (3, 2, 3, 3)
 
 # Per-scene metric columns copied from RewardModel.evaluate into the CSV.
 METRIC_KEYS = (
@@ -403,6 +406,51 @@ def sample_base_scene_latents(policy: LDMAdvDDPOPolicy, cond) -> tuple[torch.Ten
     return x_agent, x_lane
 
 
+def set_generation_conditioning(cond, mode: str):
+    """Set the inference-time condition protocol used by scene generation.
+
+    ``ego_far`` leaves only the ego's normal-agent condition active and pins it
+    to vehicle / moving / far.  The adversary target must already be the DDPO
+    protocol (vehicle / moving / {middle, far} / null).  ``all_null`` drops every
+    normal-agent condition and gives the adversary four explicit null tokens.
+    """
+    if mode not in GENERATION_CONDITIONING_MODES:
+        raise ValueError(f"unknown generation conditioning mode: {mode!r}")
+    if mode == "dataset":
+        return cond
+
+    agent_batch = cond["agent"].batch
+    ego = torch.ones(agent_batch.shape[0], dtype=torch.bool, device=agent_batch.device)
+    ego[1:] = agent_batch[1:] != agent_batch[:-1]
+    if int(ego.sum()) != int(cond.batch_size):
+        raise RuntimeError("expected exactly one local-index-0 ego per scene")
+
+    cond["agent"].cond_drop = torch.ones_like(agent_batch, dtype=torch.long)
+    if mode == "ego_far":
+        cond["agent"].cond[ego] = torch.tensor(
+            [0, 1, 2], dtype=torch.long, device=cond["agent"].cond.device
+        )
+        cond["agent"].cond_drop[ego] = 0
+        adv_cond = cond["adv"].cond
+        expected = (
+            (adv_cond[:, 0] == 0)
+            & (adv_cond[:, 1] == 1)
+            & ((adv_cond[:, 2] == 1) | (adv_cond[:, 2] == 2))
+            & (adv_cond[:, 3] == _ADV_NULL_COND[3])
+        )
+        if not bool(expected.all()):
+            raise ValueError(
+                "ego_far requires adversary condition "
+                "vehicle/moving/{middle,far}/null"
+            )
+        return cond
+
+    cond["adv"].cond[:] = torch.tensor(
+        _ADV_NULL_COND, dtype=torch.long, device=cond["adv"].cond.device
+    )
+    return cond
+
+
 def make_generated_cond(policy: LDMAdvDDPOPolicy, cond, x_agent, x_lane):
     """Swap the template's real latents/road-points for the stage-1 generated
     ones; graph structure, node counts and all cond labels are kept, so the
@@ -432,6 +480,7 @@ def generate_chunk(
     chunk_id: int,
     device: str,
     sources: tuple[str, ...] = SOURCES,
+    generation_conditioning: str = "dataset",
 ) -> dict[str, dict[str, Any]]:
     """Generate one chunk of every requested source from the same template batch.
 
@@ -439,7 +488,9 @@ def generate_chunk(
     SAME (seed, 2000+chunk) so base_gen / ddpo_gen start from identical adversary
     noise (paired comparison; the nets consume the RNG stream identically).
     """
-    cond = pool.batch_from_indices(slots)
+    cond = set_generation_conditioning(
+        pool.batch_from_indices(slots), generation_conditioning
+    )
     out: dict[str, dict[str, Any]] = {}
 
     if "original" in sources:

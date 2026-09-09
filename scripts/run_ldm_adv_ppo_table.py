@@ -32,6 +32,7 @@ if str(ROOT) not in sys.path:
 import torch
 
 from critical_scene.ldm_adv_eval import (
+    GENERATION_CONDITIONING_MODES,
     SOURCES,
     benchmark_payload,
     build_metadata,
@@ -78,6 +79,12 @@ def main() -> int:
     ap.add_argument("--skip-generation", action="store_true")
     ap.add_argument("--skip-benchmark", action="store_true")
     ap.add_argument("--force-benchmark", action="store_true")
+    ap.add_argument(
+        "--generation-conditioning",
+        choices=GENERATION_CONDITIONING_MODES,
+        default="dataset",
+        help="inference-time condition protocol for generated sources",
+    )
     args = ap.parse_args()
 
     cfg_root = compose_eval_cfg(args.config_name, args.overrides)
@@ -119,6 +126,7 @@ def main() -> int:
                 chunk_id=chunk_id,
                 device=args.device,
                 sources=sources,
+                generation_conditioning=args.generation_conditioning,
             )
             resolved = [int(pool.resolved_scene_idx[s]) for s in slots]
             for source, payload in payloads.items():
@@ -159,6 +167,7 @@ def main() -> int:
                 ddpo_ckpt=args.ddpo_ckpt,
                 cfg_root=cfg_root,
             )
+            metadata["generation_conditioning"] = args.generation_conditioning
             torch.save(
                 {"payload": cat_payloads([b["payload"] for b in blobs]), "metadata": metadata},
                 merged_path,
