@@ -453,7 +453,7 @@ python scripts/run_planner_matrix.py --sut idm --env idm \
 ```
 
 Ego is red, other vehicles blue; a moving agent's goal is a dotted line to an `x`,
-parked/static agents get a bold black `x` at their centre (`ddpo/viz.py`).
+parked/static agents get a bold black `x` at their centre, so a ring always means a place an agent is travelling to (`utils/viz.py`).
 
 `idm` routes ALWAYS follow lane centerlines -- there is no straight-line fallback. When
 the lane graph has no path from spawn to goal the agent gets no route and coasts, and the

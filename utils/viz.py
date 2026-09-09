@@ -1,4 +1,8 @@
 import numpy as np
+import matplotlib
+
+matplotlib.use("Agg")  # headless; every consumer of this module renders to file
+
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import matplotlib.transforms as transforms
@@ -7,9 +11,6 @@ from utils.geometry import *
 import math
 from cfgs.config import LANE_CONNECTION_TYPES_WAYMO, LANE_CONNECTION_TYPES_NUPLAN
 from sim.schema import MIN_DISTANCE_TO_GOAL
-from ddpo.viz import CONTROL_COLOR  # vivid green for adversarial/controlled agents
-from moviepy.editor import ImageSequenceClip
-import wandb
 
 
 def _tensor_to_numpy_for_viz(tensor):
@@ -40,82 +41,16 @@ def _format_adv_condition_text(cond):
     return f"adv: {t} | {m} | {goal_d}"
 
 
-def _draw_agent_box(ax, state, color, bbox_linewidth, heading_linewidth,
-                    plot_heading_line, alpha=1.0, edgecolor='black', zorder=4):
-    """Draw a single rounded agent bounding box (and optional heading line).
-
-    ``state`` is the ``[x, y, speed, cosθ, sinθ, length, width]`` agent layout.
-    The heading line is drawn one zorder above the box. Shared by the normal
-    agents and the adversarial agent so both render identically (only the colour
-    and zorder differ)."""
-    length = state[5]
-    width = state[6]
-    bbox_x_min = state[0] - width / 2
-    bbox_y_min = state[1] - length / 2
-    rectangle = mpatches.FancyBboxPatch(
-        (bbox_x_min, bbox_y_min),
-        width, length,
-        ec=edgecolor, fc=color,
-        linewidth=bbox_linewidth, alpha=alpha,
-        boxstyle=mpatches.BoxStyle("Round", pad=0.3),
-        zorder=zorder
-    )
-
-    cos_theta = state[3]
-    sin_theta = state[4]
-    theta = np.arctan2(sin_theta, cos_theta)
-    rotation = transforms.Affine2D().rotate_deg_around(
-        state[0], state[1], np.degrees(theta) - 90
-    ) + ax.transData
-    rectangle.set_transform(rotation)
-    ax.add_patch(rectangle)
-
+def _draw_state_agent(ax, state, color, V, *, plot_heading_line, zorder, goal_zorder):
+    """One agent from a ``[x, y, speed, cos, sin, length, width, goal_x, goal_y]``
+    row: box, optional heading line, and goal. Bridges the scene renderer's
+    state-array layout onto the shared per-scalar primitives."""
+    x, y, length, width = state[0], state[1], state[5], state[6]
+    heading = np.arctan2(state[4], state[3])
+    _draw_agent_box(ax, x, y, heading, length, width, color, V["bbox_lw"], zorder=zorder)
     if plot_heading_line:
-        heading_length = length / 2 + 1.5
-        vehicle_center = state[:2]
-        line_end_x = vehicle_center[0] + heading_length * math.cos(theta)
-        line_end_y = vehicle_center[1] + heading_length * math.sin(theta)
-        ax.plot(
-            [vehicle_center[0], line_end_x],
-            [vehicle_center[1], line_end_y],
-            color='black',
-            alpha=0.5,
-            linewidth=heading_linewidth,
-            zorder=zorder + 1
-        )
-
-
-def _draw_agent_goal(ax, state, color, goal_marker_size, goal_linewidth,
-                     line_zorder=6, marker_zorder=7, center_zorder=8):
-    """Draw a single agent's goal: a dotted line from the agent to its goal and
-    an ``x`` marker at the goal, both in the agent's colour. ``state`` is the
-    ``[..., goal_x, goal_y]`` (>=9 col) agent layout. When the goal coincides
-    with the agent (within ``MIN_DISTANCE_TO_GOAL``) only a black ``x`` is drawn
-    at the agent centre. Shared by the normal agents and the adversarial agent so
-    both render their goal identically (only the colour and zorders differ)."""
-    if state.shape[0] < 9:
-        return
-    goal = state[7:9]
-    if not np.all(np.isfinite(goal)):
-        return
-    vehicle_center = state[:2]
-    if np.linalg.norm(goal - vehicle_center) < MIN_DISTANCE_TO_GOAL:
-        ax.scatter(
-            vehicle_center[0], vehicle_center[1],
-            marker='x', color='black', s=goal_marker_size,
-            linewidths=max(goal_linewidth * 2.0, 1.2), zorder=center_zorder,
-        )
-        return
-    ax.plot(
-        [state[0], goal[0]], [state[1], goal[1]],
-        color=color, linestyle=':', alpha=0.8,
-        linewidth=goal_linewidth, zorder=line_zorder,
-    )
-    ax.scatter(
-        goal[0], goal[1],
-        marker='x', color=color, s=goal_marker_size,
-        linewidths=max(goal_linewidth, 0.5), zorder=marker_zorder,
-    )
+        _draw_heading_line(ax, x, y, heading, length, V["heading_lw"], zorder + 1)
+    _draw_goals(ax, state, x, y, color, V, zorder_base=goal_zorder)
 
 
 def plot_scene(
@@ -136,7 +71,7 @@ def plot_scene(
 
     ``adv_states`` (optional, same layout as ``agent_states``) are adversarial
     agents drawn in vivid green on top of the normal agents, matching the DDPO
-    rollout convention (``ddpo.viz.CONTROL_COLOR``)."""
+    rollout convention (``CONTROL_COLOR``)."""
 
     # Create a figure and axes
     fig, ax = plt.subplots()
@@ -154,58 +89,9 @@ def plot_scene(
         y_max = 32 
         y_min = -32
 
-    x_range = x_max - x_min
-    y_range = y_max - y_min
-    scale_factor = max(x_range, y_range) / 64  # Scale based on 64m x 64m reference
-    base_linewidth = 1.5 / scale_factor
-    road_width = 20 / scale_factor
-    scatter_size = 8 / (scale_factor ** 2)
-    bbox_linewidth = 0.35 / scale_factor
-    heading_linewidth = 0.3 / scale_factor
-    route_linewidth = 1.5 / scale_factor
-    goal_marker_size = 28 / (scale_factor ** 2)
-    goal_linewidth = 0.6 / scale_factor
+    V = _view((x_min, x_max), (y_min, y_max))
 
-    ct = 0
-    for i in range(len(road_points)):
-        if lane_types is None: # Centerlines
-            color = 'grey'
-            linestyle='dashed'
-            zorder = 2 
-        elif lane_types[i] == 0: # Centerlines
-            color = 'grey'
-            linestyle='dashed'
-            zorder = 2 
-        elif lane_types[i] == 1: # Green traffic light lanes
-            color = 'green'
-            linestyle='dashed'
-            zorder = 3 
-        else:
-            color = 'red'
-            linestyle='dashed' # Red traffic light lanes
-            zorder = 3
-        
-        lane = road_points[i, :, :2]
-        ax.plot(lane[:, 0], lane[:, 1], color=color, linewidth=base_linewidth, linestyle=linestyle, zorder=zorder)
-        ct += 1
-        
-        # Road width
-        draw_road_width = False
-        if lane_types is None: # only centerlines
-            draw_road_width = True
-        elif lane_types[i] == 0:
-            draw_road_width = True
-        
-        if draw_road_width:
-            ax.plot(lane[:, 0], lane[:, 1], color="lightgrey", linewidth=road_width, linestyle="solid", zorder=zorder-1)
-
-        # Lane end points
-        ax.scatter(lane[0, 0], lane[0, 1], color=color, s=scatter_size, zorder=zorder+1)
-        ax.scatter(lane[-1, 0], lane[-1, 1], color=color, s=scatter_size, zorder=zorder+1)
-
-        # Lane annotations (for debugging)
-        # label_idx = len(lane) // 2
-        # ax.annotate(i, (lane[label_idx, 0], lane[label_idx, 1]), zorder=20, fontsize=1)
+    _draw_lanes(ax, road_points[..., :2], V, lane_types)
 
     ax.set_xlim(x_min, x_max)
     ax.set_ylim(y_min, y_max)
@@ -227,47 +113,29 @@ def plot_scene(
 
     # Plot route
     if route is not None:
-        ax.plot(route[:, 0], route[:, 1], color='red', linestyle='solid', zorder=5, linewidth=route_linewidth)
+        ax.plot(route[:, 0], route[:, 1], color='red', linestyle='solid', zorder=5, linewidth=V["route_lw"])
 
-    alpha = 1.0
-    edgecolor = 'black'
     for a in range(len(agent_states)):
-        if agent_types[a] == 0: # Vehicles
-            color = '#de5959' if (a == 0) else '#87b3e6' # Light red for ego agent, Light blue for other vehicles
-        elif agent_types[a] == 1: # Pedestrians
-            color = '#bea9f5' # Light purple
-        elif agent_types[a] == 2: # Immobile objects
-            color = 'green' if lane_types is None else 'grey' # green for waymo dataset (cyclist), grey for nuplan (static objects)
+        # nuplan puts immobile objects in the cyclist slot, so they are grey
+        # there and amber (a real cyclist) on waymo.
+        if lane_types is not None and agent_types[a] == 2:
+            color = 'grey'
         else:
-            color = 'grey'  # Default color if agent type is unrecognized
-        
-        if lane_types is None:
-            plot_heading_line = True # plot heading ling for vehicles, pedestrians, and cyclists
-        else:
-            plot_heading_line = agent_types[a] in [0, 1]  # Only plot heading line for vehicles and pedestrians, but not static objects
+            color = _agent_color(a == 0, agent_types[a])
+        # A static object has no meaningful facing.
+        plot_heading_line = lane_types is None or agent_types[a] in (0, 1)
+        _draw_state_agent(ax, agent_states[a], color, V,
+                          plot_heading_line=plot_heading_line, zorder=4, goal_zorder=3)
 
-        # Draw bounding box and heading line
-        _draw_agent_box(
-            ax, agent_states[a], color, bbox_linewidth, heading_linewidth,
-            plot_heading_line, alpha=alpha, edgecolor=edgecolor, zorder=4
-        )
-
-        _draw_agent_goal(ax, agent_states[a], color, goal_marker_size, goal_linewidth)
-
-    # Draw adversarial agents in vivid green, on top of the normal agents.
+    # The generated adversary sits on top of the normal agents, and green means
+    # only this in a frame -- see CONTROL_COLOR.
     if adv_states is not None:
         for a in range(len(adv_states)):
-            plot_heading_line = True if lane_types is None else (adv_types is None or adv_types[a] in [0, 1])
-            _draw_agent_box(
-                ax, adv_states[a], CONTROL_COLOR, bbox_linewidth, heading_linewidth,
-                plot_heading_line, alpha=alpha, edgecolor=edgecolor, zorder=9
+            plot_heading_line = (
+                lane_types is None or adv_types is None or adv_types[a] in (0, 1)
             )
-            # Draw the adversary's goal on top of everything, matching the normal
-            # agents' dotted-line + 'x' goal marker (in the adversary's green).
-            _draw_agent_goal(
-                ax, adv_states[a], CONTROL_COLOR, goal_marker_size, goal_linewidth,
-                line_zorder=10, marker_zorder=11, center_zorder=11,
-            )
+            _draw_state_agent(ax, adv_states[a], CONTROL_COLOR, V,
+                              plot_heading_line=plot_heading_line, zorder=9, goal_zorder=10)
 
     # Create the save directory if it doesn't exist
     if not os.path.exists(save_dir):
@@ -440,6 +308,8 @@ def visualize_batch(num_samples,
                 junction_text = f"junctions={raw[0]:.1f}"
             condition_texts.append(f"{junction_text}\ncurvature={raw[1]:.3f}")
 
+    import wandb  # heavy; only the save_wandb path needs it
+
     images_to_log = {}
     for i in range(num_samples):
         # plot the scene
@@ -537,6 +407,8 @@ def visualize_predicted_graph(num_samples,
     agent_batch = _tensor_to_numpy_for_viz(agent_batch)
     pred_lanes = _tensor_to_numpy_for_viz(pred_lanes)
     pred_lane_batch = _tensor_to_numpy_for_viz(pred_lane_batch)
+
+    import wandb  # heavy; only the save_wandb path needs it
 
     images_to_log = {}
     for i in range(num_samples):
@@ -741,6 +613,8 @@ def generate_video(name, output_dir, delete_images=False):
     images.sort()  # Sort by filename
 
     # Create a video clip from the image sequence
+    from moviepy.editor import ImageSequenceClip  # heavy; only this path needs it
+
     clip = ImageSequenceClip(images, fps=20)
     
     # Write the video file
@@ -749,3 +623,396 @@ def generate_video(name, output_dir, delete_images=False):
     if delete_images:
         for image in images:
             os.remove(image)
+
+
+# ---------------------------------------------------------------------- rollout rendering
+_EGO_COLOR = "#de5959"      # light red  (ego = local index 0)
+_VEH_COLOR = "#87b3e6"      # light blue (other vehicles)
+_PED_COLOR = "#bea9f5"      # light purple (pedestrians)
+_CYC_COLOR = "#e8b800"      # amber (cyclists); deliberately NOT green, so the
+                            # only green in a frame is CONTROL_COLOR below
+CONTROL_COLOR = "#2ca02c"   # vivid green: DDPO-generated non-ego agents,
+                            # passed in via ``agent_colors`` to flag who is being trained
+_JUMP_THRESH = 10.0         # metres/step above which motion is a teleport, not driving
+_PARKING_DIST = MIN_DISTANCE_TO_GOAL  # goal within this of spawn => parked/static
+FOV = 64.0                  # generated field of view (metres); the view window is
+                            # pinned to this square (centred at 0) so anything that
+                            # leaves the 64x64 FOV is clipped out of frame. Agents
+                            # are only removed from the sim at ``map_extent``, which
+                            # may be larger, so the clip and the removal differ.
+
+
+def _agent_color(is_ego: bool, type_id) -> str:
+    if is_ego:
+        return _EGO_COLOR
+    return {0: _VEH_COLOR, 1: _PED_COLOR, 2: _CYC_COLOR}.get(int(type_id), "grey")
+
+
+def _agent_draw_color(a: int, is_ego: bool, agent_types, agent_colors) -> str:
+    if agent_colors is not None and a < len(agent_colors) and agent_colors[a] is not None:
+        return agent_colors[a]
+    return _agent_color(is_ego, agent_types[a] if agent_types is not None else 0)
+
+
+def _first_episode_end(done) -> int | None:
+    if done is None or len(done) == 0 or not np.any(done):
+        return None
+    return int(np.argmax(done)) + 1  # include the last pre-reset state
+
+
+def _respawn_mask(traj, a, end=None):
+    """Per-step bool mask (True once agent ``a`` is inactive) or None if unavailable.
+
+    Respawned or removed agents should no longer be drawn as normal traffic after
+    goal arrival. Sliced to ``[:end]`` to match the trajectory slice."""
+    ra = traj.get("respawn") if isinstance(traj, dict) else None
+    if ra is None or getattr(ra, "ndim", 0) != 2 or ra.shape[1] <= a:
+        return None
+    return ra[:end, a] if end is not None else ra[:, a]
+
+
+def _break_on_jumps(x, y):
+    if len(x) < 2:
+        return x, y
+    bad = np.where(np.hypot(np.diff(x), np.diff(y)) > _JUMP_THRESH)[0]
+    if len(bad) == 0:
+        return x, y
+    return np.insert(x.astype(float), bad + 1, np.nan), np.insert(y.astype(float), bad + 1, np.nan)
+
+
+def _fmt_float(value, *, signed: bool = False, digits: int = 2, inf: str = "inf") -> str:
+    if value is None:
+        return "nan"
+    v = float(value)
+    if not np.isfinite(v):
+        return inf
+    sign = "+" if signed else ""
+    return f"{v:{sign}.{digits}f}"
+
+
+# Reward-component breakdown rendered (one list == one line, in order) under the
+# summary line when the caller passes a ``components`` dict (e.g. from
+# RewardModel.evaluate). Each field is (short label, component key); missing
+# keys are skipped so this degrades gracefully as new components are added. The
+# leading field of each line is that line's total. Layout mirrors the reward
+# assembly: constraint + its penalty terms, then criticality + its terms, then the
+# raw ego<->adversary / lane geometry behind those terms.
+_COMPONENT_LINES = [
+    # Which band the scene landed in and what put it there. `tier` is the band
+    # index the reward assigned (hierarchical_v6: 0 invalid, 1 d_min, 2 near
+    # miss, 3 ego-fault collision, 4 uncredited ram); the flags beside it are
+    # the mutually exclusive reasons a scene can be rejected or uncredited, so
+    # the number is always traceable to a cause.
+    [("tier", "tier"), ("coll", "r_collision"), ("ram", "c_rammed"),
+     ("offlane", "c_offlane"), ("early", "c_trivial"), ("cond", "c_invalid")],
+    # The two graded quantities the credited bands are built from.
+    [("minTTCego", "ego_min_ttc"), ("dmin", "ego_adv_min_dist_warmup"),
+     ("g_ttc", "r_ttc"), ("g_d", "r_approach"), ("d0", "ego_adv_init_dist")],
+    # Raw geometry behind the rejections.
+    [("spawn_lane", "spawn_lane_dist"), ("goal_lane", "goal_lane_dist"),
+     ("overlap", "init_overlap_frac")],
+]
+
+
+def _status_text(
+    reward,
+    collided,
+    init_invalid,
+    *,
+    ego_min_ttc=None,
+    goal_offlane_frac=None,
+    parking_mismatch_frac=None,
+    components=None,
+) -> tuple[str, str]:
+    """Reward status line(s) aligned with the DDPO reward formula.
+
+    ``components`` (optional) is a per-scene mapping of reward-component name ->
+    scalar; when present, the full criticality / constraint / geometry breakdown
+    is rendered on extra lines below the summary.
+    """
+    r = 0.0 if reward is None else float(reward)
+    if components:
+        # Summary line: total reward + the hard reject branch flag (a parked /
+        # condition-violating adversary is rejected outright, reward = -1), then
+        # the component lines. c_invalid (condition check) supersedes c_parking
+        # when present; fall back to the parking flag otherwise.
+        reject_val = components.get("c_invalid", components.get("c_parking", 0.0))
+        reject_reason = components.get("c_invalid_reason", "")
+        park = bool(float(reject_val) > 0.0)
+        reject_reason = str(reject_reason).strip()
+        reason_txt = f"  reason={reject_reason}" if reject_reason else ""
+        lines = [f"R={r:+.2f}  reject={str(park).lower()}{reason_txt}"]
+        for fields in _COMPONENT_LINES:
+            parts = [
+                f"{short}={_fmt_float(components[key])}"
+                for short, key in fields
+                if key in components
+            ]
+            if parts:
+                lines.append("  ".join(parts))
+    else:
+        # No components supplied: the reward's own breakdown is unavailable, so
+        # report the rollout facts the hierarchical rewards are built on.
+        # parking_mismatch is deliberately absent -- it enters neither `total`
+        # nor `invalid` in v3 and later, so it only crowded the line.
+        lines = [
+            f"R={r:+.2f}  minTTCego={_fmt_float(ego_min_ttc)}  "
+            f"coll={int(bool(collided))}  inval={int(bool(init_invalid))}  "
+            f"goal_off={_fmt_float(goal_offlane_frac)}"
+        ]
+    if collided:
+        color = _EGO_COLOR
+    elif init_invalid:
+        color = "#ff7f0e"
+    else:
+        color = "0.3"
+    return "\n".join(lines), color
+
+
+def _draw_agent_box(ax, x, y, heading, length, width, color, lw, alpha=1.0,
+                    zorder=6, edgecolor="black"):
+    """Rounded width(x)*length(y) box centred at (x,y), rotated by degrees(heading)-90."""
+    if not (np.isfinite(x) and np.isfinite(y) and np.isfinite(heading)):
+        return  # blanked-out step (e.g. post-respawn): nothing to draw
+    rect = mpatches.FancyBboxPatch(
+        (x - width / 2, y - length / 2), width, length,
+        ec=edgecolor, fc=color, linewidth=lw, alpha=alpha,
+        boxstyle=mpatches.BoxStyle("Round", pad=0.3), zorder=zorder,
+    )
+    tr = transforms.Affine2D().rotate_deg_around(x, y, np.degrees(heading) - 90) + ax.transData
+    rect.set_transform(tr)
+    ax.add_patch(rect)
+
+
+def _view(xlim=None, ylim=None):
+    """Fixed FOV-sized square view window centred at the scene origin.
+
+    The window is pinned to the generated field of view (``FOV`` metres, centred
+    at 0) regardless of where agents drive, so anything that leaves the 64x64 FOV
+    is clipped out of frame. Linewidths keep the same 64 m reference as before
+    (``scale == 1`` here)."""
+    if xlim is None:
+        half = FOV / 2.0
+        xlim = ylim = (-half, half)
+    scale = max(xlim[1] - xlim[0], ylim[1] - ylim[0]) / 64.0
+    return {
+        "xlim": xlim, "ylim": ylim,
+        "base_lw": 1.5 / scale, "road_w": 20.0 / scale, "scatter": 8.0 / (scale ** 2),
+        "bbox_lw": 0.35 / scale, "goal_lw": 0.6 / scale, "goal_ms": 28.0 / (scale ** 2),
+        "heading_lw": 0.3 / scale, "route_lw": 1.5 / scale,
+    }
+
+
+def _draw_lanes(ax, lanes_arr, V, lane_types=None):
+    """Centerlines, plus the wide light-grey stroke that stands in for the road.
+
+    ``lane_types`` is the nuplan/waymo lane class per polyline: 0 centerline,
+    1 green traffic light, 2 red. Only a centerline gets the road stroke, and a
+    traffic-light lane is drawn in its own colour one layer up. Omit it (the
+    rollout case) and every polyline is treated as a centerline."""
+    if lanes_arr is None:
+        return
+    for i, poly in enumerate(lanes_arr):
+        pts = poly[np.isfinite(poly[:, 0]) & np.isfinite(poly[:, 1])]
+        if len(pts) < 2:
+            continue
+        kind = 0 if lane_types is None else int(lane_types[i])
+        color = {0: "grey", 1: "green"}.get(kind, "red")
+        zorder = 2 if kind == 0 else 3
+        if kind == 0:
+            ax.plot(pts[:, 0], pts[:, 1], color="lightgrey", linewidth=V["road_w"],
+                    linestyle="solid", zorder=zorder - 1)
+        ax.plot(pts[:, 0], pts[:, 1], color=color, linewidth=V["base_lw"],
+                linestyle="dashed", zorder=zorder)
+        ax.scatter(pts[[0, -1], 0], pts[[0, -1], 1], color=color, s=V["scatter"],
+                   zorder=zorder + 1)
+
+
+def _draw_parked_marker(ax, x, y, V, zorder):
+    """Bold black cross at a parked agent's centre; see _draw_goals."""
+    ax.scatter(x, y, marker="x", color="black", s=V["goal_ms"],
+               linewidths=max(V["goal_lw"] * 2.0, 1.2), zorder=zorder)
+
+
+def _draw_goals(ax, agent_states, x0, y0, color, V, zorder_base=3):
+    if agent_states is None or agent_states.shape[0] < 9:
+        return
+    gx, gy = float(agent_states[7]), float(agent_states[8])
+    if not (np.isfinite(gx) and np.isfinite(gy)):
+        return
+    if np.hypot(gx - x0, gy - y0) < _PARKING_DIST:
+        # Parked/static agent: the goal sits on the spawn, so there is no travel
+        # to draw. A cross, not a ring -- the two markers then say different
+        # things at a glance: a ring is somewhere the agent is going, a cross is
+        # an agent that is staying put.
+        _draw_parked_marker(ax, x0, y0, V, zorder_base + 4)
+        return
+    ax.plot([x0, gx], [y0, gy], color=color, linestyle=":", alpha=0.7,
+            linewidth=V["goal_lw"], zorder=zorder_base)
+    _draw_goal_target(ax, gx, gy, color, V["goal_lw"], zorder_base + 4)
+
+
+# Goal target geometry in metres, so it reads the same at any view scale.
+_GOAL_RING_RADIUS = 2.0
+_GOAL_DOT_RADIUS = 0.30
+
+
+def _draw_goal_target(ax, x, y, color, lw, zorder=7):
+    """A hollow ring with a filled centre dot, in data (metre) units."""
+    ax.add_patch(mpatches.Circle(
+        (x, y), radius=_GOAL_RING_RADIUS, fill=False, edgecolor=color,
+        linewidth=max(lw, 0.7), zorder=zorder,
+    ))
+    ax.add_patch(mpatches.Circle(
+        (x, y), radius=_GOAL_DOT_RADIUS, facecolor=color, edgecolor="none",
+        zorder=zorder + 1,
+    ))
+
+
+def _finish(ax, fig, V, title, status_txt, status_color, *, annotate=True):
+    ax.set_xlim(*V["xlim"]); ax.set_ylim(*V["ylim"])
+    ax.set_aspect("equal", adjustable="box")
+    ax.axis("off")
+    if annotate:
+        ax.set_title(f"{title}\n{status_txt}", fontsize=8.5, color=status_color)
+        fig.tight_layout()
+    else:
+        fig.subplots_adjust(left=0, right=1, bottom=0, top=1)
+
+
+def render_rollout(traj, lanes, *, agent_states=None, agent_types=None, agent_colors=None,
+                   reward=None, ego_collision=False, ego_offroad=False, init_invalid=False,
+                   ego_min_ttc=None, goal_offlane_frac=None, parking_mismatch_frac=None,
+                   components=None, title="", final_boxes_only=False,
+                   annotate=True) -> "plt.Figure":
+    """Static summary of the first episode with full, per-agent-coloured trajectories."""
+    fig, ax = plt.subplots(figsize=(5, 5), dpi=120)
+    x, y, hd = traj["x"], traj["y"], traj["heading"]
+    n_agents = x.shape[1] if (x.ndim == 2 and x.size) else 0
+    end = _first_episode_end(traj.get("done"))
+    lanes_arr = np.asarray(lanes) if (lanes is not None and len(lanes) > 0) else None
+    V = _view()
+    _draw_lanes(ax, lanes_arr, V)
+
+    n_boxes = 5
+    for a in range(n_agents):
+        is_ego = a == 0
+        color = _agent_draw_color(a, is_ego, agent_types, agent_colors)
+        xa, ya, ha = x[:end, a], y[:end, a], hd[:end, a]
+        if len(xa) == 0:
+            continue
+        # Blank out inactive steps so we don't draw the agent as normal traffic.
+        mask = _respawn_mask(traj, a, end)
+        if mask is not None and mask.any():
+            xa = np.where(mask, np.nan, xa)
+            ya = np.where(mask, np.nan, ya)
+        length, width = float(traj["length"][a]), float(traj["width"][a])
+        xb, yb = _break_on_jumps(xa, ya)
+        trajectory_scale = (
+            (3.2 if is_ego else 2.6) if final_boxes_only else (1.6 if is_ego else 1.1)
+        )
+        trajectory_alpha = 1.0 if final_boxes_only else (0.95 if is_ego else 0.7)
+        ax.plot(xb, yb, color=color, linewidth=V["base_lw"] * trajectory_scale,
+                alpha=trajectory_alpha, zorder=5 if is_ego else 4, solid_capstyle="round")
+        if not final_boxes_only:
+            ax.scatter(xa, ya, color=color, s=V["scatter"] * 0.35,
+                       alpha=0.9 if is_ego else 0.6,
+                       zorder=5 if is_ego else 4, edgecolors="none")
+        idxs = np.array([len(xa) - 1]) if final_boxes_only else np.unique(
+            np.linspace(0, len(xa) - 1, min(n_boxes, len(xa))).round().astype(int)
+        )
+        for j, t in enumerate(idxs):
+            frac = (j + 1) / len(idxs)
+            _draw_agent_box(ax, xa[t], ya[t], ha[t], length, width, color,
+                            V["bbox_lw"] * (1.4 if t == idxs[-1] else 1.0), alpha=0.22 + 0.78 * frac)
+        _draw_goals(ax, agent_states[a] if agent_states is not None else None, xa[0], ya[0], color, V)
+
+    txt, scol = _status_text(
+        reward,
+        ego_collision,
+        init_invalid,
+        ego_min_ttc=ego_min_ttc,
+        goal_offlane_frac=goal_offlane_frac,
+        parking_mismatch_frac=parking_mismatch_frac,
+        components=components,
+    )
+    _finish(ax, fig, V, title, txt, scol, annotate=annotate)
+    return fig
+
+
+def _fig_to_rgb(fig) -> np.ndarray:
+    fig.canvas.draw()
+    w, h = fig.canvas.get_width_height()
+    buf = np.frombuffer(fig.canvas.buffer_rgba(), dtype=np.uint8).reshape(h, w, 4)
+    return buf[..., :3].copy()
+
+
+def render_rollout_frames(traj, lanes, *, agent_states=None, agent_types=None, agent_colors=None,
+                          reward=None, ego_collision=False, ego_offroad=False, init_invalid=False,
+                          ego_min_ttc=None, goal_offlane_frac=None, parking_mismatch_frac=None,
+                          components=None, title="", max_frames=50, annotate=True) -> np.ndarray:
+    """One frame per rollout step (agents move, trail grows). Returns [T, H, W, 3] uint8.
+
+    The view window and reward text are fixed across frames so the GIF is stable.
+    """
+    x, y, hd = traj["x"], traj["y"], traj["heading"]
+    n_agents = x.shape[1] if (x.ndim == 2 and x.size) else 0
+    end = _first_episode_end(traj.get("done"))
+    T = end if end is not None else (x.shape[0] if n_agents else 0)
+    T = max(T, 1)
+    lanes_arr = np.asarray(lanes) if (lanes is not None and len(lanes) > 0) else None
+    V = _view()
+    txt, scol = _status_text(
+        reward,
+        ego_collision,
+        init_invalid,
+        ego_min_ttc=ego_min_ttc,
+        goal_offlane_frac=goal_offlane_frac,
+        parking_mismatch_frac=parking_mismatch_frac,
+        components=components,
+    )
+    lengths = [float(traj["length"][a]) for a in range(n_agents)]
+    widths = [float(traj["width"][a]) for a in range(n_agents)]
+
+    frame_ts = np.unique(np.linspace(0, T - 1, min(max_frames, T)).round().astype(int))
+    frames = []
+    for t in frame_ts:
+        fig, ax = plt.subplots(figsize=(5, 5), dpi=100)
+        _draw_lanes(ax, lanes_arr, V)
+        for a in range(n_agents):
+            is_ego = a == 0
+            color = _agent_draw_color(a, is_ego, agent_types, agent_colors)
+            mask = _respawn_mask(traj, a, t + 1)
+            if mask is not None and bool(mask[-1]):
+                continue  # agent is inactive by now: drop it instead of faking traffic
+            xa, ya, ha = x[:t + 1, a], y[:t + 1, a], hd[:t + 1, a]
+            if mask is not None and mask.any():
+                xa = np.where(mask, np.nan, xa)
+                ya = np.where(mask, np.nan, ya)
+            xb, yb = _break_on_jumps(xa, ya)
+            ax.plot(xb, yb, color=color, linewidth=V["base_lw"] * (1.3 if is_ego else 0.9),
+                    alpha=0.5, zorder=4, solid_capstyle="round")  # trail so far
+            _draw_agent_box(ax, x[t, a], y[t, a], hd[t, a], lengths[a], widths[a], color,
+                            V["bbox_lw"] * (1.4 if is_ego else 1.0), alpha=0.8)  # current pose
+            _draw_goals(ax, agent_states[a] if agent_states is not None else None, x[0, a], y[0, a], color, V)
+        _finish(ax, fig, V, f"{title}   t={int(t)}", txt, scol, annotate=annotate)
+        frames.append(_fig_to_rgb(fig))
+        plt.close(fig)
+    return np.stack(frames, axis=0)
+
+
+def save_gif(frames: np.ndarray, path: str, fps: int = 10) -> str:
+    """Write [T,H,W,3] uint8 frames to an animated GIF via Pillow (no moviepy dep)."""
+    from PIL import Image
+
+    imgs = [Image.fromarray(f) for f in frames]
+    imgs[0].save(path, save_all=True, append_images=imgs[1:],
+                 duration=int(1000 / max(fps, 1)), loop=0, optimize=True)
+    return path
+
+
+def _draw_heading_line(ax, x, y, heading, length, lw, zorder):
+    """Short black stick out of an agent's nose, so a still shows facing."""
+    reach = length / 2 + 1.5
+    ax.plot([x, x + reach * math.cos(heading)], [y, y + reach * math.sin(heading)],
+            color="black", alpha=0.5, linewidth=lw, zorder=zorder)

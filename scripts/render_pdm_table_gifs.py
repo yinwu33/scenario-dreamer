@@ -40,7 +40,7 @@ from critical_scene.planner_matrix_eval import (
     evaluate_scenes,
     select_gif_scenes,
 )
-from ddpo.viz import CONTROL_COLOR, render_rollout_frames, save_gif
+from utils.viz import CONTROL_COLOR, render_rollout_frames, save_gif
 
 
 TRAFFIC_ARTIFACTS = {

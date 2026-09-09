@@ -39,7 +39,7 @@ from critical_scene.ldm_adv_eval import (
     prepare_ldm_cfg,
     slice_payload,
 )
-from ddpo.viz import render_rollout, render_rollout_frames
+from utils.viz import render_rollout, render_rollout_frames
 
 # Reading order matches the table rows.
 GRID = (

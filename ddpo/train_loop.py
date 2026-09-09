@@ -181,7 +181,7 @@ def _adv_agent_rows(name, s, states_s, types_s, gen_agent_s, traj, reward_s):
     dict (per-step [T, n_agents] arrays in the same per-agent order). The endpoints
     are taken from the first episode so they line up with what the viz draws.
     """
-    from ddpo.viz import FOV, _first_episode_end
+    from utils.viz import FOV, _first_episode_end
 
     rows = []
     half = FOV / 2.0
@@ -416,7 +416,7 @@ def _visualize_train_group_diversity(
     viz_metrics = reward_model.evaluate(subset, record_trajectories=True)
 
     import matplotlib.pyplot as plt
-    from ddpo.viz import CONTROL_COLOR, render_rollout, render_rollout_frames, save_gif
+    from utils.viz import CONTROL_COLOR, render_rollout, render_rollout_frames, save_gif
 
     save_gif_mode = bool(cfg.save_gif)
     media_dir = Path(cfg.output_dir) / "eval_media" / "train_group"
@@ -514,7 +514,7 @@ def evaluate_and_visualize(
     0 (resolution 0.125); rates need >= 64 scenes to be readable."""
     import matplotlib.pyplot as plt
 
-    from ddpo.viz import CONTROL_COLOR, render_rollout, render_rollout_frames, save_gif
+    from utils.viz import CONTROL_COLOR, render_rollout, render_rollout_frames, save_gif
 
     n = min(int(cfg.eval_num_scenes), len(eval_pool))
     media_n = min(n, int(cfg.eval_media_scenes))

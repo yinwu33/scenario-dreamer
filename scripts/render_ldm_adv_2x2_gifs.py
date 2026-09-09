@@ -44,7 +44,7 @@ from critical_scene.ldm_adv_eval import (
     prepare_ldm_cfg,
     slice_payload,
 )
-from ddpo.viz import render_rollout_frames, save_gif
+from utils.viz import render_rollout_frames, save_gif
 
 # 2x2 grid order: (row, col) -> source
 GRID = (

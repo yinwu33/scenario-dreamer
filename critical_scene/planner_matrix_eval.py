@@ -283,7 +283,7 @@ def render_cell_gifs(
     recording trajectories for every scene of a 1000-scene sweep costs a lot of
     memory for frames nobody looks at.
     """
-    from ddpo.viz import render_rollout_frames, save_gif
+    from utils.viz import render_rollout_frames, save_gif
 
     out_dir.mkdir(parents=True, exist_ok=True)
     metrics, trajectories = evaluate_scenes(runner, cfg, scenes, record_trajectories=True)
