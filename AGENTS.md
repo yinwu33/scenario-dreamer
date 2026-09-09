@@ -134,7 +134,7 @@ Repository layout:
 - `/tests`: automated test suite.
 - `/test_scripts`: manual diagnostic scripts, not the formal test suite.
 - `/temp_scripts`: temporary or one-off scripts.
-- `/research`: LaTeX, references, experiment notes, and paper-related outputs.
+- `/research`: LaTeX, references, experiment notes, and paper-related outputs. DO NOT modify this `/research` unless clearly required by user!
 
 ### Simulation Roles
 
@@ -331,6 +331,45 @@ count; pass `--out` so the phase table is persisted rather than only printed.
 Use `--workers 0` when you need the per-hook / per-method breakdown -- the
 wrappers it installs only exist in the single-process path, and with workers the
 parent's timers can only see the central forwards.
+
+### `dm_goal` / SceneControl: 150k steps is the budget, and how that was decided
+
+The 2026-09-08 run (`data/checkpoints/SceneControl/last.ckpt`, batch 384, one
+H100L-94C) was **stopped at 187664 of 200000 steps** because val_loss had all but
+flattened. What the 70 validation points say:
+
+| span | val_loss |
+| --- | --- |
+| first validation (step 2536) | 1.310 |
+| step ~106k (53%) | 0.521 -- after this NO single point is beaten by more than 1 sd |
+| minimum, step ~155k (77%) | 0.502 |
+| last quarter (n=17) | mean 0.5089, sd 0.0031 |
+| the quarter before it (n=17) | mean 0.5155, sd 0.0051 |
+
+**Budget 150k steps next time.** Going 150k -> 200k buys 0.0066 of val_loss. At
+2.2 it/s effective that is 6 hours for a third of a percent.
+
+**But do not read the plateau off the series by eye.** Per-point noise is
+sd = 0.0054, larger than the improvement between consecutive validations, so the
+tail LOOKS flat from about the halfway mark and a per-point reading flips sign
+every few checks. Pooled over 17 points a side, the last quarter is still
+significantly better than the one before it (-0.0066, Welch t = -4.55). Both
+statements are true and only the pooled one is decidable: compare BLOCKS of
+validation points, never the last few.
+
+Two environment facts measured on the same box, so they are not re-derived:
+
+- **`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` does not work here.** It is
+  a vGPU (H100L-94C) and the flag needs CUDA virtual-memory APIs the vGPU does not
+  expose; with it set, even `torch.zeros(1000, device='cuda')` raises
+  `CUDA driver error: operation not supported`. Memory headroom has to come from
+  the batch size instead.
+- **Steady-state training memory is not what a forward/backward microbenchmark
+  reports, and it scales sharply with batch**: 53.7 GiB of 94 at batch 384 against
+  89.3 GiB at 512, where the isolated benchmark reserves ~49 GiB for either. The
+  true high-water mark is STARTUP (model load plus the sanity-check validation),
+  93.0 GiB even at 384 -- a one-off, so do not size the batch against it. A real
+  validation pass costs only ~2 GiB over training.
 
 ## Paper Evaluation
 
