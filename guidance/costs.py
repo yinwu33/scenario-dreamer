@@ -95,6 +95,44 @@ def footprint_radius(states: torch.Tensor) -> torch.Tensor:
     return 0.5 * torch.sqrt(states[..., LENGTH] ** 2 + states[..., WIDTH] ** 2)
 
 
+def others_per_scene(states: torch.Tensor, agent_batch: torch.Tensor,
+                     adv_idx: torch.Tensor, batch_size: int):
+    """Per scene, the (states, radii) of every agent EXCEPT the adversary.
+
+    Detached: these are what the adversary must avoid, not things to move. The
+    guided columns are the adversary's alone (``adv_columns``), so leaving the
+    gradient attached here would be silently masked out anyway -- detaching says
+    it deliberately, the way the other constraints in ProximityGoalCost do.
+    """
+    out = []
+    for i in range(batch_size):
+        mask = (agent_batch == i).clone()
+        mask[adv_idx[i]] = False
+        rest = states[mask].detach()
+        out.append((rest, footprint_radius(rest)))
+    return out
+
+
+def adv_overlap_cost(adv: torch.Tensor, adv_r: torch.Tensor, per_scene,
+                     margin: float) -> torch.Tensor:
+    """Squared hinge on the adversary interpenetrating any other agent at t = 0.
+
+    A scene that starts already in collision is invalid regardless of how critical
+    it looks later, and no other term forbids it. Circumscribed circles rather than
+    the oriented boxes: the gap stays smooth (an exact OBB distance has
+    non-differentiable corners) and it errs conservative, pushing to a clearance
+    slightly larger than the boxes need.
+    """
+    costs = []
+    for i, (rest, rest_r) in enumerate(per_scene):
+        if rest.numel() == 0:
+            costs.append(adv.new_zeros(()))
+            continue
+        d = torch.linalg.norm(rest[:, :2] - adv[i, :2].unsqueeze(0), dim=-1)
+        costs.append((torch.relu(adv_r[i] + rest_r + margin - d) ** 2).sum())
+    return torch.stack(costs)
+
+
 def rollout_states(states: torch.Tensor, timesteps: torch.Tensor) -> torch.Tensor:
     """Constant-speed, goal-directed extrapolation. ``[N, 9]``, ``[T]`` -> ``[N, T, 2]``.
 
@@ -200,7 +238,15 @@ class ProximityGoalCost:
 
     1. the adversary spawns within ``adv_ego_spawn_radius`` of the ego,
     2. the adversary's goal lies within ``adv_ego_goal_radius`` of the ego's goal,
-    3. the ego's own goal is at least ``ego_min_goal_dist`` away from the ego.
+    3. the ego's own goal is at least ``ego_min_goal_dist`` away from the ego,
+    4. the adversary keeps a footprint clearance from every OTHER agent.
+
+    (4) is not a criticality term, it is what keeps (1) from being satisfied the
+    degenerate way. Pulling the adversary inside 10 m of the ego says nothing about
+    the space being free, and in busy scenes it is not: without this term the
+    adversary's spawn-overlap rate measured 21.1% against 5.5% unguided and 1.7% for
+    log scenes (1000 val scenes, the InitOverlapHook definition). An overlapping
+    spawn makes the scene invalid whatever it scores later.
 
     Together they make a conflict *structural* rather than simulated: two agents that
     start near each other and are headed for the same place must interact, whatever
@@ -215,7 +261,9 @@ class ProximityGoalCost:
     contributes exactly zero gradient and the scene is left alone.
     """
 
-    #: Columns this cost is allowed to move on the adversary / on the ego.
+    #: Columns this cost is allowed to move on the adversary / on the ego. The
+    #: clearance term acts through X/Y only -- sizes are never guided, or the
+    #: optimiser would shrink the adversary instead of moving it.
     adv_columns = (X, Y, GOAL_X, GOAL_Y)
     ego_columns = (GOAL_X, GOAL_Y)  # never the ego's position: the frame is ego-centred
 
@@ -253,6 +301,12 @@ class ProximityGoalCost:
         goal_gap = torch.linalg.norm(adv_goal - ego_goal.detach(), dim=-1)
         ego_trip = torch.linalg.norm(ego_goal - ego_pos.detach(), dim=-1)
 
+        rest = others_per_scene(states, agent_batch, adv_idx, batch_size)
+        overlap = adv_overlap_cost(
+            states[adv_idx], footprint_radius(states[adv_idx]), rest,
+            self.cfg.overlap_margin,
+        )
+
         terms = {
             "adv_spawn": self.cfg.adv_spawn_coef
             * torch.relu(spawn_gap - self.cfg.adv_ego_spawn_radius) ** 2,
@@ -260,6 +314,11 @@ class ProximityGoalCost:
             * torch.relu(goal_gap - self.cfg.adv_ego_goal_radius) ** 2,
             "ego_trip": self.cfg.ego_trip_coef
             * torch.relu(self.cfg.ego_min_goal_dist - ego_trip) ** 2,
+            # Weighted well above the others: this one is a validity constraint, not
+            # a preference, so whenever it is active it has to win. It contributes
+            # exactly zero once the clearance is met, so it cannot distort a
+            # scene that was already legal.
+            "overlap": self.cfg.overlap_coef * overlap,
         }
 
         total = torch.stack(list(terms.values()), dim=0).sum()
@@ -271,6 +330,7 @@ class ProximityGoalCost:
             m_spawn_gap=float(spawn_gap.mean().detach()),
             m_goal_gap=float(goal_gap.mean().detach()),
             m_ego_trip=float(ego_trip.mean().detach()),
+            m_clearance_violated=float((overlap > 0).float().mean().detach()),
         )
         return total, logged
 
@@ -347,20 +407,7 @@ class CriticalSceneCost:
         return torch.stack(costs)
 
     def _overlap(self, adv: torch.Tensor, adv_r: torch.Tensor, others_per_scene) -> torch.Tensor:
-        """No footprint overlap at t = 0 with any other agent in the scene.
-
-        A scene that starts already in collision is invalid regardless of how
-        critical it looks later, and nothing else in the objective forbids it.
-        """
-        costs = []
-        for i, (others, others_r) in enumerate(others_per_scene):
-            if others.numel() == 0:
-                costs.append(adv.new_zeros(()))
-                continue
-            d = torch.linalg.norm(others[:, :2] - adv[i, :2].unsqueeze(0), dim=-1)
-            need = adv_r[i] + others_r + self.cfg.overlap_margin
-            costs.append((torch.relu(need - d) ** 2).sum())
-        return torch.stack(costs)
+        return adv_overlap_cost(adv, adv_r, others_per_scene, self.cfg.overlap_margin)
 
     # ------------------------------------------------------------------- call --
     def __call__(
@@ -397,19 +444,14 @@ class CriticalSceneCost:
 
         # per-scene slices for the two terms that need the whole scene
         lanes_per_scene = [lanes[lane_batch == i] for i in range(batch_size)]
-        others_per_scene = []
-        for i in range(batch_size):
-            mask = agent_batch == i
-            mask = mask.clone()
-            mask[adv_idx[i]] = False
-            others_per_scene.append((states[mask], footprint_radius(states[mask])))
+        others = others_per_scene(states, agent_batch, adv_idx, batch_size)
 
         terms = {
             "proximity": self.cfg.proximity_coef * self._proximity(dmin),
             "closure": self.cfg.closure_coef * self._closure(dmin, d0),
             "ttc": self.cfg.ttc_coef * self._ttc_window(gap, self.timesteps),
             "offroad": self.cfg.offroad_coef * self._offroad(adv, lanes_per_scene),
-            "overlap": self.cfg.overlap_coef * self._overlap(adv, adv_r, others_per_scene),
+            "overlap": self.cfg.overlap_coef * self._overlap(adv, adv_r, others),
         }
         if reference_norm is not None and self.cfg.trust_region_coef > 0:
             # Anchor the guided adversary to what the model would have predicted on

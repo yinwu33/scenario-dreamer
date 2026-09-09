@@ -38,8 +38,17 @@ cost:
   #    window, so this pulls the generated distribution toward the data, not away.
   ego_min_goal_dist: 25.0
 
+  # 4. clearance the adversary must keep from every OTHER agent's footprint
+  #    (circumscribed circles, so the required gap is slightly conservative)
+  overlap_margin: 0.5
+
   # Every term is a squared hinge in metres^2, so they are already on one scale and
   # a satisfied constraint contributes exactly zero gradient.
   adv_spawn_coef: 1.0
   adv_goal_coef: 1.0
   ego_trip_coef: 1.0
+  # Far heavier than the rest: constraints 1-3 are preferences, 4 is validity. An
+  # overlapping spawn has to cost more than the proximity that bought it, or the
+  # optimiser trades one for the other. Zero once satisfied, so it never distorts an
+  # already-legal scene.
+  overlap_coef: 30.0
