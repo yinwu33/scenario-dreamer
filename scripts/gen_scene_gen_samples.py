@@ -61,9 +61,9 @@ DDPO_RUNS = (
 )
 
 
-def ddpo_ckpt(run: str) -> Path:
+def ddpo_ckpt(run: str, iters: int) -> Path:
     d = ROOT / "data" / "critical_scene" / f"critical_scene_ddpo_ldm_adv_ddim_{run}"
-    return d / f"critical_scene_ddpo_ldm_adv_ddim_{run}_03000.ckpt"
+    return d / f"critical_scene_ddpo_ldm_adv_ddim_{run}_{iters:05d}.ckpt"
 
 
 def build_prior_batches(lit, cfg_root, num_scenes: int, batch_size: int):
@@ -152,6 +152,7 @@ def main() -> int:
     ap.add_argument("--batch-size", type=int, default=128)
     ap.add_argument("--out-root", default="data/scene_gen_table")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--ckpt-iters", type=int, default=3000)
     ap.add_argument("--rows", nargs="+", default=["base", *DDPO_RUNS])
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = ap.parse_args()
@@ -175,7 +176,7 @@ def main() -> int:
 
     for row in args.rows:
         cache_dir = out_root / row
-        ckpt = base_ckpt if row == "base" else str(ddpo_ckpt(row))
+        ckpt = base_ckpt if row == "base" else str(ddpo_ckpt(row, args.ckpt_iters))
         print(f"[scene_gen] stage 2: {row} <- {Path(ckpt).name}")
         policy = build_policy(cfg_root, ldm_cfg, ckpt=ckpt, device=args.device)
         stage_two(lit, policy, batches, base_latents, seed=args.seed,

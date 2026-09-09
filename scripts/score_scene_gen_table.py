@@ -97,6 +97,7 @@ def main() -> int:
     ap.add_argument("--sd-samples",
                     default="data/checkpoints/scenario_dreamer_ldm_large_waymo/"
                             "initial_scene_advscene_fair10k_samples")
+    ap.add_argument("--rows", nargs="+", default=list(DDPO_RUNS))
     ap.add_argument("--num-samples", type=int, default=1000)
     ap.add_argument("--num-gt-samples", type=int, default=43658)
     ap.add_argument("--out", default="data/scene_gen_table/metrics.json")
@@ -116,7 +117,7 @@ def main() -> int:
 
     rows = {"scenario_dreamer": Path(args.sd_samples)}
     rows["advscene_base"] = Path(args.gen_root) / "base"
-    for run in DDPO_RUNS:
+    for run in args.rows:
         rows[run] = Path(args.gen_root) / run
 
     results = {}
