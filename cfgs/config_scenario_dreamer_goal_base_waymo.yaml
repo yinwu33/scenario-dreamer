@@ -1,0 +1,57 @@
+# Goal-aware Scenario Dreamer Base.
+#
+# This keeps the original ScenarioDreamerLDM architecture: lanes and all agents
+# are jointly diffused through the standard agent stream. Goals are generated as
+# part of each agent's 9-D state through the frozen goal autoencoder; there is no
+# per-agent conditioning and no separate adversarial stream/head.
+
+model_name: ldm
+
+defaults:
+  - _base
+  - dataset_name: waymo
+  - dataset@ae.dataset: waymo_autoencoder
+  - train@ae.train: waymo_autoencoder
+  - eval@ae.eval: waymo_autoencoder
+  - model@ae.model: waymo_autoencoder
+  - datamodule@ae.datamodule: waymo_autoencoder
+  - dataset@ldm.dataset: waymo_ldm
+  - train@ldm.train: waymo_ldm
+  - eval@ldm.eval: waymo_ldm
+  - model@ldm.model: waymo_ldm
+  - datamodule@ldm.datamodule: waymo_ldm
+  - _self_
+
+ae:
+  dataset:
+    dataset_path: ${dataset_root}/advscene_preprocess_waymo
+    preprocess_dir: ${dataset_root}/advscene_preprocess_waymo
+    offroad_threshold: 1.5
+    use_goal: true
+  train:
+    run_name: advscene_ae_goal_waymo
+  eval:
+    run_name: advscene_ae_goal_waymo
+    cache_latents:
+      use_nocturne_metadata: false
+      latent_dir: ${scratch_root}/advscene_ae_goal_latents_waymo
+  model:
+    state_dim: 9
+
+ldm:
+  dataset:
+    dataset_path: ${scratch_root}/advscene_ae_goal_latents_waymo
+  train:
+    run_name: scenario_dreamer_ldm_goal_base_waymo
+    devices: 1
+    max_steps: 150000
+    # The goal-data layout prior has no map-id axis. Initial-scene generation
+    # therefore uses the classifier-free branch rather than conditioning on the
+    # schema-only map_id placeholder.
+    guidance_scale: 0.0
+  eval:
+    run_name: scenario_dreamer_ldm_goal_base_waymo
+    init_prob_matrix_path: ${project_root}/metadata/initial_prob_matrix_goal_waymo.pt
+  model:
+    autoencoder_run_name: advscene_ae_goal_waymo
+    num_l2l_blocks: 1
