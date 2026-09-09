@@ -8,22 +8,26 @@ row measures the same thing every other row does: the ego against ONE designated
 non-ego agent. Nothing else in the payload changes -- the scene, the agents and
 their goals are the logged ones.
 
-Candidates are restricted to VEHICLES, matching the generated adversary's fixed
-`adv_cond_target.type: vehicle`; a scene whose only neighbours are pedestrians
-or cyclists keeps -1 and stays undefined.
-
-Distance is spawn-to-spawn (columns 0,1 of the [N, 9] state), i.e. a property of
-the initialisation, not of any rollout, so the choice is planner-independent and
-one artifact serves every SUT.
+The designation is `critical_scene.log_scenes.closest_agent_adv_idx`, shared with
+`eval_rollout.log_payload` so the two ways of producing this row cannot drift --
+they used to, disagreeing on 91 of 1000 val scenes. See that function for the
+rule (nearest vehicle, falling back to the nearest agent of any type) and why.
 """
 
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
 import numpy as np
 import torch
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from critical_scene.log_scenes import closest_agent_adv_idx
 
 
 def main() -> int:
@@ -39,20 +43,7 @@ def main() -> int:
     scene_idx = np.asarray(p["agent_scene_idx"], dtype=np.int64)
     n_scenes = int(p["num_scenes"])
 
-    # `_build_scenes` slices with `agent_scene_idx == s`, so a scene's local
-    # order is its payload order and local 0 is the ego.
-    adv = np.full(n_scenes, -1, dtype=np.int64)
-    for s in range(n_scenes):
-        rows = np.flatnonzero(scene_idx == s)
-        if len(rows) < 2:
-            continue
-        xy = states[rows, :2]
-        d = np.hypot(xy[1:, 0] - xy[0, 0], xy[1:, 1] - xy[0, 1])
-        veh = types[rows[1:]] == 0  # dataset ids: 0 veh / 1 ped / 2 cyc
-        if not veh.any():
-            continue
-        d = np.where(veh, d, np.inf)
-        adv[s] = int(np.argmin(d)) + 1  # +1: local 0 is the ego
+    adv = closest_agent_adv_idx(states, types, scene_idx, n_scenes)
 
     p["adv_local_idx"] = torch.from_numpy(adv)
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)

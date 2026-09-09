@@ -31,6 +31,7 @@ import numpy as np
 import torch
 
 from sim.scenes import GeneratedScenes, lane_graph_edges
+from sim.schema import VEHICLE_TYPE_ID
 from utils.goal_runtime import prepare_scene
 
 
@@ -41,6 +42,52 @@ def list_scene_files(preprocess_dir: str | Path, split: str) -> list[str]:
     an index here means the same scene it means there.
     """
     return sorted(glob(str(Path(preprocess_dir) / split / "*.pkl")))
+
+
+def closest_agent_adv_idx(agent_states, agent_types, agent_scene_idx, num_scenes):
+    """Per-scene local index of the agent designated the adversary in a LOG scene.
+
+    The "Log (closest agent as adversary)" row's designation. A logged scene has no
+    generated adversary, so every adversary-scoped metric (ego-vs-adversary
+    collision, ego fault, ego min TTC) is undefined until one agent is named; this
+    names the ego's nearest neighbour, VEHICLES FIRST.
+
+    Vehicles first because the adversary is what the adv planner drives and what the
+    generated rows put there (``adv_cond_target.type: vehicle``); a pedestrian is not
+    a comparable object. But a scene whose only neighbours are pedestrians or
+    cyclists still gets one -- falling back to the nearest agent of any type keeps
+    the row's denominator the whole scene set rather than silently dropping the
+    scenes with no car near the ego.
+
+    Distance is spawn-to-spawn (columns 0,1 of the [N, 9] state), a property of the
+    initialisation and not of any rollout, so the designation is planner-independent
+    and one artifact serves every SUT.
+
+    Returns ``[num_scenes]`` int64, ``-1`` where the scene has no non-ego agent at
+    all. Local index 0 is the ego: ``_build_scenes`` slices with
+    ``agent_scene_idx == s``, so a scene's local order is its payload order.
+
+    Shared on purpose. ``eval_rollout.log_payload`` and
+    ``scripts/make_closest_adv.py`` each had their own copy and they disagreed:
+    one took the nearest agent of any type, the other the nearest vehicle and -1
+    when there was none, which differed on 91 of 1000 val scenes (66 a different
+    agent, 25 no vehicle at all). Two definitions of one table row is one too many.
+    """
+    states = np.asarray(agent_states, dtype=np.float32)
+    types = np.asarray(agent_types, dtype=np.int64)
+    scene_idx = np.asarray(agent_scene_idx, dtype=np.int64)
+
+    adv = np.full(int(num_scenes), -1, dtype=np.int64)
+    for s in range(int(num_scenes)):
+        rows = np.flatnonzero(scene_idx == s)
+        if len(rows) < 2:
+            continue
+        dist = np.linalg.norm(states[rows[1:], :2] - states[rows[0], :2], axis=-1)
+        is_vehicle = types[rows[1:]] == VEHICLE_TYPE_ID
+        if is_vehicle.any():
+            dist = np.where(is_vehicle, dist, np.inf)
+        adv[s] = int(np.argmin(dist)) + 1
+    return adv
 
 
 def load_log_scenes(

@@ -54,7 +54,7 @@ from critical_scene.ldm_adv_eval import (
     scenes_to_payload,
     summarize,
 )
-from critical_scene.log_scenes import load_log_scenes
+from critical_scene.log_scenes import closest_agent_adv_idx, load_log_scenes
 
 # Directory-name token -> planner name, following the pair convention in AGENTS.md.
 _SUT = {"ppo": "ppo_normal", "idm": "idm", "pdm": "pdm"}
@@ -110,20 +110,22 @@ def cache_payload(cache_dir: Path) -> tuple[dict, list[str]]:
 
 
 def log_payload(preprocess_dir: Path, indices: list[int], dataset_cfg) -> dict:
-    """Log scenes with the ego's nearest neighbour designated as the adversary."""
+    """Log scenes with the ego's nearest neighbour designated as the adversary.
+
+    The designation itself is ``closest_agent_adv_idx`` -- shared with
+    ``scripts/make_closest_adv.py``, which writes the same row as a standalone
+    artifact. This used to be an inline copy that took the nearest agent of any
+    type while that script took the nearest vehicle, so the two produced a
+    different adversary in 91 of 1000 val scenes.
+    """
     scenes, _ = load_log_scenes(preprocess_dir, "val", indices, dataset_cfg)
     payload = scenes_to_payload(scenes)
-
-    states = payload["agent_states"].numpy()
-    scene_idx = payload["agent_scene_idx"].numpy()
-    adv = np.full(int(payload["num_scenes"]), -1, dtype=np.int64)
-    for s in range(int(payload["num_scenes"])):
-        rows = np.flatnonzero(scene_idx == s)
-        if len(rows) < 2:
-            continue  # ego-only: no agent to designate, scored as no adversary
-        dist = np.linalg.norm(states[rows[1:], :2] - states[rows[0], :2], axis=-1)
-        adv[s] = int(np.argmin(dist)) + 1
-    payload["adv_local_idx"] = torch.from_numpy(adv)
+    payload["adv_local_idx"] = torch.from_numpy(closest_agent_adv_idx(
+        payload["agent_states"].numpy(),
+        payload["agent_types"].numpy(),
+        payload["agent_scene_idx"].numpy(),
+        int(payload["num_scenes"]),
+    ))
     return payload
 
 
