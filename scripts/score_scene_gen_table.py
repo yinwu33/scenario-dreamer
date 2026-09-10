@@ -98,6 +98,9 @@ def main() -> int:
                     default="data/checkpoints/scenario_dreamer_ldm_large_waymo/"
                             "initial_scene_advscene_fair10k_samples")
     ap.add_argument("--rows", nargs="+", default=list(DDPO_RUNS))
+    ap.add_argument("--caches", nargs="+", default=None,
+                    help="score these cache directories instead of the --gen-root "
+                         "layout, keyed <run>/<mode> as in eval_scene.py")
     ap.add_argument("--num-samples", type=int, default=1000)
     ap.add_argument("--num-gt-samples", type=int, default=43658)
     ap.add_argument("--out", default="data/scene_gen_table/metrics.json")
@@ -115,10 +118,22 @@ def main() -> int:
     print(f"[score] reference: {len(reference)} scenes")
     memoise_reference_stats(reference)
 
-    rows = {"scenario_dreamer": Path(args.sd_samples)}
-    rows["advscene_base"] = Path(args.gen_root) / "base"
-    for run in args.rows:
-        rows[run] = Path(args.gen_root) / run
+    if args.caches:
+        # generate_scene.py writes one cache per mode UNDER the run, so twelve runs
+        # all end in a directory called init_scene; the run and mode together are
+        # what identifies a row.
+        rows = {}
+        for cache in args.caches:
+            path = Path(cache)
+            key = f"{path.parent.name}/{path.name}"
+            if key in rows:
+                raise SystemExit(f"two caches resolve to the row key {key!r}")
+            rows[key] = path
+    else:
+        rows = {"scenario_dreamer": Path(args.sd_samples)}
+        rows["advscene_base"] = Path(args.gen_root) / "base"
+        for run in args.rows:
+            rows[run] = Path(args.gen_root) / run
 
     results = {}
     for name, path in rows.items():

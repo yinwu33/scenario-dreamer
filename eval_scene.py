@@ -262,15 +262,36 @@ def main() -> int:
     results = {}
     for cache in args.caches:
         cache_dir = Path(cache)
+        # ``<run>/<mode>`` rather than the directory name: generate_scene.py writes
+        # a cache per mode UNDER the run, so twelve DDPO runs all end in a directory
+        # called ``init_scene`` and keying on that alone would have each row silently
+        # overwrite the last.
+        key = f"{cache_dir.parent.name}/{cache_dir.name}"
+        if key in results:
+            raise SystemExit(f"two caches resolve to the row key {key!r}")
         scenes, adv_pos, manifest = load_cache(cache_dir)
         agent, adv = group_stats(scenes, adv_pos)
 
-        threshold = adv_goal_threshold(manifest["adv_cond_target"], dataset_cfg)
-        ref_adv = {k: ref[k][ref_goal[k] >= threshold] for k in AGENT_KEYS}
-        print(f"[score] {cache_dir.name}: adv reference is goal>={threshold:.0f}m "
-              f"({100 * len(ref_adv['length']) / len(ref['length']):.1f}% of vehicles)")
+        # A cache whose generator has no adversary conditioning gets the WHOLE
+        # reference, not a subset. The subset above exists to avoid charging a
+        # conditioned adversary for obeying its own condition; ``dm_goal``
+        # (generate_scene_control.py) has no conditioning labels at all -- its
+        # designated agent is steered by ProximityGoalCost at sampling time and
+        # was never told a goal-distance bucket -- so restricting the reference
+        # would charge it for a condition it never had. The two cases are
+        # distinguishable in the manifest, so they are handled, not defaulted.
+        if "adv_cond_target" in manifest:
+            threshold = adv_goal_threshold(manifest["adv_cond_target"], dataset_cfg)
+            ref_adv = {k: ref[k][ref_goal[k] >= threshold] for k in AGENT_KEYS}
+            print(f"[score] {key}: adv reference is goal>={threshold:.0f}m "
+                  f"({100 * len(ref_adv['length']) / len(ref['length']):.1f}% of vehicles)")
+        else:
+            threshold = None
+            ref_adv = ref
+            print(f"[score] {key}: generator has no adversary conditioning, "
+                  "adv reference is all vehicles")
 
-        results[cache_dir.name] = {
+        results[key] = {
             "manifest": manifest,
             "num_scenes": len(scenes),
             "adv_goal_threshold": threshold,

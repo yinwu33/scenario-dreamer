@@ -140,7 +140,11 @@ def build_clusters(summaries: dict[str, dict], n_boot: int, seed: int) -> tuple[
     rng = np.random.default_rng(seed)
     clusters: dict[str, dict] = {}
     owner: dict[tuple[str, int], str] = {}
-    for src, summary in summaries.items():
+    # sorted, not ``summaries.items()``: ``load_summaries`` builds its dict from a
+    # set of root names, so the iteration order varies with the interpreter's hash
+    # seed. Unsorted, each run would hand a different draw to each cluster and
+    # ``--boot-seed`` would not reproduce anything.
+    for src, summary in sorted(summaries.items()):
         d = summary["npz"]
         groups: dict[bytes, list[int]] = {}
         for j in range(len(summary["checkpoint"])):
@@ -264,14 +268,18 @@ CAPTION = (
     r"planner combinations. Collision is ego vs the generated adversary; "
     r"Coll.$_{\text{ego}}$ counts only contacts the ego's own front face made. "
     r"TTC columns count scenes whose minimum ego-to-adversary time-to-collision "
-    r"fell below the threshold. Off. is a diagnostic and is not bolded: the rows "
+    r"fell below the threshold.")
+
+# Only true of a rendering that actually carries the column.
+OFFROAD_NOTE = (
+    r" Off. is a diagnostic and is not bolded: the rows "
     r"do not share a map distribution, so the off-road proxy is not comparable "
     r"down a column.")
 
 
 def render_tex(table: dict[tuple, float], *, metrics: list = METRICS,
                pm: dict[tuple, float] | None = None, src_csv: str = "table_main.csv",
-               tex_label: str = "tab:full_matrix", caption: str = CAPTION) -> str:
+               tex_label: str = "tab:full_matrix", caption_tail: str = "") -> str:
     cols = [t for t, _ in TRAFFIC] + ["Average"]
     span = len(metrics)
     head_groups = " &\n".join(
@@ -280,6 +288,8 @@ def render_tex(table: dict[tuple, float], *, metrics: list = METRICS,
     cmid = "\n".join(rf"\cmidrule(lr){{{3 + i * span}-{2 + (i + 1) * span}}}"
                      for i in range(len(cols)))
     metric_head = " & ".join(h for _ in cols for _, h, _ in metrics)
+    caption = CAPTION + (OFFROAD_NOTE if any(k == "offroad" for k, _, _ in metrics)
+                         else "") + caption_tail
 
     body = []
     for ego, ego_label in EGO:
@@ -425,12 +435,12 @@ def main() -> int:
     values, sds = read_pm_csv(out / "table_main_pm.csv")
     (out / "table_main_pm.tex").write_text(render_tex(
         values, pm=sds, src_csv="table_main_pm.csv", tex_label="tab:full_matrix_pm",
-        caption=CAPTION + tail) + "\n")
+        caption_tail=tail) + "\n")
     (out / "table_main_pm_narrow.tex").write_text(render_tex(
         values, metrics=NARROW, pm=sds, src_csv="table_main_pm.csv",
         tex_label="tab:full_matrix_pm_narrow",
-        caption=CAPTION + tail + r" Off. and TTC$_{<1.5s}$ are dropped here for "
-        r"width; both are in Table~\ref{tab:full_matrix}.") + "\n")
+        caption_tail=tail + r" Off. and TTC$_{<1.5s}$ are dropped here for width; "
+        r"both carry the same spread in Table~\ref{tab:full_matrix_pm}.") + "\n")
     (out / "PROVENANCE_pm.json").write_text(json.dumps({
         "n_boot": args.bootstrap, "seed": args.boot_seed,
         "statistic": "bootstrap SD of the cell = standard error over resampled scene sets",

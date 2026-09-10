@@ -241,6 +241,13 @@ def main() -> None:
     p.add_argument("--num-scenes", type=int, default=1000)
     p.add_argument("--batch-size", type=int, default=32)
     p.add_argument("--seed", type=int, default=0, help="seeds the scene sample")
+    p.add_argument(
+        "--index-file",
+        type=Path,
+        default=None,
+        help="json with a 'scene_idx' list to evaluate instead of a seeded sample; "
+        "metadata/val1000.json is the set eval_rollout.py scores the main table on",
+    )
     p.add_argument("--out-dir", type=Path, default=Path("output/planner_matrix"))
     p.add_argument("--config-name", default="config_planner_matrix")
     p.add_argument(
@@ -272,7 +279,10 @@ def main() -> None:
 
     source = build_source(cfg, args)
     cell = cell_label(args.sut, args.env, adv, source.name)
-    indices = select_indices(source, args.num_scenes, args.seed)
+    if args.index_file:
+        indices = json.loads(args.index_file.read_text(encoding="utf-8"))["scene_idx"]
+    else:
+        indices = select_indices(source, args.num_scenes, args.seed)
     print(
         f"[benchmark] cell {cell}: {len(indices)} scenes from {source.origin}",
         flush=True,
@@ -291,6 +301,7 @@ def main() -> None:
         # directory for generated ones. Recorded per scene in the CSV.
         "split": source.origin,
         "seed": int(args.seed),
+        "index_file": str(args.index_file) if args.index_file else None,
         "num_requested": len(indices),
         "dataset_scene_idx": kept,
         "planner": OmegaConf.to_container(cfg.planner, resolve=True),
