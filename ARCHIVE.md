@@ -8,7 +8,36 @@ checkpoints and caches deleted here can be told apart from the ones that were
 lost, and so that anything still needed can be either found or rebuilt.
 
 Off-machine copy: `onedrive:/Project/AdvScene/`. There is no second local disk;
-`/home` is the only copy on this machine.
+`/home` is the only other copy.
+
+## What is on OneDrive, and why some of it is tarred
+
+```
+onedrive:/Project/AdvScene/
+  data/final/<model>/last.ckpt     the 35 checkpoints, loose and individually fetchable
+  data/final/{scene_gen,table_main,table_main_valid,planners}/   the tables, loose
+  tarballs/data_final_cache.tar.zst          100 564 files -> 549 M
+  tarballs/data_final_test.tar.zst             2 542 files -> 501 M
+  tarballs/data_final_scenecontrol.tar.zst     2 034 files ->  20 M
+  tarballs/data_final_backups.tar.zst            281 files ->  11 M
+  tarballs/critical_scene_artifacts.tar.zst   29 491 entries -> 10 G
+  tarballs/wandb.tar.zst                       1 624 entries -> 384 M
+  checkpoints/planners/, metadata/, temp/, archive/, ARCHIVE.md, AGENTS.md
+```
+
+The trees with many small files are tarred because they cannot be uploaded file
+by file in reasonable time: measured against this OneDrive remote, rclone
+sustains about **2.9 files/s** regardless of file size, which puts
+`data/final/cache` alone (100 564 pickles, 3.2 G) at roughly 10 hours. As
+`.tar.zst` it is 549 M and uploads in under a minute. The checkpoints stay loose
+because they are large, bandwidth-bound, and are the thing you would want to
+fetch one of.
+
+Restore with `zstd -dc <file>.tar.zst | tar -xf - -C data/` (the tars are rooted
+at `cache/`, `critical_scene/` and so on). `critical_scene_artifacts.tar.zst`
+holds 79 symlinks with absolute paths into
+`/home/tjhu78u/workspace/scenario-dreamer/data/critical_scene/`; they resolve
+only if restored to that same path.
 
 ## The keep set
 
