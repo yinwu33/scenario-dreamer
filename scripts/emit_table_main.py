@@ -30,8 +30,11 @@ Usage (env vars from scripts/define_env_variables.sh must be set)::
         --out data/final/table_main
 
 ``--bootstrap N`` adds a second set of files carrying a spread per cell:
-``table_main_pm.csv`` / ``.npz`` and two renderings, the full six metrics
-(``table_main_pm.tex``) and a narrower four (``table_main_pm_narrow.tex``). The
+``table_main_pm.csv`` / ``.npz`` and two renderings, the full seven metrics
+(``table_main_pm.tex``) and two narrower five-metric ones
+(``table_main_pm_narrow_remove_collid.tex``, and
+``table_main_pm_narrow_collid_1s.tex`` with both collision columns additionally
+restricted to contacts at least 1 s in). The
 spread is a bootstrap over the evaluated SCENES, not over generation seeds --
 see ``build_clusters`` for why the resample is per scene set and shared across a
 group's columns. The point-estimate files are re-derived and checked, never
@@ -53,27 +56,71 @@ TRAFFIC = [("idm", "IDM"), ("ppo_aggressive", r"$\mathrm{PPO}_{\text{aggr}}$"),
            ("ppo_normal", r"$\mathrm{PPO}_{\text{norm}}$"),
            ("ppo_caution", r"$\mathrm{PPO}_{\text{caut}}$")]
 
+# The scene-validity gate (``eval_rollout.write_summary``): the ego does not
+# interpenetrate any vehicle at t=0. Such a scene has no measurable outcome --
+# its collision, its TTC and its arrival are all decided before a planner acts --
+# so every rate below is measured on the scenes where this is 1, and the rate of
+# those is reported beside them as its own column. Per-row denominators are the
+# point: the rows do not share a scene set to begin with (the generated rows are
+# each their own draw), so there is no common subset to fall back on.
+GATE = "valid"
+
 # (metric key in summary.npz, header, better direction). ``None`` means the
 # column is a diagnostic and is never bolded: off-road is not a criticality
 # measure -- a generator can raise it with implausible geometry -- and here the
 # scene sources do not even share a map distribution (SceneControl conditions on
 # real val lanes, the AdvScene rows generate their own), so the proxy is not
-# comparable down the column.
+# comparable down the column. ``Valid`` is not bolded either: a row measured on
+# fewer scenes is not thereby better or worse, and it is the denominator of
+# everything to its right rather than a result.
 METRICS = [
+    (GATE, r"Valid", None),
     ("succ", r"Succ. $\downarrow$", "min"),
     ("offroad", r"Off.", None),
     ("collision", r"Coll. $\uparrow$", "max"),
     ("collision_ego_fault", r"Coll.$_{\text{ego}}$ $\uparrow$", "max"),
     ("ttc_lt_3s", r"TTC$_{<3s}$ $\uparrow$", "max"),
     ("ttc_lt_1p5s", r"TTC$_{<1.5s}$ $\uparrow$", "max"),
+    # Robustness variants (eval_rollout.EARLY_CONTACT_T): the same two collision
+    # columns restricted to contacts at least 1 s in. They are carried in the csv
+    # and the bootstrap so the narrow t1 rendering can quote them, but they are
+    # kept out of the full tables -- nine metrics x five column groups does not
+    # fit, and these repeat two columns that are already there.
+    ("collision_t1", r"Coll.$^{\ge 1s}$ $\uparrow$", "max"),
+    ("collision_ego_fault_t1", r"Coll.$_{\text{ego}}^{\ge 1s}$ $\uparrow$", "max"),
 ]
+
+FULL = [m for m in METRICS if not m[0].endswith("_t1")]
+
+
+def cell_estimate(d, key: str, j: int, gate: str | None = GATE) -> tuple[float, int]:
+    """(percentage, n) for one summary column.
+
+    Every rate is conditional on ``gate``; the gate itself is the unconditional
+    rate of valid scenes over whatever scenes the column covers at all. ``n`` is
+    the denominator that was actually used, so a csv row always carries the count
+    its value was divided by. ``gate=None`` is the UNCONDITIONAL table -- only the
+    pre-gate rendering needs it, and it exists so that table can be re-derived
+    through this same estimator instead of being read out of a stale file."""
+    x = d[key][:, j]
+    keep = np.isfinite(x)
+    if gate is not None and key != gate:
+        keep &= d[gate][:, j] == 1.0
+    return 100.0 * float(x[keep].mean()), int(keep.sum())
 
 # The +- table is 1.9x the width of the plain one at the same font, and the plain
 # one is already inside a \resizebox. This subset keeps it near the current width:
 # ``offroad`` is the diagnostic column that is never bolded, and ``ttc_lt_1p5s``
 # repeats ``ttc_lt_3s`` at a tighter threshold. Both tables come from the same csv.
-NARROW = [m for m in METRICS
-          if m[0] in ("succ", "collision", "collision_ego_fault", "ttc_lt_3s")]
+_BY_KEY = {k: (k, h, d) for k, h, d in METRICS}
+NARROW = [_BY_KEY[k] for k in
+          (GATE, "succ", "collision", "collision_ego_fault", "ttc_lt_3s")]
+# The same five columns with BOTH collision columns restricted to contacts at
+# least 1 s in, so Coll.$_{ego}$ stays a subset of Coll. Rendered as its own file
+# rather than as extra columns: it answers "does the conclusion survive the cut",
+# which is a second table, not a wider one.
+NARROW_T1 = [_BY_KEY[k] for k in
+             (GATE, "succ", "collision_t1", "collision_ego_fault_t1", "ttc_lt_3s")]
 
 # (row label, summary root, column template). ``{pair}`` is filled with the
 # checkpoint trained for the cell; ``{ego}``/``{traffic}`` with the planners.
@@ -118,7 +165,8 @@ def cell_column(summary: dict, template: str, ego: str, traffic: str) -> str:
     return col
 
 
-def build_clusters(summaries: dict[str, dict], n_boot: int, seed: int) -> tuple[dict, dict]:
+def build_clusters(summaries: dict[str, dict], n_boot: int, seed: int,
+                   gate: str | None = GATE) -> tuple[dict, dict]:
     """One resample of the SCENES per (summary root, finite-support) group.
 
     A root's columns do not all cover the same scenes: ``scenario_log`` stacks
@@ -150,7 +198,7 @@ def build_clusters(summaries: dict[str, dict], n_boot: int, seed: int) -> tuple[
         for j in range(len(summary["checkpoint"])):
             masks = [np.isfinite(d[key][:, j]) for key, _, _ in METRICS]
             if not all(np.array_equal(m, masks[0]) for m in masks):
-                raise SystemExit(f"{src}/{summary['checkpoint'][j]}: the six metrics "
+                raise SystemExit(f"{src}/{summary['checkpoint'][j]}: the metrics "
                                  "do not agree on which scenes they cover")
             groups.setdefault(masks[0].tobytes(), []).append(j)
         for gi, (pat, cols) in enumerate(groups.items()):
@@ -158,16 +206,27 @@ def build_clusters(summaries: dict[str, dict], n_boot: int, seed: int) -> tuple[
             n = int(mask.sum())
             name = f"{src}#{gi}"
             counts = rng.multinomial(n, np.full(n, 1.0 / n), size=n_boot).astype(np.float64)
+            valid = (d[gate][mask][:, cols] if gate is not None
+                     else np.ones_like(d["succ"][mask][:, cols]))
             draws = {}
             for key, _, _ in METRICS:
                 x = d[key][mask][:, cols]
-                # The table's point estimate is a nanmean over the whole column;
-                # the bootstrap runs on the support. They have to be the same
-                # number, or the +- would belong to a different quantity.
-                point = 100.0 * np.nanmean(d[key][:, cols], axis=0)
-                if not np.allclose(point, 100.0 * x.mean(axis=0), atol=1e-9, rtol=0):
-                    raise SystemExit(f"{name}/{key}: support mean != column nanmean")
-                draws[key] = 100.0 * (counts @ x) / n
+                # Every rate is a ratio over the VALID scenes, so a resample has to
+                # move its DENOMINATOR too: a draw that happens to contain fewer
+                # valid scenes must widen the rate, not merely shrink its numerator.
+                # Only the gate itself is a plain mean over the support.
+                if key == gate:
+                    draws[key] = 100.0 * (counts @ x) / n
+                    here = 100.0 * x.mean(axis=0)
+                else:
+                    draws[key] = 100.0 * (counts @ (x * valid)) / (counts @ valid)
+                    here = 100.0 * (x * valid).sum(axis=0) / valid.sum(axis=0)
+                # The table's point estimate comes from the whole column via
+                # ``cell_estimate``; the bootstrap runs on the support. They have to
+                # be the same number, or the +- would belong to a different quantity.
+                point = np.array([cell_estimate(d, key, j, gate)[0] for j in cols])
+                if not np.allclose(point, here, atol=1e-9, rtol=0):
+                    raise SystemExit(f"{name}/{key}: support estimate != column estimate")
             clusters[name] = {"root": src, "n": n, "col_pos": {c: i for i, c in enumerate(cols)},
                               "draws": draws}
             for c in cols:
@@ -184,7 +243,7 @@ def boot_stats(draws: np.ndarray, cluster: str) -> dict:
 
 
 def build_records(summaries: dict[str, dict], clusters: dict | None = None,
-                  owner: dict | None = None) -> list[dict]:
+                  owner: dict | None = None, gate: str | None = GATE) -> list[dict]:
     """One record per (ego, method, traffic-or-Average, metric). Long form: it
     pivots into any table shape and cannot silently transpose."""
     records = []
@@ -197,12 +256,11 @@ def build_records(summaries: dict[str, dict], clusters: dict | None = None,
                 col = cell_column(summary, template, ego, traffic)
                 j = summary["checkpoint"].index(col)
                 for key, _, _ in METRICS:
-                    value = 100.0 * float(np.nanmean(d[key][:, j]))
+                    value, n_cell = cell_estimate(d, key, j, gate)
                     per_traffic.setdefault(key, []).append(value)
                     rec = {"ego": ego, "method": label, "traffic": traffic,
                            "metric": key, "value": value,
-                           "source": f"{src}/{col}",
-                           "n": int(np.isfinite(d[key][:, j]).sum())}
+                           "source": f"{src}/{col}", "n": n_cell}
                     if clusters:
                         name = owner[(src, j)]
                         cell_clusters.add(name)
@@ -265,10 +323,17 @@ def read_pm_csv(path: Path) -> tuple[dict[tuple, float], dict[tuple, float]]:
 
 CAPTION = (
     r"Evaluation of different scene initialization methods on different "
-    r"planner combinations. Collision is ego vs the generated adversary; "
-    r"Coll.$_{\text{ego}}$ counts only contacts the ego's own front face made. "
-    r"TTC columns count scenes whose minimum ego-to-adversary time-to-collision "
-    r"fell below the threshold.")
+    r"planner combinations. Every rate is measured on the VALID scenes of its own "
+    r"row: those whose ego interpenetrates no vehicle at $t=0$. A scene that starts "
+    r"in contact has its collision, its time-to-collision and its arrival decided "
+    r"before any planner acts, so it is a generation defect rather than an outcome. "
+    r"Valid reports the share that were; the rest are dropped from every column to "
+    r"its right, their events included, so those columns are not an unconditional "
+    r"rate rescaled by Valid. Succ. is the fraction of egos reaching their goal; "
+    r"Coll. is ego vs the generated adversary; Coll.$_{\text{ego}}$ is the subset "
+    r"the ego's own front face made while moving; the TTC columns count scenes whose "
+    r"minimum time-to-collision of the ego closing on the adversary fell below the "
+    r"threshold.")
 
 # Only true of a rendering that actually carries the column.
 OFFROAD_NOTE = (
@@ -408,7 +473,7 @@ def main() -> int:
         np.savez_compressed(npz, **npz_arrays(
             records, ("ego", "method", "traffic", "metric", "value", "source")))
         print("[table] table_main.npz written")
-    tex = render_tex(read_csv(out / "table_main.csv")) + "\n"
+    tex = render_tex(read_csv(out / "table_main.csv"), metrics=FULL) + "\n"
     print(f"[table] table_main.tex {write_checked(out / 'table_main.tex', tex)}")
     prov = json.dumps({
         "rows": [{"label": r[0], "summary": r[1], "column": r[2]} for r in ROWS],
@@ -434,24 +499,38 @@ def main() -> int:
                   "ci_lo", "ci_hi", "cluster", "source")))
     values, sds = read_pm_csv(out / "table_main_pm.csv")
     (out / "table_main_pm.tex").write_text(render_tex(
-        values, pm=sds, src_csv="table_main_pm.csv", tex_label="tab:full_matrix_pm",
-        caption_tail=tail) + "\n")
-    (out / "table_main_pm_narrow.tex").write_text(render_tex(
+        values, metrics=FULL, pm=sds, src_csv="table_main_pm.csv",
+        tex_label="tab:full_matrix_pm", caption_tail=tail) + "\n")
+    narrow_tail = (tail + r" Off. and TTC$_{<1.5s}$ are dropped here for width; "
+                   r"both carry the same spread in Table~\ref{tab:full_matrix_pm}.")
+    (out / "table_main_pm_narrow_remove_collid.tex").write_text(render_tex(
         values, metrics=NARROW, pm=sds, src_csv="table_main_pm.csv",
-        tex_label="tab:full_matrix_pm_narrow",
-        caption_tail=tail + r" Off. and TTC$_{<1.5s}$ are dropped here for width; "
-        r"both carry the same spread in Table~\ref{tab:full_matrix_pm}.") + "\n")
+        tex_label="tab:full_matrix_pm_narrow", caption_tail=narrow_tail) + "\n")
+    (out / "table_main_pm_narrow_collid_1s.tex").write_text(render_tex(
+        values, metrics=NARROW_T1, pm=sds, src_csv="table_main_pm.csv",
+        tex_label="tab:full_matrix_pm_narrow_collid_1s",
+        caption_tail=narrow_tail + r" BOTH collision columns additionally require "
+        r"the contact to have happened at least 1\,s after the start, so "
+        r"Coll.$_{\text{ego}}$ stays a subset of Coll. This is a robustness cut, "
+        r"not a second artifact filter: the validity gate already removed the "
+        r"scenes that begin in contact, and what this removes on top is a legally "
+        r"placed adversary the ego had no room to react to. The threshold is the "
+        r"reward's own $t_{\text{hard}}$, which is why the unrestricted columns in "
+        r"Table~\ref{tab:full_matrix_pm_narrow} are the primary ones.") + "\n")
     (out / "PROVENANCE_pm.json").write_text(json.dumps({
         "n_boot": args.bootstrap, "seed": args.boot_seed,
         "statistic": "bootstrap SD of the cell = standard error over resampled scene sets",
         "resample_unit": "scene, drawn once per cluster and shared by that cluster's columns",
         "clusters": {n: {"root": c["root"], "num_scenes": c["n"],
                          "num_columns": len(c["col_pos"])} for n, c in clusters.items()},
-        "tables": {"table_main_pm.tex": [k for k, _, _ in METRICS],
-                   "table_main_pm_narrow.tex": [k for k, _, _ in NARROW]},
+        "tables": {"table_main_pm.tex": [k for k, _, _ in FULL],
+                   "table_main_pm_narrow_remove_collid.tex":
+                       [k for k, _, _ in NARROW],
+                   "table_main_pm_narrow_collid_1s.tex":
+                       [k for k, _, _ in NARROW_T1]},
     }, indent=1))
-    print(f"[table] {len(records)} records -> {out}/table_main_pm.csv, .npz, "
-          ".tex, _narrow.tex")
+    print(f"[table] {len(records)} records -> {out}/table_main_pm.csv, .npz, .tex, "
+          "_narrow_remove_collid.tex, _narrow_collid_1s.tex")
     return 0
 
 

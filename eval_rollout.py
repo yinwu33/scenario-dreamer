@@ -139,12 +139,22 @@ SUMMARY_METRICS = (
     ("collision_ego_fault", "ego_fault_collision"),
     ("offroad", "ego_offroad_proxy"),
     ("minTTC_ego_to_adv", "ego_min_ttc"),
+    ("ego_spawn_overlap", "init_ego_overlap_frac"),
+    ("collision_time", "ego_collision_time"),
 )
 # Derived from minTTC rather than measured again: a threshold count is what the
 # tables report, and deriving it here keeps the csv self-describing instead of
 # making every consumer re-apply the cut. inf (the ego never approached) is
 # below no threshold, which np.less gives for free.
 TTC_THRESHOLDS = ((3.0, "ttc_lt_3s"), (1.5, "ttc_lt_1p5s"))
+# Robustness variant of the two collision columns: the contact happened at least
+# this many seconds in. It is NOT the artifact filter -- the scene-validity gate
+# below already removes the scenes that start in contact. What it removes on top
+# is the legally-placed adversary the ego had no room to react to, which is a real
+# outcome, so these columns are reported BESIDE the unrestricted ones and never
+# instead of them. 1.0 s is the reward's own ``hard_collision_t``; that is where
+# the number comes from and is the reason it is not the primary column.
+EARLY_CONTACT_T = 1.0
 
 
 def rebuild_summary(args) -> int:
@@ -302,6 +312,20 @@ def write_summary(per_cache: dict, out_root: Path, args) -> None:
         grids[name] = (grids["minTTC_ego_to_adv"] < thr).astype(np.float64)
         grids[name][np.isnan(grids["minTTC_ego_to_adv"])] = np.nan
 
+    # The scene-validity gate the tables condition every rate on. An ego born
+    # interpenetrating another vehicle has no measurable outcome: its collision,
+    # its TTC and its arrival are all decided before a planner acts. Derived here
+    # rather than in the table so the csv carries the gate it was applied under.
+    grids["valid"] = (grids["ego_spawn_overlap"] == 0.0).astype(np.float64)
+    grids["valid"][np.isnan(grids["ego_spawn_overlap"])] = np.nan
+
+    for key in ("collision", "collision_ego_fault"):
+        # No collision is +inf, which is >= any threshold, but the column it
+        # gates is 0 there anyway. NaN compares False, so restore it afterwards.
+        grids[f"{key}_t1"] = np.where(grids["collision_time"] >= EARLY_CONTACT_T,
+                                      grids[key], 0.0)
+        grids[f"{key}_t1"][np.isnan(grids[key])] = np.nan
+
     np.savez_compressed(
         out_root / "summary.npz",
         scenario=np.array(stems), checkpoint=np.array(policies),
@@ -310,7 +334,8 @@ def write_summary(per_cache: dict, out_root: Path, args) -> None:
         **grids,
     )
 
-    names = [n for n, _ in SUMMARY_METRICS] + [n for _, n in TTC_THRESHOLDS]
+    names = ([n for n, _ in SUMMARY_METRICS] + [n for _, n in TTC_THRESHOLDS]
+             + ["valid", "collision_t1", "collision_ego_fault_t1"])
     lines = ["scenario,checkpoint,sut,env," + ",".join(names)]
     for i, stem in enumerate(stems):
         for col, policy in enumerate(policies):

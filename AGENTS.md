@@ -373,6 +373,74 @@ Two environment facts measured on the same box, so they are not re-derived:
 
 ## Paper Evaluation
 
+### The scene-validity gate (2026-09-15): every rate is conditional
+
+`data/final/table_main/` was UNCONDITIONAL and that made `Coll._ego` read
+backwards. Fixed by conditioning every rate on the scene being valid at `t=0`.
+
+**The gate is `init_ego_overlap_frac == 0`: the ego interpenetrates no vehicle
+when the rollout starts.** `InitOverlapHook` emits it alongside the reward's own
+`init_overlap_frac`, and the two are DIFFERENT sets, not one relaxed into the
+other: the reward's is adversary-vs-any (a placement fault it must see), the
+gate's is ego-vs-any, adversary included (a broken scene it has no business
+scoring). `eval_rollout.write_summary` derives `valid` from it; the table
+reports `Valid` as its own column and measures everything else on those scenes.
+
+Why it was load-bearing, in one number: **`base` has 2.30% invalid scenes and
+55.0% of its ego-fault collisions are inside them** (71 of 129, over the 12
+cells). The RL row has 2.23% invalid and 16.0%. So the ungated `Coll._ego`
+column said `base` 1.07 against RL 0.68; gated it says 0.49 against 0.58, and
+paired on the scenes valid in both (n=11645) it is 58 against 67, p = 0.41.
+`base` was not converting approaches better, it was being credited for cars that
+spawned inside each other.
+
+Four decisions inside the gate, each with the measurement:
+
+- **Do NOT gate on lane distance.** Adversary spawn >1 m off a centerline is
+  11.6% for `base` against 16.7% for RL, but gating on it moves no rate
+  (RL `Coll._ego` 0.56 -> 0.56) and only shrinks n. It is a REALISM cost the RL
+  row pays and should be a column, not a hidden denominator. The log's own
+  distribution puts p99 at 1.4 m, so any threshold near 1 m also cuts real data.
+- **Do NOT gate on `path_conflict`.** Removing scenes with no ego/adversary
+  interaction converts "this method often fails to create one" into a higher
+  conditional rate. That is the gaming direction.
+- **Do NOT gate on anything reward-side** (`tier`, `c_*`, `gen_agent_is_*`). The
+  RL row was trained to maximise exactly those.
+- **`ego_goal_dist >= 10` was considered and REJECTED** as a gate. It is the
+  repo's `driving` subset and it is defensible, but it removes 37-47% of the
+  Log / Scenario Dreamer / Base(null) / RL(init adv) rows against 0% of the
+  conditioned rows, and it re-ranks the table: those baselines gain ~50%
+  (Log `Coll.` 1.35 -> 2.11) and `RL (init adv)` becomes the strongest RL row on
+  `Coll._ego` (0.81 -> 1.18) and TTC (4.41 -> 6.30). Not wrong, but a different
+  decision; do not fold it in silently.
+
+The gate is a `before_rollout` quantity, so no planner can influence it and no
+outcome can be laundered into it. It is also invariant across the 12 cells of one
+scene source, which is what let the backfill below broadcast by scene stem.
+
+`Valid` is 97.7-100% for every row except SceneControl (95.2%), so the gate is
+cheap. Per-row denominators are unavoidable (the rows are different scene sets);
+use the INTERSECTION of valid scenes for paired tests and the per-row subset for
+the table, and never write "unconditional = Valid x the column beside it" -- the
+dropped scenes carry events, so it is false.
+
+Current artifacts: `data/final/table_main_valid/` (gated),
+`data/final/table_main/` (the old unconditional one, left in place).
+`data/final/backup_20260915_pre_validity/metrics_npz.tar.gz` holds every
+`metrics.npz` as it was before the backfill.
+
+**The backfill, and what it did NOT touch.** `init_ego_overlap_frac` postdates
+those 120 rollouts, so `scripts/backfill_init_ego_overlap.py` replays each
+scene source through the real `RewardModel.evaluate` with
+`ddpo.simulator.sim_steps=0` -- scenes built, `before_rollout` run, step loop
+skipped -- and writes the column in. It is exact because it CHECKS: the same
+replay recomputes `init_overlap_frac` and refuses to write unless it equals the
+recorded one scene for scene. It did, on all 120. The four roots
+`scenario`, `scenario_log`, `scenario_init_agent`, `scenario_init_adv` are
+backfilled; `scenario_bok`, `scenario_reward`, `scenario_rlnull` and
+`scenario_viz` are NOT, so `--rebuild-summary` on those raises a KeyError until
+they are backfilled or re-scored.
+
 **`data/critical_scene/table_main_20260830/` is VOID for every rollout column.**
 It was scored 2026-09-02, before the 09-04 sim boundary, and with
 `score_paired_sources.py` (ego-vs-ANY) rather than the adversarial scorer. Its

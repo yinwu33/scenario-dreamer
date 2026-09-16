@@ -153,6 +153,7 @@ class RewardModel:
             "ego_lane_dist_max": metrics["ego_lane_dist_max"],
             "init_invalid": metrics["init_invalid"],
             "init_overlap_frac": metrics["init_overlap_frac"],
+            "init_ego_overlap_frac": metrics["init_ego_overlap_frac"],
             "reached_goal": metrics["reached_goal"],
             "goal_offlane_frac": metrics["goal_offlane_frac"],
             "goal_lane_dist": metrics["goal_lane_dist"],

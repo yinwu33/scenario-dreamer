@@ -197,20 +197,29 @@ class MetricHook:
 
 
 class InitOverlapHook(MetricHook):
-    """Measure how much a generated adversary overlaps a vehicle at spawn.
+    """Measure how much the adversary and the ego interpenetrate at spawn.
 
-    Adversary-only: only overlaps that involve the generated adversary (vs the ego
-    or any real neighbour) count, so a degenerate init is always the adversary's
-    fault and real Waymo neighbours never penalise the reward. ``margin=0`` allows
-    bumper-to-bumper spawns (the planner is expected to brake), only flagging true
-    interpenetration.
+    ``init_overlap_frac`` is the REWARD's gate and is adversary-only: only overlaps
+    that involve the generated adversary (vs the ego or any real neighbour) count,
+    so a degenerate init is always the adversary's fault and real Waymo neighbours
+    never penalise the reward. ``margin=0`` allows bumper-to-bumper spawns (the
+    planner is expected to brake), only flagging true interpenetration.
 
-    Emits a *continuous* ``init_overlap_frac`` (max over neighbours of intersection
-    area / adversary area, in [0,1]) that the reward turns into a soft penalty and a
-    criticality gate, instead of a hard -1 floor. Normalising by the adversary's own
-    footprint (not the union, as IoU would) makes the signal independent of neighbour
-    size: a half-buried adversary reads 0.5 whether it overlaps a car or a bus.
-    ``init_invalid`` is kept as a boolean (frac > ``invalid_frac``) for logging / eval
+    ``init_ego_overlap_frac`` is the EVAL's scene-validity gate and is ego-centric:
+    the ego against every other vehicle, adversary included. A scene whose ego is
+    born inside another car has no measurable outcome -- its collision, its TTC and
+    its arrival are all decided before a planner acts -- so eval conditions on it
+    being 0. The two are different sets, not one relaxed into the other: the
+    adversary overlapping a non-ego neighbour is a placement fault the reward must
+    see, while the ego overlapping a non-adversary neighbour is a broken scene the
+    reward has no business scoring.
+
+    Both are *continuous* (max over neighbours of intersection area / the measured
+    agent's own area, in [0,1]); the reward turns its one into a soft penalty and a
+    criticality gate instead of a hard -1 floor. Normalising by the agent's own
+    footprint (not the union, as IoU would) makes the signal independent of
+    neighbour size: a half-buried car reads 0.5 whether it overlaps a car or a bus.
+    ``init_invalid`` is kept as a boolean (frac > ``invalid_frac``) for logging / viz
     and for the EgoCollisionHook gate, not to floor the reward.
     """
 
@@ -218,11 +227,11 @@ class InitOverlapHook(MetricHook):
         self.margin = float(margin)
         self.invalid_frac = float(invalid_frac)
 
-    def _adv_overlap_frac(self, sim: SimScene, adv_idx: int) -> float:
-        """Max over neighbours of (intersection area / adversary area) at spawn."""
-        if adv_idx < 0 or sim.removed[adv_idx]:
+    def _overlap_frac(self, sim: SimScene, idx: int) -> float:
+        """Max over neighbours of (intersection area / agent ``idx``'s area) at spawn."""
+        if idx < 0 or sim.removed[idx]:
             return 0.0
-        a = int(adv_idx)
+        a = int(idx)
         others = sim.slot_order[sim.ptype[sim.slot_order] != TYPE_PEDESTRIAN]
         rest = others[others != a]
         if len(rest) == 0:
@@ -253,10 +262,14 @@ class InitOverlapHook(MetricHook):
         ctx.metrics.setdefault(
             "init_overlap_frac", np.zeros(ctx.num_scenes, dtype=np.float32)
         )
+        ctx.metrics.setdefault(
+            "init_ego_overlap_frac", np.zeros(ctx.num_scenes, dtype=np.float32)
+        )
         adv = adv_local_indices(ctx.scenes, ctx.num_scenes)
         for s, sim in enumerate(ctx.sims):
-            frac = self._adv_overlap_frac(sim, adv[s])
+            frac = self._overlap_frac(sim, adv[s])
             ctx.metrics["init_overlap_frac"][s] = frac
+            ctx.metrics["init_ego_overlap_frac"][s] = self._overlap_frac(sim, 0)
             # TODO: remove -- init_invalid is now diagnostic/viz-only (the reward
             # gates on the continuous init_overlap_frac, not this boolean).
             if frac > self.invalid_frac:
