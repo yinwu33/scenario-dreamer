@@ -96,8 +96,11 @@ def _parse() -> argparse.Namespace:
 
 
 def _checkpoint(cell: str) -> Path:
-    run = f"critical_scene_ddpo_ldm_adv_ddim_{cell}_v4kl5_hier_v4"
-    return ROOT / "data" / "critical_scene" / run / f"{run}_00500.ckpt"
+    # The archived weights, not the sweep tree: data/critical_scene no longer
+    # carries checkpoints (see ARCHIVE.md). This file holds the same state_dict
+    # the `_00500.ckpt` it replaces did -- 0 of 197 tensors differ -- plus the
+    # run's `ddpo` block.
+    return ROOT / "data" / "final" / "advscene_rl_main" / cell / "last.ckpt"
 
 
 def _cell_cfg(args, cell: str, sut: str, env: str):

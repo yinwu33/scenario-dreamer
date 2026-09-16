@@ -1,0 +1,1307 @@
+{
+ "tier": "tier1_void_v2_v3",
+ "rationale": "AGENTS.md declares hierarchical_v2 and v3 VOID: both were trained before the 2026-09-04 sim boundary (control-every-agent + PDM lateral offsets), so they optimised a different simulator. AGENTS.md further states that settling whether a fault-agnostic collision band beats v4 needs v3 RETRAINED under the current sim, not re-scored -- so an archived v3 weight could not produce a valid number. Their already-scored artifacts (table_main_v3/, rescore_face_20260907/, table_main_20260830/) are KEPT; the v3 row of the reward table rests on those.",
+ "recorded": "2026-09-16",
+ "num_checkpoints": 181,
+ "total_bytes": 150786802700,
+ "runs": [
+  "critical_scene_ddpo_ldm_adv_ddim_idm-idm_hier_v2",
+  "critical_scene_ddpo_ldm_adv_ddim_idm-idm_v3_hier_v3",
+  "critical_scene_ddpo_ldm_adv_ddim_idm-ppo_aggressive_hier_v2",
+  "critical_scene_ddpo_ldm_adv_ddim_idm-ppo_aggressive_v3_hier_v3",
+  "critical_scene_ddpo_ldm_adv_ddim_idm-ppo_caution_hier_v2",
+  "critical_scene_ddpo_ldm_adv_ddim_idm-ppo_caution_v3_hier_v3",
+  "critical_scene_ddpo_ldm_adv_ddim_idm-ppo_hier_v2",
+  "critical_scene_ddpo_ldm_adv_ddim_idm-ppo_norm_hier_v2",
+  "critical_scene_ddpo_ldm_adv_ddim_idm-ppo_norm_v3_hier_v3",
+  "critical_scene_ddpo_ldm_adv_ddim_pdm-idm_hier_v2",
+  "critical_scene_ddpo_ldm_adv_ddim_pdm-idm_v3_hier_v3",
+  "critical_scene_ddpo_ldm_adv_ddim_pdm-ppo_aggressive_hier_v2",
+  "critical_scene_ddpo_ldm_adv_ddim_pdm-ppo_aggressive_v3_hier_v3",
+  "critical_scene_ddpo_ldm_adv_ddim_pdm-ppo_caution_v3_hier_v3",
+  "critical_scene_ddpo_ldm_adv_ddim_pdm-ppo_norm_hier_v2",
+  "critical_scene_ddpo_ldm_adv_ddim_pdm-ppo_norm_v3_hier_v3",
+  "critical_scene_ddpo_ldm_adv_ddim_ppo-idm_hier_v2",
+  "critical_scene_ddpo_ldm_adv_ddim_ppo-idm_v3_hier_v3",
+  "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_aggressive_hier_v2",
+  "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_aggressive_v3_hier_v3",
+  "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_caution_hier_v2",
+  "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_caution_v3_hier_v3",
+  "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_cond_drive_hier_v2",
+  "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_hier_v2",
+  "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_hier_v2_no_prior",
+  "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_fixedkl_v2_hier_v2",
+  "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_hier_v2",
+  "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2",
+  "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_v3_hier_v3"
+ ],
+ "checkpoints": [
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_idm-idm_hier_v2/critical_scene_ddpo_ldm_adv_ddim_idm-idm_hier_v2_00500.ckpt",
+   "bytes": 817231759,
+   "mtime": "2026-08-30T05:57:27",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_idm-idm_hier_v2",
+   "iteration": 500
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_idm-idm_hier_v2/critical_scene_ddpo_ldm_adv_ddim_idm-idm_hier_v2_01000.ckpt",
+   "bytes": 817231759,
+   "mtime": "2026-08-30T07:09:29",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_idm-idm_hier_v2",
+   "iteration": 1000
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_idm-idm_hier_v2/critical_scene_ddpo_ldm_adv_ddim_idm-idm_hier_v2_01500.ckpt",
+   "bytes": 817231759,
+   "mtime": "2026-08-30T08:20:41",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_idm-idm_hier_v2",
+   "iteration": 1500
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_idm-idm_hier_v2/critical_scene_ddpo_ldm_adv_ddim_idm-idm_hier_v2_02000.ckpt",
+   "bytes": 817231759,
+   "mtime": "2026-08-30T09:33:23",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_idm-idm_hier_v2",
+   "iteration": 2000
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_idm-idm_hier_v2/critical_scene_ddpo_ldm_adv_ddim_idm-idm_hier_v2_02500.ckpt",
+   "bytes": 817231759,
+   "mtime": "2026-08-30T10:47:39",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_idm-idm_hier_v2",
+   "iteration": 2500
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_idm-idm_hier_v2/critical_scene_ddpo_ldm_adv_ddim_idm-idm_hier_v2_03000.ckpt",
+   "bytes": 817231759,
+   "mtime": "2026-08-30T12:00:38",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_idm-idm_hier_v2",
+   "iteration": 3000
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_idm-idm_hier_v2/last.ckpt",
+   "bytes": 916113722,
+   "mtime": "2026-08-30T12:00:39",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_idm-idm_hier_v2",
+   "iteration": "last"
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_idm-idm_v3_hier_v3/critical_scene_ddpo_ldm_adv_ddim_idm-idm_v3_hier_v3_00500.ckpt",
+   "bytes": 817233002,
+   "mtime": "2026-09-04T02:01:26",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_idm-idm_v3_hier_v3",
+   "iteration": 500
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_idm-idm_v3_hier_v3/last.ckpt",
+   "bytes": 916113722,
+   "mtime": "2026-09-04T02:01:27",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_idm-idm_v3_hier_v3",
+   "iteration": "last"
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_aggressive_hier_v2/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_aggressive_hier_v2_00500.ckpt",
+   "bytes": 817234610,
+   "mtime": "2026-08-29T07:22:43",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_idm-ppo_aggressive_hier_v2",
+   "iteration": 500
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_aggressive_hier_v2/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_aggressive_hier_v2_01000.ckpt",
+   "bytes": 817234610,
+   "mtime": "2026-08-29T08:27:34",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_idm-ppo_aggressive_hier_v2",
+   "iteration": 1000
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_aggressive_hier_v2/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_aggressive_hier_v2_01500.ckpt",
+   "bytes": 817234610,
+   "mtime": "2026-08-29T09:33:09",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_idm-ppo_aggressive_hier_v2",
+   "iteration": 1500
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_aggressive_hier_v2/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_aggressive_hier_v2_02000.ckpt",
+   "bytes": 817234610,
+   "mtime": "2026-08-29T10:38:58",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_idm-ppo_aggressive_hier_v2",
+   "iteration": 2000
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_aggressive_hier_v2/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_aggressive_hier_v2_02500.ckpt",
+   "bytes": 817234610,
+   "mtime": "2026-08-29T11:44:49",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_idm-ppo_aggressive_hier_v2",
+   "iteration": 2500
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_aggressive_hier_v2/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_aggressive_hier_v2_03000.ckpt",
+   "bytes": 817234610,
+   "mtime": "2026-08-29T12:50:36",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_idm-ppo_aggressive_hier_v2",
+   "iteration": 3000
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_aggressive_hier_v2/last.ckpt",
+   "bytes": 916113722,
+   "mtime": "2026-08-29T12:50:37",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_idm-ppo_aggressive_hier_v2",
+   "iteration": "last"
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_aggressive_v3_hier_v3/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_aggressive_v3_hier_v3_00500.ckpt",
+   "bytes": 817235277,
+   "mtime": "2026-09-04T04:34:29",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_idm-ppo_aggressive_v3_hier_v3",
+   "iteration": 500
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_aggressive_v3_hier_v3/last.ckpt",
+   "bytes": 916113722,
+   "mtime": "2026-09-04T04:34:29",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_idm-ppo_aggressive_v3_hier_v3",
+   "iteration": "last"
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_caution_hier_v2/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_caution_hier_v2_00500.ckpt",
+   "bytes": 817234007,
+   "mtime": "2026-08-29T22:26:59",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_idm-ppo_caution_hier_v2",
+   "iteration": 500
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_caution_hier_v2/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_caution_hier_v2_01000.ckpt",
+   "bytes": 817234007,
+   "mtime": "2026-08-29T23:42:05",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_idm-ppo_caution_hier_v2",
+   "iteration": 1000
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_caution_hier_v2/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_caution_hier_v2_01500.ckpt",
+   "bytes": 817234007,
+   "mtime": "2026-08-30T00:57:21",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_idm-ppo_caution_hier_v2",
+   "iteration": 1500
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_caution_hier_v2/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_caution_hier_v2_02000.ckpt",
+   "bytes": 817234007,
+   "mtime": "2026-08-30T02:12:06",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_idm-ppo_caution_hier_v2",
+   "iteration": 2000
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_caution_hier_v2/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_caution_hier_v2_02500.ckpt",
+   "bytes": 817234007,
+   "mtime": "2026-08-30T03:26:38",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_idm-ppo_caution_hier_v2",
+   "iteration": 2500
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_caution_hier_v2/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_caution_hier_v2_03000.ckpt",
+   "bytes": 817234007,
+   "mtime": "2026-08-30T04:41:55",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_idm-ppo_caution_hier_v2",
+   "iteration": 3000
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_caution_hier_v2/last.ckpt",
+   "bytes": 916113722,
+   "mtime": "2026-08-30T04:41:56",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_idm-ppo_caution_hier_v2",
+   "iteration": "last"
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_caution_v3_hier_v3/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_caution_v3_hier_v3_00500.ckpt",
+   "bytes": 817234610,
+   "mtime": "2026-09-04T05:59:47",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_idm-ppo_caution_v3_hier_v3",
+   "iteration": 500
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_caution_v3_hier_v3/last.ckpt",
+   "bytes": 916113722,
+   "mtime": "2026-09-04T05:59:48",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_idm-ppo_caution_v3_hier_v3",
+   "iteration": "last"
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_hier_v2/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_hier_v2_00500.ckpt",
+   "bytes": 817231759,
+   "mtime": "2026-08-15T02:35:19",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_idm-ppo_hier_v2",
+   "iteration": 500
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_hier_v2/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_hier_v2_01000.ckpt",
+   "bytes": 817231759,
+   "mtime": "2026-08-15T04:44:23",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_idm-ppo_hier_v2",
+   "iteration": 1000
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_hier_v2/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_hier_v2_01500.ckpt",
+   "bytes": 817231759,
+   "mtime": "2026-08-15T06:56:29",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_idm-ppo_hier_v2",
+   "iteration": 1500
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_hier_v2/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_hier_v2_02000.ckpt",
+   "bytes": 817231759,
+   "mtime": "2026-08-15T09:07:02",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_idm-ppo_hier_v2",
+   "iteration": 2000
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_hier_v2/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_hier_v2_02500.ckpt",
+   "bytes": 817231759,
+   "mtime": "2026-08-15T11:16:25",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_idm-ppo_hier_v2",
+   "iteration": 2500
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_hier_v2/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_hier_v2_03000.ckpt",
+   "bytes": 817231759,
+   "mtime": "2026-08-15T13:26:48",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_idm-ppo_hier_v2",
+   "iteration": 3000
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_hier_v2/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_hier_v2_03500.ckpt",
+   "bytes": 817231759,
+   "mtime": "2026-08-15T15:37:54",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_idm-ppo_hier_v2",
+   "iteration": 3500
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_hier_v2/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_hier_v2_04000.ckpt",
+   "bytes": 817231759,
+   "mtime": "2026-08-15T17:50:54",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_idm-ppo_hier_v2",
+   "iteration": 4000
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_hier_v2/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_hier_v2_04500.ckpt",
+   "bytes": 817231759,
+   "mtime": "2026-08-15T20:03:55",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_idm-ppo_hier_v2",
+   "iteration": 4500
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_hier_v2/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_hier_v2_05000.ckpt",
+   "bytes": 817231759,
+   "mtime": "2026-08-15T22:16:57",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_idm-ppo_hier_v2",
+   "iteration": 5000
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_hier_v2/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_hier_v2_05500.ckpt",
+   "bytes": 817231759,
+   "mtime": "2026-08-16T00:30:06",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_idm-ppo_hier_v2",
+   "iteration": 5500
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_hier_v2/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_hier_v2_06000.ckpt",
+   "bytes": 817231759,
+   "mtime": "2026-08-16T02:43:22",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_idm-ppo_hier_v2",
+   "iteration": 6000
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_hier_v2/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_hier_v2_06500.ckpt",
+   "bytes": 817231759,
+   "mtime": "2026-08-16T04:56:38",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_idm-ppo_hier_v2",
+   "iteration": 6500
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_hier_v2/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_hier_v2_07000.ckpt",
+   "bytes": 817231759,
+   "mtime": "2026-08-16T07:10:36",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_idm-ppo_hier_v2",
+   "iteration": 7000
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_hier_v2/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_hier_v2_07500.ckpt",
+   "bytes": 817231759,
+   "mtime": "2026-08-16T09:23:53",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_idm-ppo_hier_v2",
+   "iteration": 7500
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_hier_v2/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_hier_v2_08000.ckpt",
+   "bytes": 817231759,
+   "mtime": "2026-08-16T11:38:45",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_idm-ppo_hier_v2",
+   "iteration": 8000
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_hier_v2/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_hier_v2_08500.ckpt",
+   "bytes": 817231759,
+   "mtime": "2026-08-16T13:52:20",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_idm-ppo_hier_v2",
+   "iteration": 8500
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_hier_v2/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_hier_v2_09000.ckpt",
+   "bytes": 817231759,
+   "mtime": "2026-08-16T16:05:17",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_idm-ppo_hier_v2",
+   "iteration": 9000
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_hier_v2/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_hier_v2_09500.ckpt",
+   "bytes": 817231759,
+   "mtime": "2026-08-16T18:18:42",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_idm-ppo_hier_v2",
+   "iteration": 9500
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_hier_v2/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_hier_v2_10000.ckpt",
+   "bytes": 817231759,
+   "mtime": "2026-08-16T20:30:28",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_idm-ppo_hier_v2",
+   "iteration": 10000
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_hier_v2/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_hier_v2_10500.ckpt",
+   "bytes": 817231759,
+   "mtime": "2026-08-16T22:43:31",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_idm-ppo_hier_v2",
+   "iteration": 10500
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_hier_v2/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_hier_v2_11000.ckpt",
+   "bytes": 817231759,
+   "mtime": "2026-08-17T00:56:20",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_idm-ppo_hier_v2",
+   "iteration": 11000
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_hier_v2/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_hier_v2_11500.ckpt",
+   "bytes": 817231759,
+   "mtime": "2026-08-17T03:08:13",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_idm-ppo_hier_v2",
+   "iteration": 11500
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_hier_v2/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_hier_v2_12000.ckpt",
+   "bytes": 817231759,
+   "mtime": "2026-08-17T05:20:53",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_idm-ppo_hier_v2",
+   "iteration": 12000
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_hier_v2/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_hier_v2_12500.ckpt",
+   "bytes": 817231759,
+   "mtime": "2026-08-17T07:33:59",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_idm-ppo_hier_v2",
+   "iteration": 12500
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_hier_v2/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_hier_v2_13000.ckpt",
+   "bytes": 817231759,
+   "mtime": "2026-08-17T09:49:58",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_idm-ppo_hier_v2",
+   "iteration": 13000
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_hier_v2/last.ckpt",
+   "bytes": 916113786,
+   "mtime": "2026-08-17T09:49:58",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_idm-ppo_hier_v2",
+   "iteration": "last"
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_norm_hier_v2/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_norm_hier_v2_00500.ckpt",
+   "bytes": 817233404,
+   "mtime": "2026-08-28T19:05:01",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_idm-ppo_norm_hier_v2",
+   "iteration": 500
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_norm_hier_v2/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_norm_hier_v2_01000.ckpt",
+   "bytes": 817233404,
+   "mtime": "2026-08-28T20:16:57",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_idm-ppo_norm_hier_v2",
+   "iteration": 1000
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_norm_hier_v2/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_norm_hier_v2_01500.ckpt",
+   "bytes": 817233404,
+   "mtime": "2026-08-28T21:29:16",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_idm-ppo_norm_hier_v2",
+   "iteration": 1500
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_norm_hier_v2/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_norm_hier_v2_02000.ckpt",
+   "bytes": 817233404,
+   "mtime": "2026-08-28T22:40:32",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_idm-ppo_norm_hier_v2",
+   "iteration": 2000
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_norm_hier_v2/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_norm_hier_v2_02500.ckpt",
+   "bytes": 817233404,
+   "mtime": "2026-08-28T23:52:54",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_idm-ppo_norm_hier_v2",
+   "iteration": 2500
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_norm_hier_v2/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_norm_hier_v2_03000.ckpt",
+   "bytes": 817233404,
+   "mtime": "2026-08-29T01:06:03",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_idm-ppo_norm_hier_v2",
+   "iteration": 3000
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_norm_hier_v2/last.ckpt",
+   "bytes": 916113722,
+   "mtime": "2026-08-29T01:06:03",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_idm-ppo_norm_hier_v2",
+   "iteration": "last"
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_norm_v3_hier_v3/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_norm_v3_hier_v3_00500.ckpt",
+   "bytes": 817234007,
+   "mtime": "2026-09-04T03:21:05",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_idm-ppo_norm_v3_hier_v3",
+   "iteration": 500
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_idm-ppo_norm_v3_hier_v3/last.ckpt",
+   "bytes": 916113722,
+   "mtime": "2026-09-04T03:21:06",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_idm-ppo_norm_v3_hier_v3",
+   "iteration": "last"
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_pdm-idm_hier_v2/critical_scene_ddpo_ldm_adv_ddim_pdm-idm_hier_v2_00500.ckpt",
+   "bytes": 817231759,
+   "mtime": "2026-09-02T04:43:28",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_pdm-idm_hier_v2",
+   "iteration": 500
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_pdm-idm_hier_v2/critical_scene_ddpo_ldm_adv_ddim_pdm-idm_hier_v2_01000.ckpt",
+   "bytes": 817231759,
+   "mtime": "2026-09-02T07:42:20",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_pdm-idm_hier_v2",
+   "iteration": 1000
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_pdm-idm_hier_v2/critical_scene_ddpo_ldm_adv_ddim_pdm-idm_hier_v2_01500.ckpt",
+   "bytes": 817231759,
+   "mtime": "2026-09-02T10:41:16",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_pdm-idm_hier_v2",
+   "iteration": 1500
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_pdm-idm_hier_v2/last.ckpt",
+   "bytes": 916113722,
+   "mtime": "2026-09-02T10:41:17",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_pdm-idm_hier_v2",
+   "iteration": "last"
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_pdm-idm_v3_hier_v3/critical_scene_ddpo_ldm_adv_ddim_pdm-idm_v3_hier_v3_00500.ckpt",
+   "bytes": 817233002,
+   "mtime": "2026-09-04T15:46:25",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_pdm-idm_v3_hier_v3",
+   "iteration": 500
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_pdm-idm_v3_hier_v3/last.ckpt",
+   "bytes": 916113722,
+   "mtime": "2026-09-04T15:46:26",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_pdm-idm_v3_hier_v3",
+   "iteration": "last"
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_pdm-ppo_aggressive_hier_v2/critical_scene_ddpo_ldm_adv_ddim_pdm-ppo_aggressive_hier_v2_00500.ckpt",
+   "bytes": 817234610,
+   "mtime": "2026-09-03T03:53:45",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_pdm-ppo_aggressive_hier_v2",
+   "iteration": 500
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_pdm-ppo_aggressive_hier_v2/critical_scene_ddpo_ldm_adv_ddim_pdm-ppo_aggressive_hier_v2_01000.ckpt",
+   "bytes": 817234610,
+   "mtime": "2026-09-03T07:21:37",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_pdm-ppo_aggressive_hier_v2",
+   "iteration": 1000
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_pdm-ppo_aggressive_hier_v2/last.ckpt",
+   "bytes": 916113722,
+   "mtime": "2026-09-03T07:21:38",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_pdm-ppo_aggressive_hier_v2",
+   "iteration": "last"
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_pdm-ppo_aggressive_v3_hier_v3/critical_scene_ddpo_ldm_adv_ddim_pdm-ppo_aggressive_v3_hier_v3_00500.ckpt",
+   "bytes": 817235277,
+   "mtime": "2026-09-04T19:46:07",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_pdm-ppo_aggressive_v3_hier_v3",
+   "iteration": 500
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_pdm-ppo_aggressive_v3_hier_v3/last.ckpt",
+   "bytes": 916113722,
+   "mtime": "2026-09-04T19:46:07",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_pdm-ppo_aggressive_v3_hier_v3",
+   "iteration": "last"
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_pdm-ppo_caution_v3_hier_v3/critical_scene_ddpo_ldm_adv_ddim_pdm-ppo_caution_v3_hier_v3_00500.ckpt",
+   "bytes": 817234610,
+   "mtime": "2026-09-04T21:54:39",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_pdm-ppo_caution_v3_hier_v3",
+   "iteration": 500
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_pdm-ppo_caution_v3_hier_v3/last.ckpt",
+   "bytes": 916113722,
+   "mtime": "2026-09-04T21:54:40",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_pdm-ppo_caution_v3_hier_v3",
+   "iteration": "last"
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_pdm-ppo_norm_hier_v2/critical_scene_ddpo_ldm_adv_ddim_pdm-ppo_norm_hier_v2_00500.ckpt",
+   "bytes": 817233404,
+   "mtime": "2026-09-02T18:56:44",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_pdm-ppo_norm_hier_v2",
+   "iteration": 500
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_pdm-ppo_norm_hier_v2/critical_scene_ddpo_ldm_adv_ddim_pdm-ppo_norm_hier_v2_01000.ckpt",
+   "bytes": 817233404,
+   "mtime": "2026-09-02T23:01:17",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_pdm-ppo_norm_hier_v2",
+   "iteration": 1000
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_pdm-ppo_norm_hier_v2/last.ckpt",
+   "bytes": 916113722,
+   "mtime": "2026-09-02T23:01:18",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_pdm-ppo_norm_hier_v2",
+   "iteration": "last"
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_pdm-ppo_norm_v3_hier_v3/critical_scene_ddpo_ldm_adv_ddim_pdm-ppo_norm_v3_hier_v3_00500.ckpt",
+   "bytes": 817234007,
+   "mtime": "2026-09-04T17:53:54",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_pdm-ppo_norm_v3_hier_v3",
+   "iteration": 500
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_pdm-ppo_norm_v3_hier_v3/last.ckpt",
+   "bytes": 916113722,
+   "mtime": "2026-09-04T17:53:54",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_pdm-ppo_norm_v3_hier_v3",
+   "iteration": "last"
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-idm_hier_v2/critical_scene_ddpo_ldm_adv_ddim_ppo-idm_hier_v2_00500.ckpt",
+   "bytes": 817231759,
+   "mtime": "2026-08-28T08:45:11",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-idm_hier_v2",
+   "iteration": 500
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-idm_hier_v2/critical_scene_ddpo_ldm_adv_ddim_ppo-idm_hier_v2_01000.ckpt",
+   "bytes": 817231759,
+   "mtime": "2026-08-28T10:26:20",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-idm_hier_v2",
+   "iteration": 1000
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-idm_hier_v2/critical_scene_ddpo_ldm_adv_ddim_ppo-idm_hier_v2_01500.ckpt",
+   "bytes": 817231759,
+   "mtime": "2026-08-28T12:08:56",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-idm_hier_v2",
+   "iteration": 1500
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-idm_hier_v2/critical_scene_ddpo_ldm_adv_ddim_ppo-idm_hier_v2_02000.ckpt",
+   "bytes": 817231759,
+   "mtime": "2026-08-28T13:47:30",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-idm_hier_v2",
+   "iteration": 2000
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-idm_hier_v2/critical_scene_ddpo_ldm_adv_ddim_ppo-idm_hier_v2_02500.ckpt",
+   "bytes": 817231759,
+   "mtime": "2026-08-28T15:25:13",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-idm_hier_v2",
+   "iteration": 2500
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-idm_hier_v2/critical_scene_ddpo_ldm_adv_ddim_ppo-idm_hier_v2_03000.ckpt",
+   "bytes": 817231759,
+   "mtime": "2026-08-28T17:05:02",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-idm_hier_v2",
+   "iteration": 3000
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-idm_hier_v2/last.ckpt",
+   "bytes": 916113722,
+   "mtime": "2026-08-28T17:05:02",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-idm_hier_v2",
+   "iteration": "last"
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-idm_v3_hier_v3/critical_scene_ddpo_ldm_adv_ddim_ppo-idm_v3_hier_v3_00500.ckpt",
+   "bytes": 817233002,
+   "mtime": "2026-09-04T07:46:14",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-idm_v3_hier_v3",
+   "iteration": 500
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-idm_v3_hier_v3/last.ckpt",
+   "bytes": 916113722,
+   "mtime": "2026-09-04T07:46:14",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-idm_v3_hier_v3",
+   "iteration": "last"
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_aggressive_hier_v2/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_aggressive_hier_v2_00500.ckpt",
+   "bytes": 817234610,
+   "mtime": "2026-08-27T19:18:16",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_aggressive_hier_v2",
+   "iteration": 500
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_aggressive_hier_v2/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_aggressive_hier_v2_01000.ckpt",
+   "bytes": 817234610,
+   "mtime": "2026-08-27T20:16:32",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_aggressive_hier_v2",
+   "iteration": 1000
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_aggressive_hier_v2/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_aggressive_hier_v2_01500.ckpt",
+   "bytes": 817234610,
+   "mtime": "2026-08-27T21:14:14",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_aggressive_hier_v2",
+   "iteration": 1500
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_aggressive_hier_v2/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_aggressive_hier_v2_02000.ckpt",
+   "bytes": 817234610,
+   "mtime": "2026-08-27T22:11:53",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_aggressive_hier_v2",
+   "iteration": 2000
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_aggressive_hier_v2/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_aggressive_hier_v2_02500.ckpt",
+   "bytes": 817234610,
+   "mtime": "2026-08-27T23:09:08",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_aggressive_hier_v2",
+   "iteration": 2500
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_aggressive_hier_v2/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_aggressive_hier_v2_03000.ckpt",
+   "bytes": 817234610,
+   "mtime": "2026-08-28T00:07:07",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_aggressive_hier_v2",
+   "iteration": 3000
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_aggressive_hier_v2/last.ckpt",
+   "bytes": 916113722,
+   "mtime": "2026-08-28T00:07:08",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_aggressive_hier_v2",
+   "iteration": "last"
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_aggressive_v3_hier_v3/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_aggressive_v3_hier_v3_00500.ckpt",
+   "bytes": 817235277,
+   "mtime": "2026-09-04T09:21:01",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_aggressive_v3_hier_v3",
+   "iteration": 500
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_aggressive_v3_hier_v3/last.ckpt",
+   "bytes": 916113722,
+   "mtime": "2026-09-04T09:21:02",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_aggressive_v3_hier_v3",
+   "iteration": "last"
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_caution_hier_v2/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_caution_hier_v2_00500.ckpt",
+   "bytes": 817234007,
+   "mtime": "2026-08-28T01:11:28",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_caution_hier_v2",
+   "iteration": 500
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_caution_hier_v2/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_caution_hier_v2_01000.ckpt",
+   "bytes": 817234007,
+   "mtime": "2026-08-28T02:10:49",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_caution_hier_v2",
+   "iteration": 1000
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_caution_hier_v2/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_caution_hier_v2_01500.ckpt",
+   "bytes": 817234007,
+   "mtime": "2026-08-28T03:10:22",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_caution_hier_v2",
+   "iteration": 1500
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_caution_hier_v2/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_caution_hier_v2_02000.ckpt",
+   "bytes": 817234007,
+   "mtime": "2026-08-28T04:10:45",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_caution_hier_v2",
+   "iteration": 2000
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_caution_hier_v2/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_caution_hier_v2_02500.ckpt",
+   "bytes": 817234007,
+   "mtime": "2026-08-28T05:10:42",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_caution_hier_v2",
+   "iteration": 2500
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_caution_hier_v2/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_caution_hier_v2_03000.ckpt",
+   "bytes": 817234007,
+   "mtime": "2026-08-28T06:10:15",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_caution_hier_v2",
+   "iteration": 3000
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_caution_hier_v2/last.ckpt",
+   "bytes": 916113722,
+   "mtime": "2026-08-28T06:10:16",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_caution_hier_v2",
+   "iteration": "last"
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_caution_v3_hier_v3/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_caution_v3_hier_v3_00500.ckpt",
+   "bytes": 817234610,
+   "mtime": "2026-09-04T14:11:33",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_caution_v3_hier_v3",
+   "iteration": 500
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_caution_v3_hier_v3/last.ckpt",
+   "bytes": 916113722,
+   "mtime": "2026-09-04T14:11:34",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_caution_v3_hier_v3",
+   "iteration": "last"
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_cond_drive_hier_v2/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_cond_drive_hier_v2_00500.ckpt",
+   "bytes": 817234610,
+   "mtime": "2026-08-26T21:27:55",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_cond_drive_hier_v2",
+   "iteration": 500
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_cond_drive_hier_v2/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_cond_drive_hier_v2_01000.ckpt",
+   "bytes": 817234610,
+   "mtime": "2026-08-26T22:27:49",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_cond_drive_hier_v2",
+   "iteration": 1000
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_cond_drive_hier_v2/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_cond_drive_hier_v2_01500.ckpt",
+   "bytes": 817234610,
+   "mtime": "2026-08-26T23:27:51",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_cond_drive_hier_v2",
+   "iteration": 1500
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_cond_drive_hier_v2/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_cond_drive_hier_v2_02000.ckpt",
+   "bytes": 817234610,
+   "mtime": "2026-08-27T00:27:41",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_cond_drive_hier_v2",
+   "iteration": 2000
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_cond_drive_hier_v2/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_cond_drive_hier_v2_02500.ckpt",
+   "bytes": 817234610,
+   "mtime": "2026-08-27T01:27:07",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_cond_drive_hier_v2",
+   "iteration": 2500
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_cond_drive_hier_v2/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_cond_drive_hier_v2_03000.ckpt",
+   "bytes": 817234610,
+   "mtime": "2026-08-27T02:27:24",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_cond_drive_hier_v2",
+   "iteration": 3000
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_cond_drive_hier_v2/last.ckpt",
+   "bytes": 916113722,
+   "mtime": "2026-08-27T02:27:25",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_cond_drive_hier_v2",
+   "iteration": "last"
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_hier_v2/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_hier_v2_00500.ckpt",
+   "bytes": 817231759,
+   "mtime": "2026-08-26T11:23:46",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_hier_v2",
+   "iteration": 500
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_hier_v2/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_hier_v2_01000.ckpt",
+   "bytes": 817231759,
+   "mtime": "2026-08-26T13:07:58",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_hier_v2",
+   "iteration": 1000
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_hier_v2/last.ckpt",
+   "bytes": 916113786,
+   "mtime": "2026-08-26T13:07:59",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_hier_v2",
+   "iteration": "last"
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_hier_v2_no_prior/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_hier_v2_00500.ckpt",
+   "bytes": 817231759,
+   "mtime": "2026-08-25T09:48:42",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_hier_v2_no_prior",
+   "iteration": 500
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_hier_v2_no_prior/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_hier_v2_01000.ckpt",
+   "bytes": 817231759,
+   "mtime": "2026-08-25T11:31:26",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_hier_v2_no_prior",
+   "iteration": 1000
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_hier_v2_no_prior/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_hier_v2_01500.ckpt",
+   "bytes": 817231759,
+   "mtime": "2026-08-25T13:12:51",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_hier_v2_no_prior",
+   "iteration": 1500
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_hier_v2_no_prior/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_hier_v2_02000.ckpt",
+   "bytes": 817231759,
+   "mtime": "2026-08-25T14:55:54",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_hier_v2_no_prior",
+   "iteration": 2000
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_hier_v2_no_prior/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_hier_v2_02500.ckpt",
+   "bytes": 817231759,
+   "mtime": "2026-08-25T16:37:43",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_hier_v2_no_prior",
+   "iteration": 2500
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_hier_v2_no_prior/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_hier_v2_03000.ckpt",
+   "bytes": 817231759,
+   "mtime": "2026-08-25T18:19:43",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_hier_v2_no_prior",
+   "iteration": 3000
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_hier_v2_no_prior/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_hier_v2_03500.ckpt",
+   "bytes": 817231759,
+   "mtime": "2026-08-25T20:01:59",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_hier_v2_no_prior",
+   "iteration": 3500
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_hier_v2_no_prior/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_hier_v2_04000.ckpt",
+   "bytes": 817231759,
+   "mtime": "2026-08-25T21:43:43",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_hier_v2_no_prior",
+   "iteration": 4000
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_hier_v2_no_prior/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_hier_v2_04500.ckpt",
+   "bytes": 817231759,
+   "mtime": "2026-08-25T23:27:34",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_hier_v2_no_prior",
+   "iteration": 4500
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_hier_v2_no_prior/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_hier_v2_05000.ckpt",
+   "bytes": 817231759,
+   "mtime": "2026-08-26T01:08:37",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_hier_v2_no_prior",
+   "iteration": 5000
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_hier_v2_no_prior/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_hier_v2_05500.ckpt",
+   "bytes": 817231759,
+   "mtime": "2026-08-26T02:51:22",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_hier_v2_no_prior",
+   "iteration": 5500
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_hier_v2_no_prior/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_hier_v2_06000.ckpt",
+   "bytes": 817231759,
+   "mtime": "2026-08-26T04:34:34",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_hier_v2_no_prior",
+   "iteration": 6000
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_hier_v2_no_prior/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_hier_v2_06500.ckpt",
+   "bytes": 817231759,
+   "mtime": "2026-08-26T06:15:57",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_hier_v2_no_prior",
+   "iteration": 6500
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_hier_v2_no_prior/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_hier_v2_07000.ckpt",
+   "bytes": 817231759,
+   "mtime": "2026-08-26T07:57:32",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_hier_v2_no_prior",
+   "iteration": 7000
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_hier_v2_no_prior/last.ckpt",
+   "bytes": 916113786,
+   "mtime": "2026-08-26T07:57:32",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_hier_v2_no_prior",
+   "iteration": "last"
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_fixedkl_v2_hier_v2/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_fixedkl_v2_hier_v2_00100.ckpt",
+   "bytes": 817241567,
+   "mtime": "2026-09-03T11:21:39",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_fixedkl_v2_hier_v2",
+   "iteration": 100
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_fixedkl_v2_hier_v2/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_fixedkl_v2_hier_v2_00200.ckpt",
+   "bytes": 817241567,
+   "mtime": "2026-09-03T11:33:28",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_fixedkl_v2_hier_v2",
+   "iteration": 200
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_fixedkl_v2_hier_v2/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_fixedkl_v2_hier_v2_00300.ckpt",
+   "bytes": 817241567,
+   "mtime": "2026-09-03T11:45:15",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_fixedkl_v2_hier_v2",
+   "iteration": 300
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_fixedkl_v2_hier_v2/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_fixedkl_v2_hier_v2_00400.ckpt",
+   "bytes": 817241567,
+   "mtime": "2026-09-03T12:00:19",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_fixedkl_v2_hier_v2",
+   "iteration": 400
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_fixedkl_v2_hier_v2/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_fixedkl_v2_hier_v2_00500.ckpt",
+   "bytes": 817241567,
+   "mtime": "2026-09-03T12:13:09",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_fixedkl_v2_hier_v2",
+   "iteration": 500
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_fixedkl_v2_hier_v2/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_fixedkl_v2_hier_v2_00600.ckpt",
+   "bytes": 817241567,
+   "mtime": "2026-09-03T12:24:34",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_fixedkl_v2_hier_v2",
+   "iteration": 600
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_fixedkl_v2_hier_v2/last.ckpt",
+   "bytes": 916113722,
+   "mtime": "2026-09-03T12:24:35",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_fixedkl_v2_hier_v2",
+   "iteration": "last"
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_hier_v2/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_hier_v2_00500.ckpt",
+   "bytes": 817233404,
+   "mtime": "2026-08-27T11:03:54",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_hier_v2",
+   "iteration": 500
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_hier_v2/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_hier_v2_01000.ckpt",
+   "bytes": 817233404,
+   "mtime": "2026-08-27T12:17:28",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_hier_v2",
+   "iteration": 1000
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_hier_v2/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_hier_v2_01500.ckpt",
+   "bytes": 817233404,
+   "mtime": "2026-08-27T13:16:48",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_hier_v2",
+   "iteration": 1500
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_hier_v2/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_hier_v2_02000.ckpt",
+   "bytes": 817233404,
+   "mtime": "2026-08-27T14:16:46",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_hier_v2",
+   "iteration": 2000
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_hier_v2/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_hier_v2_02500.ckpt",
+   "bytes": 817233404,
+   "mtime": "2026-08-27T15:17:00",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_hier_v2",
+   "iteration": 2500
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_hier_v2/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_hier_v2_03000.ckpt",
+   "bytes": 817233404,
+   "mtime": "2026-08-27T16:16:43",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_hier_v2",
+   "iteration": 3000
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_hier_v2/last.ckpt",
+   "bytes": 916113722,
+   "mtime": "2026-08-27T16:16:44",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_hier_v2",
+   "iteration": "last"
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2_00100.ckpt",
+   "bytes": 817234409,
+   "mtime": "2026-09-03T13:27:32",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2",
+   "iteration": 100
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2_00200.ckpt",
+   "bytes": 817234409,
+   "mtime": "2026-09-03T13:39:32",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2",
+   "iteration": 200
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2_00300.ckpt",
+   "bytes": 817234409,
+   "mtime": "2026-09-03T13:51:09",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2",
+   "iteration": 300
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2_00400.ckpt",
+   "bytes": 817234409,
+   "mtime": "2026-09-03T14:03:04",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2",
+   "iteration": 400
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2_00500.ckpt",
+   "bytes": 817234409,
+   "mtime": "2026-09-03T14:14:52",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2",
+   "iteration": 500
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2_00600.ckpt",
+   "bytes": 817234409,
+   "mtime": "2026-09-03T14:26:47",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2",
+   "iteration": 600
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2_00700.ckpt",
+   "bytes": 817234409,
+   "mtime": "2026-09-03T14:38:21",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2",
+   "iteration": 700
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2_00800.ckpt",
+   "bytes": 817234409,
+   "mtime": "2026-09-03T14:50:08",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2",
+   "iteration": 800
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2_00900.ckpt",
+   "bytes": 817234409,
+   "mtime": "2026-09-03T15:02:02",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2",
+   "iteration": 900
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2_01000.ckpt",
+   "bytes": 817234409,
+   "mtime": "2026-09-03T15:13:58",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2",
+   "iteration": 1000
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2_01100.ckpt",
+   "bytes": 817234409,
+   "mtime": "2026-09-03T15:25:56",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2",
+   "iteration": 1100
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2_01200.ckpt",
+   "bytes": 817234409,
+   "mtime": "2026-09-03T15:38:00",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2",
+   "iteration": 1200
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2_01300.ckpt",
+   "bytes": 817234409,
+   "mtime": "2026-09-03T15:49:38",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2",
+   "iteration": 1300
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2_01400.ckpt",
+   "bytes": 817234409,
+   "mtime": "2026-09-03T16:01:32",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2",
+   "iteration": 1400
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2_01500.ckpt",
+   "bytes": 817234409,
+   "mtime": "2026-09-03T16:13:27",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2",
+   "iteration": 1500
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2_01600.ckpt",
+   "bytes": 817234409,
+   "mtime": "2026-09-03T16:25:22",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2",
+   "iteration": 1600
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2_01700.ckpt",
+   "bytes": 817234409,
+   "mtime": "2026-09-03T16:36:49",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2",
+   "iteration": 1700
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2_01800.ckpt",
+   "bytes": 817234409,
+   "mtime": "2026-09-03T16:48:58",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2",
+   "iteration": 1800
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2_01900.ckpt",
+   "bytes": 817234409,
+   "mtime": "2026-09-03T17:00:57",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2",
+   "iteration": 1900
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2_02000.ckpt",
+   "bytes": 817234409,
+   "mtime": "2026-09-03T17:12:44",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2",
+   "iteration": 2000
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2_02100.ckpt",
+   "bytes": 817234409,
+   "mtime": "2026-09-03T17:24:50",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2",
+   "iteration": 2100
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2_02200.ckpt",
+   "bytes": 817234409,
+   "mtime": "2026-09-03T17:36:48",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2",
+   "iteration": 2200
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2_02300.ckpt",
+   "bytes": 817234409,
+   "mtime": "2026-09-03T17:48:52",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2",
+   "iteration": 2300
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2_02400.ckpt",
+   "bytes": 817234409,
+   "mtime": "2026-09-03T18:00:42",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2",
+   "iteration": 2400
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2_02500.ckpt",
+   "bytes": 817234409,
+   "mtime": "2026-09-03T18:12:52",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2",
+   "iteration": 2500
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2_02600.ckpt",
+   "bytes": 817234409,
+   "mtime": "2026-09-03T18:24:49",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2",
+   "iteration": 2600
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2_02700.ckpt",
+   "bytes": 817234409,
+   "mtime": "2026-09-03T18:36:53",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2",
+   "iteration": 2700
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2_02800.ckpt",
+   "bytes": 817234409,
+   "mtime": "2026-09-03T18:48:44",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2",
+   "iteration": 2800
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2_02900.ckpt",
+   "bytes": 817234409,
+   "mtime": "2026-09-03T19:00:40",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2",
+   "iteration": 2900
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2_03000.ckpt",
+   "bytes": 817234409,
+   "mtime": "2026-09-03T19:12:29",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2",
+   "iteration": 3000
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2/last.ckpt",
+   "bytes": 916113722,
+   "mtime": "2026-09-03T19:12:30",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_kl02_hier_v2",
+   "iteration": "last"
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_v3_hier_v3/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_v3_hier_v3_00500.ckpt",
+   "bytes": 817234007,
+   "mtime": "2026-09-03T22:55:39",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_v3_hier_v3",
+   "iteration": 500
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_v3_hier_v3/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_v3_hier_v3_01000.ckpt",
+   "bytes": 817234007,
+   "mtime": "2026-09-03T23:55:49",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_v3_hier_v3",
+   "iteration": 1000
+  },
+  {
+   "path": "data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_v3_hier_v3/last.ckpt",
+   "bytes": 916113722,
+   "mtime": "2026-09-03T23:55:50",
+   "run": "critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_v3_hier_v3",
+   "iteration": "last"
+  }
+ ]
+}

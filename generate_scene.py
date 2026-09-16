@@ -52,7 +52,7 @@ Usage (env vars from scripts/define_env_variables.sh must be set)::
     .venv/bin/python generate_scene.py --mode init_scene --conditioning null \
         --out data/scenes/base_init_scene
     .venv/bin/python generate_scene.py --mode init_adv --conditioning cond_adv_ego \
-        --ckpt data/critical_scene/<run>/<run>_00500.ckpt \
+        --ckpt data/final/advscene_rl_main/ppo-ppo_norm/last.ckpt \
         --out data/scenes/ddpo_ppo-ppo_norm_init_adv
 """
 

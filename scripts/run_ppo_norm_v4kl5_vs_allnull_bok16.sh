@@ -6,7 +6,7 @@ cd /home/tjhu78u/workspace/scenario-dreamer
 source scripts/define_env_variables.sh
 
 OUT=data/critical_scene/ppo-ppo_norm_v4kl5_vs_allnull_bok16
-CKPT=data/critical_scene/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_v4kl5_hier_v4/critical_scene_ddpo_ldm_adv_ddim_ppo-ppo_norm_v4kl5_hier_v4_00500.ckpt
+CKPT=data/final/advscene_rl_main/ppo-ppo_norm/last.ckpt
 
 .venv/bin/python scripts/run_ldm_adv_ppo_table.py \
   --out-dir "$OUT" --num-scenes 1000 --split val --seed 0 --chunk-size 32 \
