@@ -47,7 +47,7 @@ only if restored to that same path.
 | `data/critical_scene/**` (non-`.ckpt`) | 13.0 G | yes | 29 412 files: the sampled scene payloads (`artifacts/*.pt`), `summary.json`, `PROVENANCE.json`, scored `.md` tables and rollout GIFs. Not regenerable -- they are the samples themselves. |
 | `data/advscene_preprocess_waymo/` | 48 G | no | The v2 goal dataset every model trained on, and the source of `metadata/waymo_goal_val_eval_set.pkl` (43 658 GT entries). Regenerable from raw WOMD, at the cost of a full preprocessing run. |
 | `checkpoints/planners/` | 34 M | yes | Planner weights. Gitignored by `*.pt`, and three of them are Hydra defaults. |
-| `metadata/` | 128 M | partly | 169 of 174 files are tracked. The exceptions matter: see "Files that no git history holds". |
+| `metadata/` | 128 M | yes | All 174 files uploaded. 169 of them are git-tracked; the exceptions matter, see "Files that no git history holds". |
 | `data/headroom_probe/` | 2 M | yes | Context priors. Hydra defaults for eight DDPO entrypoints. |
 | `wandb/` | 1.9 G | yes | Training curves. Every RL checkpoint names its run id (see below). |
 
@@ -167,6 +167,12 @@ rclone check data/final onedrive:/Project/AdvScene/data/final --one-way
 rclone check data/final onedrive:/Project/AdvScene/data/final --one-way --download \
     --include 'advscene_rl_main/**'                # content compare, costs a download
 ```
+
+Verified on 2026-09-17: 35 of 35 checkpoints re-hashed locally with 0
+mismatches; 573 objects / 49.9 GiB on the remote with 0 differences against the
+local tree; and three round-trip downloads (`advscene_base_ae/last.ckpt` at
+362 M, uploaded in 60 M chunks, plus two tarballs) came back SHA256-identical,
+which is what establishes that the chunked transfer is byte-exact.
 
 The local check is the authoritative one: it is a full SHA256 against
 `archive/MANIFEST.json`, and it is what gated the deletions. The remote check is
