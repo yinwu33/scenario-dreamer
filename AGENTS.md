@@ -371,6 +371,67 @@ Two environment facts measured on the same box, so they are not re-derived:
   93.0 GiB even at 384 -- a one-off, so do not size the batch against it. A real
   validation pass costs only ~2 GiB over training.
 
+### Goal-aware ScenarioDreamer Base: final checkpoint and scene-quality cache
+
+The 2026-09-10 ScenarioDreamer baseline is the standard `ScenarioDreamerLDM`
+Base architecture (`num_l2l_blocks=1`) trained for exactly 150k steps with
+`cfgs/config_scenario_dreamer_goal_base_waymo.yaml`. It uses the same frozen
+9-D goal autoencoder as AdvScene, but has no conditioning and no dedicated
+adversary branch/head. The training log reports 376 M parameters and
+`Trainer.fit stopped: max_steps=150000 reached`.
+
+Final artifacts:
+
+- LDM: `data/final/scenario-dreamer/last.ckpt`, SHA256
+  `259e76a6864fe5e398e06c3652534cb24b77d9de5da53e4f5a5d88ebd3a42ab9`.
+- frozen goal AE: `data/final/advscene_base_ae/last.ckpt`, SHA256
+  `724f0e808c220a27502e10f30f5ca271d7e1c01a4cccd4abb03bca44f664f3c8`.
+- 1000-scene cache: `data/final/cache/scene/scenario-dreamer/init_scene/`.
+- isolated score row: `data/final/scene_gen/metrics_scenario_dreamer.json`;
+  the same row is merged into `data/final/scene_gen/metrics_full.json` under
+  `scenario-dreamer/init_scene`.
+
+`eval_scenario_dreamer_goal.py` is the producer. It loads checkpoint EMA weights,
+uses the 100-step DDPM `initial_scene` path, seed 0, batch size 128, and
+`metadata/initial_prob_matrix_goal_waymo.pt`. This is a distribution-level sample
+from the joint `(num_lanes, num_agents)` prior: **`metadata/val1000.json` is not
+used**. That index is only for modes backed by particular validation scenes
+(`init_agent` / `init_adv`) and must not be claimed as this cache's source.
+
+The producer writes the same 9-column `agent_states`, dense lane-connectivity and
+per-scene pickle format as AdvScene, plus a manifest. For later adversary-scoped
+rollouts it designates the nearest non-ego agent (vehicles first, the same rule as
+the log baseline), moves that agent to the final row, and records
+`ego_local_idx=0` / `adv_local_idx=last`. This is only a rollout-role designation:
+ScenarioDreamer generated all agents jointly and did not generate a special
+adversary. Pooled scene-quality metrics are invariant to this reordering.
+
+Reproduce generation and scoring from the repository root:
+
+```bash
+python eval_scenario_dreamer_goal.py \
+  --ckpt data/final/scenario-dreamer/last.ckpt \
+  --ae-ckpt data/final/advscene_base_ae/last.ckpt \
+  --out data/final/cache/scene/scenario-dreamer/init_scene \
+  --num-scenes 1000 --batch-size 128 --seed 0
+
+python scripts/score_scene_gen_table.py \
+  --caches data/final/cache/scene/scenario-dreamer/init_scene \
+  --num-samples 1000 --num-gt-samples 43658 \
+  --out data/final/scene_gen/metrics_scenario_dreamer.json
+
+python scripts/emit_scene_gen_tables.py \
+  --metrics data/final/scene_gen/metrics_full.json --out temp
+```
+
+The scorer compares against all 43,658 entries in
+`metadata/waymo_goal_val_eval_set.pkl`, prepared from
+`data/advscene_preprocess_waymo/val`. `eval_scene.py` is not the table scorer: it
+splits normal/adversary statistics and omits several goal/collision/table fields.
+The two final tables are `temp/table_scene_gen_agent.tex` and
+`temp/table_scene_gen_lane.tex`; their pre-update copies are
+`temp/table_scene_gen_{agent,lane}.pre_scenario_dreamer_20260910.tex`.
+
 ## Paper Evaluation
 
 ### The scene-validity gate (2026-09-15): every rate is conditional

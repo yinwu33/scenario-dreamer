@@ -14,6 +14,7 @@ Which summary each method comes from:
 
     Log                       scenario_log/        log@<ego>-<traffic>
     SceneControl              scenario/            scenecontrol@<ego>-<traffic>
+    Scenario Dreamer          scenario/            scenario-dreamer@<ego>-<traffic>
     AdvScene-Base null        scenario/            base_null@<ego>-<traffic>
     AdvScene-Base cond        scenario/            base@<ego>-<traffic>
     AdvScene-RL (init scene)  scenario/            main_<pair>
@@ -127,6 +128,7 @@ NARROW_T1 = [_BY_KEY[k] for k in
 ROWS = [
     ("Log (closest agent as adversary)", "scenario_log", "log@{ego}-{traffic}"),
     ("SceneControl", "scenario", "scenecontrol@{ego}-{traffic}"),
+    ("Scenario Dreamer", "scenario", "scenario-dreamer@{ego}-{traffic}"),
     ("AdvScene-Base (null)", "scenario", "base_null@{ego}-{traffic}"),
     ("AdvScene-Base (cond)", "scenario", "base@{ego}-{traffic}"),
     ("AdvScene-RL (init scene)", "scenario", "{pair}"),

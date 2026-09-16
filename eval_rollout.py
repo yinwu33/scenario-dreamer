@@ -92,9 +92,9 @@ def cache_payload(cache_dir: Path) -> tuple[dict, list[str]]:
     """Load a cache and check its adversary index against the recorded one.
 
     ``load_gen_scenes`` derives the adversary from the append-last ordering;
-    ``generate_scene.py`` also writes it explicitly. They agree by construction,
-    so a mismatch means the cache was written by something else and the rollout
-    would silently score the wrong agent."""
+    compatible generators also write it explicitly. They agree by construction,
+    so a mismatch means the cache violates the format and the rollout would
+    silently score the wrong agent."""
     files = list_gen_scene_files(cache_dir)
     scenes, kept = load_gen_scenes(cache_dir, range(len(files)), files=files)
     derived = scenes.adv_local_idx.numpy()

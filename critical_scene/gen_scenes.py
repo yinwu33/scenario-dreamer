@@ -2,10 +2,10 @@
 
 The "Scene Initialization = generated" rows of the SUT x scene-initialization
 table. A cache is whatever ``utils.data_helpers.convert_batch_to_scenarios``
-wrote with ``cache_samples=True`` -- e.g. the 10k unconditional ldm_adv-base
-samples of ``eval.py --config-name config_ldm_adv_base ldm_adv.eval.mode=init_scene``
--- so this loader is per *format*, not per model, and a new checkpoint's cache
-is a new ``benchmark.gen_dirs`` entry rather than new code.
+wrote with ``cache_samples=True`` -- e.g. the unconditional ldm_adv-base samples
+or the goal-aware ScenarioDreamer samples from ``eval_scenario_dreamer_goal.py``
+-- so this loader is per *format*, not per model, and a new checkpoint's cache is
+a new ``benchmark.gen_dirs`` entry rather than new code.
 
 The cache is already sim-ready, which is why nothing here resembles the log
 loader's preparation step:
@@ -102,10 +102,11 @@ def load_gen_scenes(
     cannot be rolled out and is skipped, so the caller must label per-scene
     results with ``kept_indices`` rather than ``indices``.
 
-    The adversary is always the LAST agent of each scene (``convert_batch_to_scenarios``
-    appends the ``adv`` node after the base set); the cache records no marker, so
-    that ordering is the only handle and it holds only for caches written by a
-    model with an adversary branch.
+    The rollout-designated adversary is always the LAST agent of each scene.
+    AdvScene obtains that order by appending its dedicated ``adv`` node;
+    ``eval_scenario_dreamer_goal.py`` obtains it by moving the closest non-ego
+    agent (vehicles first) to the tail. The cache records the local index too,
+    but the ordering remains the loader's format-level contract.
     """
     paths = list(files) if files is not None else list_gen_scene_files(sample_dir)
 
