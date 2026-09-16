@@ -1,0 +1,54 @@
+# @package _global_
+#
+# `hierarchical_v4` with the PROXIMITY level removed. Ablation arm for the
+# reward leave-one-out table on ppo-ppo_norm; every other value is v4's, so a
+# diff of the two yamls shows only `prox_hi` and the run tag.
+#
+#   invalid  ->  ego-fault collision  ->  min TTC_ego  ->  (d_min, worth 0)
+#
+# `prox_hi: 0.0` makes `r_prox = prox_hi * g_d` identically zero, so every tier1
+# scene scores exactly 0 instead of `0.3 * g_d`. The level still exists
+# structurally -- `np.select`'s default still routes there -- it just pays
+# nothing, which is what "no proximity reward" means. The ordering assertions in
+# HierarchicalV4RewardConfig.__post_init__ still hold (`prox_hi <= ttc_lo` is
+# `0.0 <= 0.4`), so no code changes.
+#
+# What it tests: v3's docstring argues `d_min` is needed because the relative
+# form is farmable and absolute distance alone is farmable the other way, so the
+# level carries the early gradient before a policy can reach the TTC band. This
+# arm asks whether that early gradient matters by iteration 500.
+#
+# Risk: with tier1 pinned at exactly 0, within-group contrast comes only from
+# the rarer tier2/tier3 samples. Screen with scripts/reward_screen.py before
+# training -- a group whose std falls under `algo.group_skip_std` is degenerate.
+#
+#   python train.py --config-name config_ldm_adv_ddpo ddpo/reward=hierarchical_v4_noprox
+ddpo:
+  reward_run_tag: "_hier_v4_noprox"
+  simulator:
+    path_conflict:
+      conflict_dist: 14.0
+      speed_floor: 1.0
+      follow_cos: 1.1
+      follow_lane_tol: 2.0
+      skip_rollout: true
+  reward:
+    name: hierarchical_v4
+    ttc_tau: 3.0
+    hard_collision_t: 1.0
+    d_near: 2.0
+    d_far: 20.0
+    close_delta: 1.0
+    r_invalid: -1.0
+    r_collision: 1.0
+    ttc_lo: 0.4
+    ttc_hi: 0.85
+    # THE ablation: the proximity level pays nothing.
+    prox_hi: 0.0
+    lane_soft: 1.75
+    lane_hard: 2.75
+    lane_penalty: 0.0
+    collision_warmup: 0.75
+    collision_window: 0.5
+    trivial_collision_t: 0.75
+    invalid_grade_scale: 10.0

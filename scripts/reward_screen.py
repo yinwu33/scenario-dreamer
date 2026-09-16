@@ -126,6 +126,11 @@ def _variant_overlays(base_it: int) -> dict[str, dict]:
         "hierarchical_v5":     "yaml:hierarchical_v5",
         "hierarchical_v6":     "yaml:hierarchical_v6",
         "hierarchical_v7":     "yaml:hierarchical_v7",
+        # v4 leave-one-out arms. The TTC one is the reason to screen at all:
+        # v4's TTC band is what holds ~9% of samples and supplies the
+        # within-group contrast, so removing it may leave no gradient.
+        "hierarchical_v4_noprox": "yaml:hierarchical_v4_noprox",
+        "hierarchical_v4_nottc":  "yaml:hierarchical_v4_nottc",
     }
 
 

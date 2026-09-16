@@ -1,0 +1,60 @@
+# @package _global_
+#
+# `hierarchical_v4` with the TTC level removed. Ablation arm for the reward
+# leave-one-out table on ppo-ppo_norm; every other value is v4's, so a diff of
+# the two yamls shows only `ttc_tau` and the run tag.
+#
+#   invalid  ->  ego-fault collision  ->  d_min
+#
+# HOW. `terms.ttc_grade` is `clip(1 - ttc/tau, 0, 1)` with no guard on `tau`, so
+# `ttc_tau: 1.0e-6` gives `g_ttc = 0` for any finite TTC. Then
+# `tier2 = valid & admitted & ~tier3 & (g_ttc > 0.0)` is empty and those scenes
+# fall through `np.select`'s `default=r_prox` to the d_min level -- which is
+# exactly what removing the band should do, rather than parking them at a
+# constant. `ttc_lo` / `ttc_hi` keep their v4 values so the ordering assertions
+# in __post_init__ are untouched; they are simply unreachable.
+#
+# WHY THIS ARM EXISTS. The paper's headline metric is P(minTTC_ego < 3s) and v4
+# pays a band on exactly that quantity, so "you optimise minTTC and report
+# minTTC" is a circularity a reviewer will raise. This arm answers it: if the
+# TTC gain survives without the band, the band is not what produced it.
+#
+# RISK, and why this must be screened first. v4's own docstring argues the TTC
+# level is what supplies GRPO's within-group contrast -- it holds ~9% of samples
+# while the fault-collision level is nearly empty. Removing it may leave
+# `invalid / d_min / rare fault collision` with no usable gradient, the same
+# failure shape as the kl_target=0 collapse. Screen with
+# scripts/reward_screen.py before spending the run; a degenerate screen is
+# itself the result ("the TTC band is load-bearing") and costs far less.
+#
+#   python train.py --config-name config_ldm_adv_ddpo ddpo/reward=hierarchical_v4_nottc
+ddpo:
+  reward_run_tag: "_hier_v4_nottc"
+  simulator:
+    path_conflict:
+      conflict_dist: 14.0
+      speed_floor: 1.0
+      follow_cos: 1.1
+      follow_lane_tol: 2.0
+      skip_rollout: true
+  reward:
+    name: hierarchical_v4
+    # THE ablation: g_ttc collapses to 0, so the TTC band is unreachable and
+    # near misses fall to d_min. Not 0.0 -- ttc_grade divides by tau.
+    ttc_tau: 1.0e-6
+    hard_collision_t: 1.0
+    d_near: 2.0
+    d_far: 20.0
+    close_delta: 1.0
+    r_invalid: -1.0
+    r_collision: 1.0
+    ttc_lo: 0.4
+    ttc_hi: 0.85
+    prox_hi: 0.3
+    lane_soft: 1.75
+    lane_hard: 2.75
+    lane_penalty: 0.0
+    collision_warmup: 0.75
+    collision_window: 0.5
+    trivial_collision_t: 0.75
+    invalid_grade_scale: 10.0
