@@ -44,7 +44,7 @@ Three things worth knowing before using any path in this document:
   `state_dict`s differ in 0 of 197 tensors, and `last.ckpt` also carries the
   `ddpo` block (`it`, `kl_coef`, `base_ckpt`, `wandb_id`). The KL-sweep runs
   stopped at iteration 1000, not 500.
-- **Off-machine copy: `onedrive:/Project/AdvScene/`.** There is no second local
+- **Off-machine copy: `onedrive:/Projects/P04_AdvScene/`.** There is no second local
   disk. `requirements.lock.txt` pins the environment that produced all of this.
 
 ## Setup Commands

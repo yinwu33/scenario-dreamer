@@ -7,13 +7,13 @@ produced. This file plus `archive/` is that record. It exists so that the
 checkpoints and caches deleted here can be told apart from the ones that were
 lost, and so that anything still needed can be either found or rebuilt.
 
-Off-machine copy: `onedrive:/Project/AdvScene/`. There is no second local disk;
+Off-machine copy: `onedrive:/Projects/P04_AdvScene/`. There is no second local disk;
 `/home` is the only other copy.
 
 ## What is on OneDrive, and why some of it is tarred
 
 ```
-onedrive:/Project/AdvScene/
+onedrive:/Projects/P04_AdvScene/
   data/final/<model>/last.ckpt     the 35 checkpoints, loose and individually fetchable
   data/final/{scene_gen,table_main,table_main_valid,planners}/   the tables, loose
   tarballs/data_final_cache.tar.zst          100 564 files -> 549 M
@@ -178,8 +178,8 @@ needs to show what changed.
 
 ```bash
 python scripts/archive_manifest.py --verify        # re-hash all 35 checkpoints
-rclone check data/final onedrive:/Project/AdvScene/data/final --one-way
-rclone check data/final onedrive:/Project/AdvScene/data/final --one-way --download \
+rclone check data/final onedrive:/Projects/P04_AdvScene/data/final --one-way
+rclone check data/final onedrive:/Projects/P04_AdvScene/data/final --one-way --download \
     --include 'advscene_rl_main/**'                # content compare, costs a download
 ```
 
