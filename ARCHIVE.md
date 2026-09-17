@@ -153,11 +153,26 @@ reason; none of them is recoverable from a clone.
 - `metadata/initial_prob_matrix_goal_waymo.pt`, `metadata/waymo_goal_val_eval_set.pkl`
   -- gitignored by `*.pt` / `*.pkl`, yet Hydra defaults in four configs.
   Regenerable, but only while `data/advscene_preprocess_waymo/` survives.
-- `temp/` -- per AGENTS.md this holds the current scene-gen tables.
+- `temp/` -- **this is where the paper's final tables live**, not
+  `research/results/`. `table_main_final_{original,remove_collid,collid_1s}.tex`
+  (2026-09-15), `table_scene_gen_{agent,lane}.tex` (2026-09-15) and
+  `table_ablation_filled_coll_1s.tex`, plus dated `.pre_*` snapshots of each.
+  Uploaded, and regenerable anyway from `data/final/cache` with the emit scripts,
+  which are tracked.
 - `research/` -- gitignored here. `research/overleaf/` is its own git repo with
-  an Overleaf remote, so it is covered by that remote. **`research/results/` has
-  a `.gitignore` of `*` and is in no git history at all**, and unlike the entries
-  above it was not uploaded. It is the one real gap left.
+  an Overleaf remote, so it is covered by that remote.
+
+`research/results/` is in no git history either, and was deliberately NOT
+uploaded, because it is superseded rather than unique. Everything in it predates
+the 2026-09-04 sim boundary: `table_main.tex` (2026-08-26) was produced from
+`..._ppo-ppo_hier_v2_no_prior/last.ckpt` at iteration 7000 per its own `TODO.md`,
+i.e. a `hier_v2` checkpoint this document declares void and whose weights were
+deleted in tier 1; `table_ppo_selfplay.tex` names
+`data/critical_scene/planner_selfplay_20260902/` as its source, which
+`planner_selfplay_val1000_20260910/` replaced. Archiving it would have preserved
+numbers that must not be quoted. Both of its source roots are still on disk and
+in the critical_scene tarball, so the old tables can be rebuilt if anyone ever
+needs to show what changed.
 
 ## Verifying the archive
 
