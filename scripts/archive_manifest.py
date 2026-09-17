@@ -13,7 +13,14 @@ checkpoints carry ``global_step``/``epoch`` instead. Nothing here is transcribed
 by hand.
 
     .venv/bin/python scripts/archive_manifest.py
-    .venv/bin/python scripts/archive_manifest.py --verify   # re-check the hashes
+    .venv/bin/python scripts/archive_manifest.py --verify   # re-check the local copies
+    .venv/bin/python scripts/archive_manifest.py --remote onedrive:/Projects/P04_AdvScene
+
+``--remote`` is the one that still works after the local copies are deleted. It
+streams each checkpoint back with ``rclone cat`` and hashes the stream, so it
+needs no scratch space and, unlike ``rclone check``, it compares CONTENT -- this
+OneDrive remote exposes no hash to rclone, so a plain check only sees size and
+modification time.
 """
 
 from __future__ import annotations
@@ -21,6 +28,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import subprocess
 from pathlib import Path
 
 import torch
@@ -42,6 +50,19 @@ def sha256(path: Path, buf: int = 16 << 20) -> str:
     return h.hexdigest()
 
 
+def sha256_remote(remote: str, rel: str, buf: int = 16 << 20) -> str:
+    """Hash a remote file by streaming it, so no local copy is needed."""
+    proc = subprocess.Popen(["rclone", "cat", f"{remote}/{rel}"],
+                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    h = hashlib.sha256()
+    while (chunk := proc.stdout.read(buf)):
+        h.update(chunk)
+    proc.stdout.close()
+    if proc.wait() != 0:
+        raise SystemExit(f"rclone cat failed for {rel}")
+    return h.hexdigest()
+
+
 def provenance(path: Path) -> dict:
     """What the checkpoint says about its own training run."""
     ck = torch.load(path, map_location="cpu", weights_only=False)
@@ -56,18 +77,22 @@ def provenance(path: Path) -> dict:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--verify", action="store_true",
-                    help="re-hash against the existing manifest instead of writing one")
+                    help="re-hash the local copies against the existing manifest")
+    ap.add_argument("--remote", metavar="RCLONE_PATH",
+                    help="hash the copies under this rclone path instead, by streaming them")
     args = ap.parse_args()
 
     out_json, out_sha = FINAL / "MANIFEST.json", FINAL / "MANIFEST.sha256"
-    if args.verify:
-        known = {e["path"]: e["sha256"] for e in json.loads(out_json.read_text())["checkpoints"]}
+    if args.verify or args.remote:
+        manifest = out_json if out_json.exists() else ROOT / "archive" / "MANIFEST.json"
+        known = {e["path"]: e["sha256"] for e in json.loads(manifest.read_text())["checkpoints"]}
         bad = 0
         for rel, want in sorted(known.items()):
-            got = sha256(ROOT / rel)
+            got = sha256_remote(args.remote, rel) if args.remote else sha256(ROOT / rel)
             bad += got != want
-            print(f"{'OK  ' if got == want else 'FAIL'}  {rel}")
-        print(f"\n{len(known)} checked, {bad} mismatched")
+            print(f"{'OK  ' if got == want else 'FAIL'}  {rel}", flush=True)
+        where = args.remote if args.remote else "local"
+        print(f"\n{len(known)} checked against {where}, {bad} mismatched")
         return 1 if bad else 0
 
     ckpts = []
