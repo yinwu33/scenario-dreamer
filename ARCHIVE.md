@@ -22,6 +22,15 @@ onedrive:/Projects/P04_AdvScene/
   tarballs/data_final_backups.tar.zst            281 files ->  11 M
   tarballs/critical_scene_artifacts.tar.zst   29 491 entries -> 10 G
   tarballs/wandb.tar.zst                       1 624 entries -> 384 M
+  tarballs/advscene_preprocess_waymo.tar.zst 531 092 files   -> 12 G
+  tarballs/slurm_logs.tar.zst                  1 594 files   ->  14 M
+  tarballs/sd_ldm_large_fair10k_samples.tar.zst 10 000 files ->  50 M
+  tarballs/checkpoints_embedded_wandb.tar.zst  4 785 entries -> 368 M
+  tarballs/data_misc.tar.zst                  25 002 entries -> 123 M
+  tarballs/logs_and_diagnostics.tar.zst         131 entries -> 586 K  (lightning_logs/, logs/, test_scripts/*.py)
+  data/headroom_probe/, data/reward_screen/  loose
+  data/checkpoints/{SceneControl,ctrl_sim_waymo_1M_steps}/last.ckpt   loose
+  temp_scripts/*.py                          13 one-off scripts, loose
   checkpoints/planners/, metadata/, temp/, archive/, ARCHIVE.md, AGENTS.md
 ```
 
@@ -45,11 +54,18 @@ only if restored to that same path.
 | --- | ---: | --- | --- |
 | `data/final/` | 42 G | yes | The curated archive. 35 checkpoints + every cache and table the paper's numbers come from. |
 | `data/critical_scene/**` (non-`.ckpt`) | 13.0 G | yes | 29 412 files: the sampled scene payloads (`artifacts/*.pt`), `summary.json`, `PROVENANCE.json`, scored `.md` tables and rollout GIFs. Not regenerable -- they are the samples themselves. |
-| `data/advscene_preprocess_waymo/` | 48 G | no | The v2 goal dataset every model trained on, and the source of `metadata/waymo_goal_val_eval_set.pkl` (43 658 GT entries). Regenerable from raw WOMD, at the cost of a full preprocessing run. |
+| `data/advscene_preprocess_waymo/` | 48 G | yes (tarball) | The v2 goal dataset every model trained on, and the source of `metadata/waymo_goal_val_eval_set.pkl` (43 658 GT entries). Nominally regenerable from raw WOMD, but **the raw Waymo source is not on this machine**, so in practice the tarball is the only copy. |
+| `data/checkpoints/SceneControl/last.ckpt` | 6.4 G | yes | The SceneControl baseline's model. Its scenes and scores were already archived; the model was not, and recreating it is a 187k-step run. |
+| `data/checkpoints/ctrl_sim_waymo_1M_steps/last.ckpt` | 84 M | yes | The CtRL-Sim behavior-driven baseline, a Hydra default for the `ctrl_sim` / `ctrl_sim_adv` planners. |
+| `slurm_logs/` | 238 M | yes (tarball) | The resolved Hydra config of every training run. |
+| `temp_scripts/*.py` | 70 K | yes | 13 one-off scripts, gitignored. Not disposable: `emit_table_main_final_tex.py` and `emit_planner_selfplay_tex.py` emit paper tables, `repair_scenecontrol_lane_order.py` is the fix behind `scenecontrol/init_agent.broken_lane_order_20260911/`, and `diag_ae_reconstruction_ceiling.py` is the measurement behind the 0.35% AE ceiling. The 434 M Waymo shard beside them was not uploaded. |
 | `checkpoints/planners/` | 34 M | yes | Planner weights. Gitignored by `*.pt`, and three of them are Hydra defaults. |
 | `metadata/` | 128 M | yes | All 174 files uploaded. 169 of them are git-tracked; the exceptions matter, see "Files that no git history holds". |
 | `data/headroom_probe/` | 2 M | yes | Context priors. Hydra defaults for eight DDPO entrypoints. |
-| `wandb/` | 1.9 G | yes | Training curves. Every RL checkpoint names its run id (see below). |
+| `wandb/` | 1.9 G | yes (tarball) | Training curves of the DDPO runs. Every RL checkpoint names its run id (see below). |
+| `data/checkpoints/*/wandb/` | 1.9 G | yes (tarball) | 14 more wandb runs that exist ONLY here, not in `wandb/`: the training curves of the goal AE, the LDM base, SceneControl and the ScenarioDreamer baseline. The SceneControl val_loss analysis in AGENTS.md is read from these. |
+| `data/reward_screen/` | 1.5 M | yes | The reward-variant screens. |
+| `data/adv_scene_ldm_adv_base/`, `data/scene_gen_table{,_kl}/` | 800 M | yes (tarball) | A generated scene cache that is a Hydra default of `config_planner_matrix`, and the two scene-gen roots `data/final/scene_gen/` superseded. |
 
 `data/checkpoints/` (45 G) is kept but is **not** the archive: every checkpoint in
 it that a result depends on is duplicated into `data/final/`, verified by SHA256.
@@ -153,6 +169,13 @@ reason; none of them is recoverable from a clone.
 - `metadata/initial_prob_matrix_goal_waymo.pt`, `metadata/waymo_goal_val_eval_set.pkl`
   -- gitignored by `*.pt` / `*.pkl`, yet Hydra defaults in four configs.
   Regenerable, but only while `data/advscene_preprocess_waymo/` survives.
+- `temp_scripts/*.py` -- 13 one-off scripts, gitignored and so in no clone.
+  `emit_table_main_final_tex.py` and `emit_planner_selfplay_tex.py` EMIT PAPER
+  TABLES; `repair_scenecontrol_lane_order.py` is the fix behind
+  `scenecontrol/init_agent.broken_lane_order_20260911`; and
+  `diag_ae_reconstruction_ceiling.py` is what measured the 0.35% AE ceiling.
+  Uploaded. The 454 M `training.tfrecord-00000-of-01000` beside them was not --
+  it is a re-downloadable Waymo shard.
 - `temp/` -- **this is where the paper's final tables live**, not
   `research/results/`. `table_main_final_{original,remove_collid,collid_1s}.tex`
   (2026-09-15), `table_scene_gen_{agent,lane}.tex` (2026-09-15) and
@@ -177,6 +200,7 @@ needs to show what changed.
 ## Verifying the archive
 
 ```bash
+python scripts/archive_manifest.py --remote onedrive:/Projects/P04_AdvScene   # content, streamed
 python scripts/archive_manifest.py --verify        # re-hash all 35 checkpoints
 rclone check data/final onedrive:/Projects/P04_AdvScene/data/final --one-way
 rclone check data/final onedrive:/Projects/P04_AdvScene/data/final --one-way --download \
@@ -189,13 +213,20 @@ local tree; and three round-trip downloads (`advscene_base_ae/last.ckpt` at
 362 M, uploaded in 60 M chunks, plus two tarballs) came back SHA256-identical,
 which is what establishes that the chunked transfer is byte-exact.
 
-The local check is the authoritative one: it is a full SHA256 against
-`archive/MANIFEST.json`, and it is what gated the deletions. The remote check is
-weaker than it looks -- this OneDrive remote returns no usable hash to rclone
-1.60 (`hash unsupported` for both quickxor and sha1), so a plain `rclone check`
-compares size and modification time only and reports "hashes could not be
-checked". `--download` is the way to compare content, at the cost of pulling the
-bytes back.
+Re-verified on 2026-09-18, before the local copies were cleared, and this time
+every byte by CONTENT rather than size: all 37 checkpoints (the 35 in the manifest
+plus SceneControl and ctrl_sim) streamed back and SHA256-matched; all 12 tarballs
+streamed through `zstd -t`, whose frame checksums cover the decompressed content,
+so a pass means the remote tarball decompresses to exactly what was packed; and
+the 314 loose files (tables, planners, metadata, priors, scripts) compared with
+`rclone check --download`. 0 failures of any kind.
+
+`--remote` is the check that still works once the local copies are gone. It
+streams each checkpoint back with `rclone cat` and hashes the stream, so it needs
+no scratch space and it compares CONTENT. Use it in preference to `rclone check`:
+this OneDrive remote returns no usable hash to rclone 1.60 (`hash unsupported`
+for both quickxor and sha1), so a plain `rclone check` compares size and
+modification time only and says "hashes could not be checked".
 
 `SCRATCH_ROOT` and `DATASET_ROOT` are set to the relative path `data` by
 `scripts/define_env_variables.sh`, so every `${scratch_root}/...` in `cfgs/`
