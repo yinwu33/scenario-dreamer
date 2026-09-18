@@ -28,6 +28,7 @@ onedrive:/Projects/P04_AdvScene/
   tarballs/checkpoints_embedded_wandb.tar.zst  4 785 entries -> 368 M
   tarballs/data_misc.tar.zst                  25 002 entries -> 123 M
   tarballs/logs_and_diagnostics.tar.zst         131 entries -> 586 K  (lightning_logs/, logs/, test_scripts/*.py)
+  tarballs/checkpoints_samples_and_metrics.tar.zst 80 005 entries -> 334 M  (everything in data/checkpoints/ that is neither a .ckpt nor wandb)
   data/headroom_probe/, data/reward_screen/  loose
   data/checkpoints/{SceneControl,ctrl_sim_waymo_1M_steps}/last.ckpt   loose
   temp_scripts/*.py                          13 one-off scripts, loose
@@ -67,7 +68,7 @@ only if restored to that same path.
 | `data/reward_screen/` | 1.5 M | yes | The reward-variant screens. |
 | `data/adv_scene_ldm_adv_base/`, `data/scene_gen_table{,_kl}/` | 800 M | yes (tarball) | A generated scene cache that is a Hydra default of `config_planner_matrix`, and the two scene-gen roots `data/final/scene_gen/` superseded. |
 
-`data/checkpoints/` (45 G) is kept but is **not** the archive: every checkpoint in
+`data/checkpoints/` is archived except for four `.ckpt` files: the upstream `scenario_dreamer_ldm_large_waymo` and `scenario_dreamer_autoencoder_waymo` weights (re-downloadable from the Scenario Dreamer release) and the two `backup.ckpt` autosaves that differ from their `last.ckpt` (superseded mid-training states). It was never the archive itself: every checkpoint in
 it that a result depends on is duplicated into `data/final/`, verified by SHA256.
 
 ## Checkpoint provenance
